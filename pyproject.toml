@@ -6,17 +6,16 @@ authors = [
 ]
 description = "Spaces. Develop on the distribution of your choice, securely."
 readme = "readme.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = {text = "AGPL-3.0-or-later"}
 classifiers = [
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Operating System :: POSIX :: Linux",
 ]
 
 dependencies = [
-  "PyYAML>=6.0.1",
   "rich>=13.5.2",
 ]
 
