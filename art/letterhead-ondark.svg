@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+
+<svg
+   width="3590.1411"
+   height="1037.9214"
+   viewBox="0 0 949.89157 274.61672"
+   version="1.1"
+   id="svg1"
+   xmlns:xlink="http://www.w3.org/1999/xlink"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <defs
+     id="defs1">
+    <linearGradient
+       id="swatch37">
+      <stop
+         style="stop-color:#e6e6e6;stop-opacity:1;"
+         offset="0"
+         id="stop37" />
+    </linearGradient>
+    <linearGradient
+       id="swatch32">
+      <stop
+         style="stop-color:#262626;stop-opacity:1;"
+         offset="0"
+         id="stop32" />
+    </linearGradient>
+    <linearGradient
+       id="swatch33">
+      <stop
+         style="stop-color:#ffffff;stop-opacity:1;"
+         offset="0"
+         id="stop33" />
+    </linearGradient>
+    <linearGradient
+       id="swatch6"
+       gradientTransform="matrix(0.23576955,0,0,0.23576955,163.43554,-16.221542)"
+       x1="0"
+       y1="0"
+       x2="1"
+       y2="0"
+       gradientUnits="objectBoundingBox"
+       spreadMethod="pad">
+      <stop
+         style="stop-color:#151537;stop-opacity:1;"
+         offset="0"
+         id="stop15" />
+    </linearGradient>
+    <linearGradient
+       id="swatch4"
+       gradientTransform="matrix(0.99448354,0,0,0.99448354,1228.0548,-2.5253346)">
+      <stop
+         style="stop-color:#dbdbf1;stop-opacity:1;"
+         offset="0"
+         id="stop5" />
+    </linearGradient>
+    <linearGradient
+       xlink:href="#swatch33"
+       id="linearGradient33"
+       x1="877.91394"
+       y1="184.67471"
+       x2="1137.965"
+       y2="184.67471"
+       gradientUnits="userSpaceOnUse"
+       gradientTransform="matrix(0.90287753,0,0,0.90287753,287.3482,-28.594069)" />
+  </defs>
+  <g
+     id="layer2"
+     transform="translate(-390.31763,1.1921453)">
+    <path
+       id="rect1-3"
+       style="display:inline;fill:url(#linearGradient33);stroke-width:1.18089;stroke-miterlimit:5.2"
+       d="m 1215.0813,20.417228 c -11.4174,0 -20.6092,9.191694 -20.6092,20.60919 v 21.761923 h -43.0663 c -15.2233,0 -27.4792,12.255771 -27.4792,27.479101 v 45.285228 h -21.1922 c -12.5966,0 -22.7374,10.14083 -22.7374,22.73739 v 74.84395 c 0,12.59656 10.1408,22.73791 22.7374,22.73791 h 74.8445 c 12.5966,0 22.7376,-10.14135 22.7376,-22.73791 v -21.49444 h 44.9824 c 15.2235,0 27.4792,-12.25523 27.4792,-27.47856 v -43.42455 h 21.4041 c 11.4175,0 20.6092,-9.19169 20.6092,-20.60918 V 41.026418 c 0,-11.417496 -9.1917,-20.60919 -20.6092,-20.60919 z m 14.0591,17.674255 h 50.9827 c 9.4147,0 16.9941,7.579315 16.9941,16.994038 v 50.982119 c 0,9.41472 -7.5794,16.99458 -16.9941,16.99458 h -7.345 V 90.267442 c 0,-15.22333 -12.2557,-27.479101 -27.4792,-27.479101 h -33.1525 v -7.70282 c 0,-9.414723 7.5793,-16.994038 16.994,-16.994038 z m -63.4176,47.555444 h 65.2591 c 10.4914,0 18.9376,8.446145 18.9376,18.937483 v 65.25908 c 0,10.49134 -8.4462,18.9375 -18.9376,18.9375 h -65.2591 c -10.4913,0 -18.9375,-8.44616 -18.9375,-18.9375 v -65.25908 c 0,-10.491338 8.4462,-18.937483 18.9375,-18.937483 z m -50.0383,69.278393 h 8.2421 v 29.23569 c 0,15.22333 12.2559,27.47856 27.4792,27.47856 h 29.5379 v 8.54482 c 0,9.03836 -7.2766,16.3149 -16.3149,16.3149 h -48.9443 c -9.0383,0 -16.3149,-7.27654 -16.3149,-16.3149 v -48.94418 c 0,-9.03837 7.2766,-16.31489 16.3149,-16.31489 z" />
+    <text
+       xml:space="preserve"
+       style="font-style:italic;font-variant:normal;font-weight:bold;font-stretch:condensed;font-size:211.712px;font-family:'Roboto Condensed';-inkscape-font-specification:'Roboto Condensed,  Bold Italic Condensed';writing-mode:lr-tb;direction:ltr;fill:#ffffff;stroke-width:0.961067;stroke-miterlimit:5.2"
+       x="426.14532"
+       y="193.27531"
+       id="text1"
+       transform="scale(0.98169926,1.0186419)"><tspan
+         id="tspan1"
+         style="font-style:italic;font-variant:normal;font-weight:bold;font-stretch:condensed;font-family:'Roboto Condensed';-inkscape-font-specification:'Roboto Condensed,  Bold Italic Condensed';stroke-width:0.961067"
+         x="426.14532"
+         y="193.27531">SPACES</tspan></text>
+  </g>
+</svg>
