@@ -6,11 +6,30 @@
 #
 -e .
     # via -r requirements.in
-markdown-it-py==4.2.0
-    # via rich
+linkify-it-py==2.1.0
+    # via markdown-it-py
+markdown-it-py[linkify]==4.2.0
+    # via
+    #   mdit-py-plugins
+    #   rich
+    #   textual
+mdit-py-plugins==0.6.1
+    # via textual
 mdurl==0.1.2
     # via markdown-it-py
+platformdirs==4.10.1
+    # via textual
 pygments==2.20.0
-    # via rich
+    # via
+    #   rich
+    #   textual
 rich==15.0.0
+    # via
+    #   spaces
+    #   textual
+textual==8.2.8
     # via spaces
+typing-extensions==4.16.0
+    # via textual
+uc-micro-py==2.0.0
+    # via linkify-it-py

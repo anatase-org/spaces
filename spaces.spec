@@ -17,6 +17,7 @@ BuildRequires:  python3-wheel
 
 Requires:       python3
 Requires:       python3-rich
+Requires:       python3-textual
 Requires:       dnf5
 Requires:       debootstrap
 Requires:       pacstrap
