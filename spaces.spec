@@ -17,6 +17,9 @@ BuildRequires:  python3-wheel
 
 Requires:       python3
 Requires:       python3-rich
+Requires:       dnf5
+Requires:       debootstrap
+Requires:       pacstrap
 
 %description
 Spaces provide a chroot-like sandboxing environment for you to access your favorite distributions: Arch, Fedora, and Ubuntu. A simple permission system ensures your local files and credentials remain secure, even if your space is compromised. Spaces are constructed directly using packages from your chosen distribution repositories with signature enforcement. No container middleman or surprises.
@@ -29,7 +32,6 @@ Spaces provide a chroot-like sandboxing environment for you to access your favor
 
 %install
 %{python3} -m installer --destdir="%{buildroot}" dist/*.whl
-install -m644 usr/lib/udev/hwdb.d/83-%{name}.hwdb %{buildroot}%{_sysconfdir}/udev/hwdb.d/83-%{name}.hwdb
 #mkdir -p %{buildroot}%{_unitdir}
 #install -m644 usr/lib/systemd/system/%{name}@.service %{buildroot}%{_unitdir}/%{name}@.service
 #install -m644 usr/lib/systemd/system/%{name}.service %{buildroot}%{_unitdir}/%{name}.service
