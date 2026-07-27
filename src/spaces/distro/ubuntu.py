@@ -29,7 +29,7 @@ class UbuntuDistribution(Distribution):
 
     def bootstrap(self, metadata: Mapping[str, Any], rootfs: Path) -> None:
         version = str(metadata["version"])
-        print(_("Bootstrapping Ubuntu {version}...", version=version), flush=True)
+        print(_("Bootstrapping Ubuntu {version}...", version=RELEASES.get(version, version)), flush=True)
         subprocess.run(self.command(metadata, rootfs), check=True)
         print(
             _(

@@ -86,7 +86,7 @@ class PrivilegedTests(unittest.TestCase):
         self.assertEqual(
             print_output.call_args_list,
             [
-                mock.call("Bootstrapping Ubuntu resolute...", flush=True),
+                mock.call("Bootstrapping Ubuntu Resolute (26.04)...", flush=True),
                 mock.call(
                     "Adding additional packages:\nssh, python3, nano",
                     flush=True,
