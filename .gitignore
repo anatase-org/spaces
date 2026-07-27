@@ -1,2 +1,5 @@
 venv
+*.egg-
+test
+*.pyc
 *.egg-info

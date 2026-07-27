@@ -16,3 +16,5 @@ Spaces does not currently accept external contributions. You are welcome to post
 ## License
 
 A copy of Spaces is provided to you under the terms of [GNU Affero General Public License v3.0 or later](LICENSE).
+
+The files under `./art/distros` and `./src/spaces/overlay` are used as identifiers to their respective distributions with no implication of association or affiliation to their respective communities or companies.
