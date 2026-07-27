@@ -43,8 +43,17 @@ class CoreTests(unittest.TestCase):
             (home / "file.txt").write_text("not a folder")
             (home / "linked").symlink_to(home / "Documents", target_is_directory=True)
             self.assertEqual(
-                core.discover_home_folders(home), ["Documents", "Projects"]
+                core.discover_home_folders(home),
+                ["Documents", "Downloads", "Projects"],
             )
+
+    def test_new_space_defaults(self) -> None:
+        network, selected_home = core.defaults_from_info(
+            None,
+            core.Identity(1000, 1000, Path("/home/user")),
+        )
+        self.assertEqual(network, "basic")
+        self.assertEqual(selected_home, ["Projects", "Downloads"])
 
     def test_space_name_validation(self) -> None:
         self.assertEqual(core.validate_space_name("project-1"), "project-1")

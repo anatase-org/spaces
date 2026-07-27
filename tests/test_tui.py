@@ -2,19 +2,27 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from textual.widgets import RadioSet, SelectionList
+from textual.widgets import Button, Footer, Header, RadioSet, SelectionList
 
-from spaces.tui import PermissionWizard
+from spaces.tui import (
+    CleanRadioButton,
+    FolderSelectionList,
+    NamePrompt,
+    PermissionForm,
+    ask_custom_name,
+    run_permission_wizard,
+)
 
 
 class TuiTests(unittest.IsolatedAsyncioTestCase):
-    async def test_initial_values_and_steps(self) -> None:
-        app = PermissionWizard(
+    async def test_initial_values_and_step_progress(self) -> None:
+        app = PermissionForm(
             home=Path("/home/user"),
-            folders=["Documents", "Projects"],
+            folders=["Documents", "Downloads", "Projects"],
             network="advanced",
-            selected_home=["Projects"],
+            selected_home=["Downloads", "Projects"],
             include_system=True,
             distribution_title="Ubuntu version",
             distribution_description="Choose the Ubuntu release to bootstrap.",
@@ -27,22 +35,84 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
         )
         async with app.run_test() as pilot:
             await pilot.pause()
-            self.assertEqual(app.steps, ["system", "user", "distribution"])
             self.assertEqual(
                 app.query_one("#network", RadioSet).pressed_button.id,
                 "network-advanced",
             )
+            for radio in app.query(CleanRadioButton):
+                rendered = radio.render().plain
+                self.assertNotIn("▐", rendered)
+                self.assertNotIn("▌", rendered)
             self.assertEqual(
                 app.query_one("#distribution-option", RadioSet).pressed_button.id,
                 "option-noble",
             )
             self.assertEqual(
                 app.query_one("#home-folders", SelectionList).selected,
-                ["Projects"],
+                ["Projects", "Downloads"],
             )
+            self.assertEqual(app.steps, ["system", "user", "distribution"])
+            self.assertTrue(app.native_ansi_color)
+            self.assertTrue(
+                all(button.region.height == 1 for button in app.query(Button))
+            )
+            self.assertTrue(
+                all(button.region.width < 16 for button in app.query(Button))
+            )
+            self.assertEqual(
+                str(app.query_one("#step-title").render()),
+                "System permissions (1/3)",
+            )
+            self.assertEqual(
+                sum(not step.has_class("hidden") for step in app.query(".step")),
+                1,
+            )
+            await pilot.hover("#next")
+            await pilot.click("#next")
+            await pilot.pause()
+            self.assertEqual(
+                str(app.query_one("#step-title").render()),
+                "User permissions (2/3)",
+            )
+            folders = app.query_one("#home-folders", FolderSelectionList)
+            self.assertEqual(
+                [
+                    folders.get_option_at_index(index).value
+                    for index in range(folders.option_count)
+                ],
+                ["Projects", "Downloads", "Documents"],
+            )
+            markers = [
+                "".join(segment.text for segment in folders.render_line(index))[0]
+                for index in range(folders.option_count)
+            ]
+            self.assertEqual(markers, ["■", "■", "□"])
+            selected_radio = app.query_one(
+                "#network", RadioSet
+            ).pressed_button.get_component_rich_style("toggle--button")
+            selected_folder = folders.get_component_rich_style(
+                "selection-list--button-selected"
+            )
+            self.assertEqual(selected_folder.color, selected_radio.color)
+            self.assertEqual(
+                sum(not step.has_class("hidden") for step in app.query(".step")),
+                1,
+            )
+            await pilot.hover("#next")
+            await pilot.click("#next")
+            await pilot.pause()
+            self.assertEqual(
+                str(app.query_one("#step-title").render()),
+                "Distribution settings (3/3)",
+            )
+            self.assertEqual(str(app.query_one("#next").label), "Create")
+            self.assertEqual(len(app.query(Header)), 0)
+            self.assertEqual(len(app.query(Footer)), 0)
+            self.assertFalse(app.ENABLE_COMMAND_PALETTE)
+            self.assertNotIn("ctrl+q", app._bindings.key_to_bindings)
 
-    async def test_user_only_has_one_step(self) -> None:
-        app = PermissionWizard(
+    async def test_user_only_omits_system_controls(self) -> None:
+        app = PermissionForm(
             home=Path("/home/user"),
             folders=["Projects"],
             network="basic",
@@ -56,9 +126,40 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
         )
         async with app.run_test() as pilot:
             await pilot.pause()
-            self.assertEqual(app.steps, ["user"])
             self.assertEqual(app._result(), {"home": ["Projects"]})
+            self.assertEqual(len(app.query("#network")), 0)
+            self.assertEqual(
+                str(app.query_one("#step-title").render()),
+                "User permissions (1/1)",
+            )
             self.assertEqual(str(app.query_one("#next").label), "Configure")
+
+    async def test_ctrl_c_cancels(self) -> None:
+        app = PermissionForm(
+            home=Path("/home/user"),
+            folders=["Projects"],
+            network="basic",
+            selected_home=[],
+            include_system=False,
+            distribution_title="",
+            distribution_description="",
+            distribution_options=[],
+            distribution_value=None,
+        )
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+c")
+        self.assertIsNone(app.return_value)
+
+    def test_name_prompt_runs_inline(self) -> None:
+        with mock.patch.object(NamePrompt, "run", return_value="work") as run:
+            self.assertEqual(ask_custom_name(), "work")
+        run.assert_called_once_with(inline=True)
+
+    def test_permission_form_runs_inline(self) -> None:
+        with mock.patch("spaces.tui.PermissionForm") as form:
+            form.return_value.run.return_value = None
+            self.assertIsNone(run_permission_wizard())
+        form.return_value.run.assert_called_once_with(inline=True)
 
 
 if __name__ == "__main__":

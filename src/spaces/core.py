@@ -19,6 +19,7 @@ STATE_ROOT = Path("/var/lib/spaces")
 KNOWN_DISTRIBUTIONS = KNOWN_IDS
 RESERVED_NAMES = frozenset(KNOWN_DISTRIBUTIONS)
 NETWORK_LEVELS = ("basic", "advanced", "admin")
+DEFAULT_HOME_FOLDERS = ("Projects", "Downloads")
 SPACE_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
 
 
@@ -97,9 +98,9 @@ def validate_home_name(name: object) -> str:
 
 
 def discover_home_folders(home: Path) -> list[str]:
-    """Find visible, immediate real directories and always offer Projects."""
+    """Find visible, immediate real directories and offer common defaults."""
 
-    names = {"Projects"}
+    names = set(DEFAULT_HOME_FOLDERS)
     try:
         for entry in home.iterdir():
             if (
@@ -250,7 +251,7 @@ def defaults_from_info(
     info: Mapping[str, Any] | None, identity: Identity
 ) -> tuple[str, list[str]]:
     network = "basic"
-    selected_home = ["Projects"]
+    selected_home = list(DEFAULT_HOME_FOLDERS)
     if not info:
         return network, selected_home
 
