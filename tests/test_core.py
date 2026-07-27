@@ -29,7 +29,6 @@ class CoreTests(unittest.TestCase):
             ),
             [
                 "debootstrap",
-                "--include=ssh,python3,nano",
                 "noble",
                 "/rootfs",
             ],

@@ -51,15 +51,35 @@ class PrivilegedTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(space.stat().st_mode), 0o755)
         self.assertEqual(stat.S_IMODE((space / "home").stat().st_mode), 0o755)
         self.assertEqual(stat.S_IMODE((space / "info.json").stat().st_mode), 0o644)
-        run.assert_called_once_with(
+        run.assert_has_calls(
             [
-                "debootstrap",
-                "--include=ssh,python3,nano",
-                "resolute",
-                str(space / "rootfs"),
-            ],
-            check=True,
+                mock.call(
+                    [
+                        "debootstrap",
+                        "resolute",
+                        str(space / "rootfs"),
+                    ],
+                    check=True,
+                ),
+                mock.call(
+                    [
+                        "chroot",
+                        str(space / "rootfs"),
+                        "/usr/bin/env",
+                        "DEBIAN_FRONTEND=noninteractive",
+                        "apt-get",
+                        "install",
+                        "--yes",
+                        "--no-install-recommends",
+                        "ssh",
+                        "python3",
+                        "nano",
+                    ],
+                    check=True,
+                ),
+            ]
         )
+        self.assertEqual(run.call_count, 2)
 
     def test_custom_does_not_bootstrap(self) -> None:
         info = core.create_info(

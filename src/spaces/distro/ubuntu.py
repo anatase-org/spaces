@@ -23,7 +23,6 @@ class UbuntuDistribution(Distribution):
         release = str(metadata["version"])
         return [
             "debootstrap",
-            f"--include={','.join(PACKAGES)}",
             release,
             str(rootfs),
         ]
@@ -31,6 +30,20 @@ class UbuntuDistribution(Distribution):
     def bootstrap(self, metadata: Mapping[str, Any], rootfs: Path) -> None:
         print(_("Bootstrapping Ubuntu into {rootfs}...", rootfs=rootfs))
         subprocess.run(self.command(metadata, rootfs), check=True)
+        subprocess.run(
+            [
+                "chroot",
+                str(rootfs),
+                "/usr/bin/env",
+                "DEBIAN_FRONTEND=noninteractive",
+                "apt-get",
+                "install",
+                "--yes",
+                "--no-install-recommends",
+                *PACKAGES,
+            ],
+            check=True,
+        )
 
 
 DISTRIBUTION = UbuntuDistribution(
