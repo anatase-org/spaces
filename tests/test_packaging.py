@@ -32,7 +32,10 @@ class PackagingTests(unittest.TestCase):
         unit = configparser.ConfigParser(interpolation=None)
         unit.read(service, encoding="utf-8")
 
-        self.assertEqual(unit["Service"]["Type"], "exec")
+        self.assertEqual(unit["Service"]["Type"], "notify")
+        self.assertEqual(unit["Service"]["NotifyAccess"], "all")
+        self.assertEqual(unit["Service"]["Delegate"], "yes")
+        self.assertEqual(unit["Service"]["SyslogIdentifier"], "spaces-%I")
         self.assertEqual(
             unit["Service"]["ExecStart"],
             "/usr/bin/spaces.priv launch %I",

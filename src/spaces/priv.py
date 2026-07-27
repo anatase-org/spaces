@@ -21,6 +21,7 @@ from typing import Any, Iterator
 from . import _
 from . import core
 from .distro import DistributionError, get_driver
+from .launch import launch
 
 
 def _root_owned_directory(path: Path) -> None:
@@ -245,10 +246,6 @@ def copy(request: dict[str, Any]) -> int:
     return completed.returncode
 
 
-def launch(space: str) -> None:
-    core.validate_space_name(space)
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="spaces.priv")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -267,8 +264,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         arguments = build_parser().parse_args(argv)
         if arguments.command == "launch":
-            launch(arguments.space)
-            return 0
+            return launch(arguments.space)
 
         payload = json.loads(arguments.payload)
         if arguments.command == "create":

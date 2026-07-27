@@ -256,15 +256,14 @@ class PrivilegedTests(unittest.TestCase):
             check=False,
         )
 
-    def test_launch_validates_name_without_touching_state(self) -> None:
+    def test_launch_return_code_is_propagated(self) -> None:
         with (
             mock.patch.object(priv.os, "geteuid", return_value=0),
-            mock.patch.object(priv.subprocess, "run") as run,
+            mock.patch.object(priv, "launch", return_value=42) as launch,
         ):
-            self.assertEqual(priv.main(["launch", "work"]), 0)
+            self.assertEqual(priv.main(["launch", "work"]), 42)
 
-        self.assertFalse(self.state_root.exists())
-        run.assert_not_called()
+        launch.assert_called_once_with("work")
 
     def test_launch_rejects_invalid_name(self) -> None:
         with (
@@ -275,6 +274,19 @@ class PrivilegedTests(unittest.TestCase):
 
         print_output.assert_called_once_with(
             mock.ANY,
+            file=priv.sys.stderr,
+        )
+
+    def test_launch_os_error_is_reported(self) -> None:
+        with (
+            mock.patch.object(priv.os, "geteuid", return_value=0),
+            mock.patch.object(priv, "launch", side_effect=OSError("missing")),
+            mock.patch.object(priv, "print") as print_output,
+        ):
+            self.assertEqual(priv.main(["launch", "work"]), 1)
+
+        print_output.assert_called_once_with(
+            "spaces.priv: missing",
             file=priv.sys.stderr,
         )
 

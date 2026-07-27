@@ -2,7 +2,10 @@
 Description=Spaces environment %I
 
 [Service]
-Type=exec
+Type=notify
+NotifyAccess=all
+Delegate=yes
+SyslogIdentifier=spaces-%I
 ExecStart=/usr/bin/spaces.priv launch %I
 
 [Install]
