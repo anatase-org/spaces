@@ -426,7 +426,12 @@ class PermissionForm(
             "user": "#home-folders",
             "distribution": "#distribution-option",
         }
-        self.query_one(focus_targets[current]).focus()
+        focus_target = self.query_one(focus_targets[current])
+        if isinstance(focus_target, RadioSet):
+            pressed_index = focus_target.pressed_index
+            if pressed_index >= 0:
+                focus_target._selected = pressed_index
+        focus_target.focus()
 
     def action_select_current(self) -> None:
         """Select or toggle the highlighted option on the current step."""

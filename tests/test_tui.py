@@ -30,7 +30,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                 ("Noble (24.04)", "noble"),
                 ("Resolute (26.04)", "resolute"),
             ],
-            distribution_value="noble",
+            distribution_value="resolute",
             submit_label="Create",
         )
         async with app.run_test() as pilot:
@@ -45,8 +45,10 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("▌", rendered)
             self.assertEqual(
                 app.query_one("#distribution-option", RadioSet).pressed_button.id,
-                "option-noble",
+                "option-resolute",
             )
+            network = app.query_one("#network", RadioSet)
+            self.assertEqual(network._selected, network.pressed_index)
             self.assertEqual(
                 app.query_one("#home-folders", SelectionList).selected,
                 ["Projects", "Downloads"],
@@ -126,6 +128,8 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                 str(app.query_one("#step-title").render()),
                 "Distribution settings (3/3)",
             )
+            distribution = app.query_one("#distribution-option", RadioSet)
+            self.assertEqual(distribution._selected, distribution.pressed_index)
             self.assertEqual(
                 app.query_one("#next", Button).label.plain,
                 "Create [ENTER]",
