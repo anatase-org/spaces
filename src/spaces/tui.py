@@ -96,6 +96,9 @@ class NamePrompt(App[str | None], inherit_bindings=False):
         border: none;
         background: ansi_default;
     }
+    Button.-primary {
+        color: $accent;
+    }
     Button:focus, Button:hover {
         text-style: reverse bold;
     }
@@ -189,6 +192,19 @@ class PermissionForm(
         border: none;
         background: transparent;
     }
+    #form RadioSet, #form SelectionList {
+        scrollbar-color: $accent-muted;
+        scrollbar-color-hover: $accent;
+        scrollbar-color-active: $accent;
+        scrollbar-background: ansi_default;
+        scrollbar-background-hover: ansi_default;
+        scrollbar-background-active: ansi_default;
+        scrollbar-corner-color: ansi_default;
+    }
+    RadioSet:focus > RadioButton.-selected > .toggle--label {
+        color: $ansi-foreground;
+        background: $accent-muted;
+    }
     #home-folders > .selection-list--button,
     #home-folders > .selection-list--button-highlighted {
         color: $ansi-foreground;
@@ -203,7 +219,11 @@ class PermissionForm(
     }
     #home-folders > .selection-list--button-highlighted,
     #home-folders > .selection-list--button-selected-highlighted {
-        background: $block-cursor-background;
+        background: $accent-muted;
+    }
+    #home-folders > .option-list--option-highlighted {
+        color: $ansi-foreground;
+        background: $accent-muted;
     }
     #buttons {
         height: auto;
@@ -220,6 +240,9 @@ class PermissionForm(
     Button:hover, Button:focus, Button.-active, Button.-primary {
         border: none;
         background: ansi_default;
+    }
+    Button.-primary {
+        color: $accent;
     }
     Button:focus, Button:hover {
         text-style: reverse bold;
