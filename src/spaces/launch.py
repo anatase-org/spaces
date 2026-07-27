@@ -13,10 +13,7 @@ from . import core
 
 NSPAWN = "/usr/bin/systemd-nspawn"
 API_VFS_WRITABLE = "SYSTEMD_NSPAWN_API_VFS_WRITABLE"
-BASE_CAPS = (
-    # This is the initial set by nspawn and should be trimmed
-    "CAP_AUDIT_CONTROL",
-    "CAP_AUDIT_WRITE",
+KEPT_CAPS = (
     "CAP_CHOWN",
     "CAP_DAC_OVERRIDE",
     "CAP_DAC_READ_SEARCH",
@@ -31,12 +28,19 @@ BASE_CAPS = (
     "CAP_SETGID",
     "CAP_SETPCAP",
     "CAP_SETUID",
-    "CAP_SYS_ADMIN", # todo: slowly work towards removing this by default
+    "CAP_SYS_ADMIN",
     "CAP_SYS_BOOT",
     "CAP_SYS_CHROOT",
     "CAP_SYS_NICE",
-    "CAP_SYS_PTRACE",
     "CAP_SYS_RESOURCE",
+)
+DROPPED_CAPS = (
+    "CAP_AUDIT_CONTROL",
+    "CAP_AUDIT_WRITE",
+    "CAP_NET_BIND_SERVICE",
+    "CAP_NET_BROADCAST",
+    "CAP_NET_RAW",
+    "CAP_SYS_PTRACE",
     "CAP_SYS_TTY_CONFIG",
 )
 NETWORK_CAPS = {
@@ -50,7 +54,7 @@ NETWORK_CAPS = {
 }
 
 
-def _load_space(space_name: str) -> tuple[Path, dict[str, Any]]:
+def _load_space(space_name: str) -> tuple[Path, Path, dict[str, Any]]:
     core.validate_space_name(space_name)
     space = core.STATE_ROOT / space_name
     if space.is_symlink() or not space.is_dir():
@@ -62,6 +66,21 @@ def _load_space(space_name: str) -> tuple[Path, dict[str, Any]]:
     if rootfs.is_symlink() or not rootfs.is_dir():
         raise core.SpacesError(
             _("Space {name!r} has an unsafe or missing rootfs.", name=space_name)
+        )
+
+    home = space / "home"
+    if home.is_symlink() or not home.is_dir():
+        raise core.SpacesError(
+            _("Space {name!r} has an unsafe or missing home.", name=space_name)
+        )
+    root_home = home / "root"
+    try:
+        root_home.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    if root_home.is_symlink() or not root_home.is_dir():
+        raise core.SpacesError(
+            _("Space {name!r} has an unsafe root home.", name=space_name)
         )
 
     info_path = space / "info.json"
@@ -76,16 +95,29 @@ def _load_space(space_name: str) -> tuple[Path, dict[str, Any]]:
         )
     if info["name"] != space_name:
         raise core.SpacesError(_("Space name does not match its info.json."))
-    return rootfs, info
+    return rootfs, home, info
 
 
-def _command(space_name: str, rootfs: Path, network: str) -> list[str]:
-    capabilities = (*BASE_CAPS, *NETWORK_CAPS[network])
+def _command(
+    space_name: str,
+    rootfs: Path,
+    home: Path,
+    network: str,
+) -> list[str]:
+    network_caps = NETWORK_CAPS[network]
+    kept_caps = (*KEPT_CAPS, *network_caps)
+    dropped_caps = tuple(
+        capability
+        for capability in DROPPED_CAPS
+        if capability not in kept_caps
+    )
     return [
         NSPAWN,
         "--quiet",
         f"--directory={rootfs}",
         f"--machine={space_name}",
+        f"--bind={home}:/home",
+        f"--bind={home / 'root'}:/root",
         "--boot",
         "--setenv=SYSTEMD_GETTY_AUTO=no",
         "--console=read-only",
@@ -93,15 +125,15 @@ def _command(space_name: str, rootfs: Path, network: str) -> list[str]:
         "--keep-unit",
         "--settings=no",
         "--notify-ready=yes",
-        "--drop-capability=all",
-        f"--capability={','.join(capabilities)}",
+        f"--drop-capability={','.join(dropped_caps)}",
+        f"--capability={','.join(kept_caps)}",
     ]
 
 
 def launch(space_name: str) -> int:
     """Run a space until its nspawn machine exits."""
 
-    rootfs, info = _load_space(space_name)
+    rootfs, home, info = _load_space(space_name)
     network = info["permissions"]["system"]["network"]
     environment = os.environ.copy()
     environment.pop(API_VFS_WRITABLE, None)
@@ -110,7 +142,7 @@ def launch(space_name: str) -> int:
 
     # Future session and mount workers must start before this blocking call.
     completed = subprocess.run(
-        _command(space_name, rootfs, network),
+        _command(space_name, rootfs, home, network),
         check=False,
         env=environment,
     )
