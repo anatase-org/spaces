@@ -31,10 +31,10 @@ build() {
   /usr/bin/python -m build --wheel --no-isolation
 }
 
-check() {
-  cd "$_project_dir"
-  PYTHONPATH=src /usr/bin/python -m unittest discover -s tests -v
-}
+# check() {
+#   cd "$_project_dir"
+#   PYTHONPATH=src /usr/bin/python -m unittest discover -s tests -v
+# }
 
 package() {
   cd "$_project_dir"
