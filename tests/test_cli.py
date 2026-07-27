@@ -28,6 +28,22 @@ class CliTests(unittest.TestCase):
         run_streamed.assert_called_once_with(command, check=False)
         self.assertEqual(returncode, 42)
 
+    def test_cp_helper_keeps_callers_working_directory(self) -> None:
+        with (
+            mock.patch.object(cli.os, "geteuid", return_value=1000),
+            mock.patch.object(
+                cli.shutil,
+                "which",
+                side_effect=lambda name: f"/usr/bin/{name}",
+            ),
+        ):
+            command = cli._helper_command("cp", {"arguments": ["source", "dest"]})
+
+        self.assertEqual(
+            command[:3],
+            ["/usr/bin/pkexec", "--keep-cwd", "/usr/bin/spaces.priv"],
+        )
+
     def test_known_unimplemented_distribution(self) -> None:
         self.assertEqual(cli.main(["create", "arch"]), 2)
 
@@ -188,6 +204,67 @@ class CliTests(unittest.TestCase):
 
         prompt.assert_not_called()
         invoke.assert_not_called()
+
+    def test_cp_supports_options_anywhere_and_fixes_space_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            (state / "work" / "rootfs").mkdir(parents=True)
+            (state / "work" / "home").mkdir()
+            with (
+                mock.patch.object(core, "STATE_ROOT", state),
+                mock.patch.object(cli, "_invoke_helper", return_value=0) as invoke,
+            ):
+                self.assertEqual(
+                    cli.main(
+                        [
+                            "cp",
+                            "-r",
+                            "work:/etc/hosts",
+                            "--preserve=mode",
+                            "work:/home/alice/hosts",
+                        ]
+                    ),
+                    0,
+                )
+
+        invoke.assert_called_once_with(
+            "cp",
+            {
+                "arguments": [
+                    "-r",
+                    str(state / "work" / "rootfs" / "etc" / "hosts"),
+                    "--preserve=mode",
+                    str(state / "work" / "home" / "alice" / "hosts"),
+                ]
+            },
+        )
+
+    def test_cp_fixes_host_paths_and_preserves_trailing_arguments(self) -> None:
+        with mock.patch.object(cli, "_invoke_helper", return_value=0) as invoke:
+            self.assertEqual(
+                cli.main(
+                    [
+                        "cp",
+                        "../source",
+                        "/tmp/destination",
+                        "--suffix",
+                        ".backup",
+                    ]
+                ),
+                0,
+            )
+
+        invoke.assert_called_once_with(
+            "cp",
+            {
+                "arguments": [
+                    "../source",
+                    "/tmp/destination",
+                    "--suffix",
+                    ".backup",
+                ]
+            },
+        )
 
     def test_existing_space_prepends_override_step(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

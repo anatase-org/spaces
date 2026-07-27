@@ -230,6 +230,32 @@ class PrivilegedTests(unittest.TestCase):
 
         self.assertTrue(space.is_dir())
 
+    def test_copy_runs_cp_with_authorized_arguments(self) -> None:
+        completed = subprocess.CompletedProcess([], 42)
+        with mock.patch.object(
+            priv.subprocess, "run", return_value=completed
+        ) as run:
+            returncode = priv.copy(
+                {
+                    "arguments": [
+                        "/var/lib/spaces/work/rootfs/source",
+                        "/tmp/destination",
+                        "--recursive",
+                    ]
+                }
+            )
+
+        self.assertEqual(returncode, 42)
+        run.assert_called_once_with(
+            [
+                "/usr/bin/cp",
+                "/var/lib/spaces/work/rootfs/source",
+                "/tmp/destination",
+                "--recursive",
+            ],
+            check=False,
+        )
+
     def test_creation_rejects_another_uid(self) -> None:
         info = core.create_info(
             "work",

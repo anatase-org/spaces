@@ -40,6 +40,20 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=_("delete without prompting for confirmation"),
     )
+
+    cp_parser = subparsers.add_parser(
+        "cp",
+        help=_("copy files to, from, or between spaces"),
+        usage=_("spaces cp SOURCE... DESTINATION [CP_ARGUMENT ...]"),
+        description=_(
+            "Prefix a path with SPACE: to address a space filesystem."
+        ),
+    )
+    cp_parser.add_argument(
+        "arguments",
+        nargs=argparse.REMAINDER,
+        metavar=_("ARGUMENT"),
+    )
     return parser
 
 
@@ -59,9 +73,12 @@ def _helper_command(operation: str, payload: dict[str, Any]) -> list[str]:
         pkexec = shutil.which("pkexec")
         if pkexec is None:
             raise core.SpacesError(
-                _("pkexec is required to create, configure, or delete spaces.")
+                _("pkexec is required to modify spaces.")
             )
-        command.insert(0, pkexec)
+        if operation == "cp":
+            command[0:0] = [pkexec, "--keep-cwd"]
+        else:
+            command.insert(0, pkexec)
     return command
 
 
@@ -228,9 +245,24 @@ def _delete(name: str, *, noconfirm: bool) -> int:
     return _invoke_helper("delete", {"name": name})
 
 
+def _cp(arguments: list[str]) -> int:
+    if not arguments:
+        raise core.SpacesError(_("cp requires arguments."))
+    fixed_arguments = [
+        core.resolve_space_location(argument) for argument in arguments
+    ]
+    return _invoke_helper("cp", {"arguments": fixed_arguments})
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
-        arguments = build_parser().parse_args(argv)
+        raw_arguments = list(sys.argv[1:] if argv is None else argv)
+        if raw_arguments[:1] == ["cp"]:
+            if raw_arguments[1:] in (["-h"], ["--help"]):
+                build_parser().parse_args(raw_arguments)
+            return _cp(raw_arguments[1:])
+
+        arguments = build_parser().parse_args(raw_arguments)
         if arguments.command == "create":
             return _create(arguments.type)
         elif arguments.command == "configure":

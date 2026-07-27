@@ -61,6 +61,46 @@ class CoreTests(unittest.TestCase):
         with self.assertRaises(core.SpacesError):
             core.validate_space_name("ubuntu", allow_reserved=False)
 
+    def test_space_location_uses_rootfs_and_shared_home(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            (state / "work" / "rootfs").mkdir(parents=True)
+            (state / "work" / "home").mkdir()
+            with mock.patch.object(core, "STATE_ROOT", state):
+                self.assertEqual(
+                    core.resolve_space_location("work:/etc/hosts"),
+                    str(state / "work" / "rootfs" / "etc" / "hosts"),
+                )
+                self.assertEqual(
+                    core.resolve_space_location("work:/home/alice/file"),
+                    str(state / "work" / "home" / "alice" / "file"),
+                )
+                self.assertEqual(
+                    core.resolve_space_location("work:/var/home/alice/file"),
+                    str(state / "work" / "home" / "alice" / "file"),
+                )
+
+    def test_space_location_cannot_escape_space(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            (state / "work" / "rootfs").mkdir(parents=True)
+            (state / "work" / "home").mkdir()
+            with (
+                mock.patch.object(core, "STATE_ROOT", state),
+                self.assertRaises(core.SpacesError),
+            ):
+                core.resolve_space_location("work:/../../outside")
+
+    def test_host_location_is_preserved(self) -> None:
+        self.assertEqual(
+            core.resolve_space_location("../source"),
+            "../source",
+        )
+
+    def test_cp_payload_requires_arguments(self) -> None:
+        with self.assertRaises(core.SpacesError):
+            core.validate_cp_request({"arguments": []})
+
     def test_initiating_identity_uses_sudo_ids(self) -> None:
         passwd = mock.Mock(pw_dir="/home/alice")
         with (

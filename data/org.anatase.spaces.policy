@@ -7,7 +7,7 @@
   <vendor_url>https://github.com/anatase-org/spaces</vendor_url>
 
   <action id="org.anatase.spaces.configure">
-    <description>Create or configure a Spaces environment</description>
+    <description>Manage Spaces environments and their files</description>
     <message>Administrator authentication is required to modify Spaces</message>
     <defaults>
       <allow_any>auth_admin</allow_any>

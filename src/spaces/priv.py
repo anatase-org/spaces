@@ -236,10 +236,19 @@ def delete(request: dict[str, Any]) -> None:
         shutil.rmtree(space)
 
 
+def copy(request: dict[str, Any]) -> int:
+    core.validate_cp_request(request)
+    completed = subprocess.run(
+        ["/usr/bin/cp", *request["arguments"]],
+        check=False,
+    )
+    return completed.returncode
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="spaces.priv")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for command in ("create", "configure", "delete"):
+    for command in ("create", "configure", "delete", "cp"):
         command_parser = subparsers.add_parser(command)
         command_parser.add_argument("payload")
     return parser
@@ -258,6 +267,8 @@ def main(argv: list[str] | None = None) -> int:
             configure(payload)
         elif arguments.command == "delete":
             delete(payload)
+        elif arguments.command == "cp":
+            return copy(payload)
         else:
             raise core.SpacesError(
                 _("Unknown privileged command: {command!r}.", command=arguments.command)

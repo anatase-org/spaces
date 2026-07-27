@@ -247,6 +247,60 @@ def validate_delete_request(value: object) -> dict[str, Any]:
     return request
 
 
+def validate_cp_request(value: object) -> dict[str, Any]:
+    request = _require_mapping(value, "cp payload")
+    if set(request) != {"arguments"}:
+        raise SpacesError(_("cp payload must contain only arguments."))
+    arguments = request["arguments"]
+    if not isinstance(arguments, list) or not arguments:
+        raise SpacesError(_("cp arguments must be a list."))
+    if any(
+        not isinstance(argument, str) or "\0" in argument
+        for argument in arguments
+    ):
+        raise SpacesError(_("cp arguments must be strings without null bytes."))
+    return request
+
+
+def resolve_space_location(value: str) -> str:
+    if value.startswith("-"):
+        return value
+    name, separator, location = value.partition(":")
+    if not separator:
+        return value
+
+    validate_space_name(name)
+    space = STATE_ROOT / name
+    if space.is_symlink() or not space.is_dir():
+        raise SpacesError(_("Space {name!r} does not exist.", name=name))
+
+    if location == "/home" or location.startswith("/home/"):
+        root = space / "home"
+        relative = location.removeprefix("/home").lstrip("/")
+    elif location == "/var/home" or location.startswith("/var/home/"):
+        root = space / "home"
+        relative = location.removeprefix("/var/home").lstrip("/")
+    else:
+        root = space / "rootfs"
+        relative = location.lstrip("/")
+
+    if root.is_symlink() or not root.is_dir():
+        raise SpacesError(
+            _("Space {name!r} has an unsafe or missing filesystem.", name=name)
+        )
+    fixed_root = root.absolute()
+    fixed_location = Path(os.path.abspath(fixed_root / relative))
+    if not fixed_location.is_relative_to(fixed_root):
+        raise SpacesError(
+            _(
+                "Space location escapes {name!r}: {location!r}.",
+                name=name,
+                location=location,
+            )
+        )
+    return str(fixed_location)
+
+
 def load_info(path: Path) -> dict[str, Any] | None:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
