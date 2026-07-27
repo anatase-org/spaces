@@ -3,3 +3,5 @@ venv
 test
 *.pyc
 *.egg-info
+build/
+dist/

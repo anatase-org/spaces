@@ -18,9 +18,9 @@ BuildRequires:  python3-wheel
 Requires:       python3
 Requires:       python3-rich
 Requires:       python3-textual
-Requires:       dnf5
+Requires:       polkit
 Requires:       debootstrap
-Requires:       pacstrap
+Requires:       ubuntu-keyring
 
 %description
 Spaces provide a chroot-like sandboxing environment for you to access your favorite distributions: Arch, Fedora, and Ubuntu. A simple permission system ensures your local files and credentials remain secure, even if your space is compromised. Spaces are constructed directly using packages from your chosen distribution repositories with signature enforcement. No container middleman or surprises.
@@ -33,14 +33,10 @@ Spaces provide a chroot-like sandboxing environment for you to access your favor
 
 %install
 %{python3} -m installer --destdir="%{buildroot}" dist/*.whl
-#mkdir -p %{buildroot}%{_unitdir}
-#install -m644 usr/lib/systemd/system/%{name}@.service %{buildroot}%{_unitdir}/%{name}@.service
-#install -m644 usr/lib/systemd/system/%{name}.service %{buildroot}%{_unitdir}/%{name}.service
 
 %files
 %doc readme.md
 %license LICENSE
 %{_bindir}/%{name}*
 %{python3_sitelib}/%{name}*
-#%{_unitdir}/%{name}@.service
-#%{_unitdir}/%{name}.service
+%{_datadir}/polkit-1/actions/org.anatase.spaces.policy

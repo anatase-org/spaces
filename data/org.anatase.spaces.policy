@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <vendor>Anatase</vendor>
+  <vendor_url>https://github.com/anatase-org/spaces</vendor_url>
+
+  <action id="org.anatase.spaces.configure">
+    <description>Create or configure a Spaces environment</description>
+    <message>Administrator authentication is required to modify Spaces</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/spaces.priv</annotate>
+  </action>
+</policyconfig>

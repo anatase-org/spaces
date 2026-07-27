@@ -26,6 +26,7 @@ dependencies = [
 
 [project.entry-points."console_scripts"]
 spaces = "spaces.__main__:main"
+"spaces.priv" = "spaces.priv:main"
 
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]
@@ -37,3 +38,6 @@ include = ["spaces*"]
 
 [tool.setuptools.package-data]
 spaces = ["overlay/*.png"]
+
+[tool.setuptools.data-files]
+"share/polkit-1/actions" = ["data/org.anatase.spaces.policy"]
