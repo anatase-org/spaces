@@ -432,10 +432,12 @@ class PermissionForm(
             if self.step_index == len(self.steps) - 1
             else _("Next")
         )
-        self.query_one("#next", Button).label = Content.from_text(
+        next_button = self.query_one("#next", Button)
+        next_button.label = Content.from_text(
             next_label + " [ENTER]",
             markup=False,
         )
+        next_button.refresh(layout=True)
         focus_targets = {
             "system": "#network",
             "user": "#home-folders",

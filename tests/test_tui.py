@@ -145,6 +145,13 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                 app.query_one("#next", Button).label.plain,
                 "Create [ENTER]",
             )
+            self.assertIn(
+                "[ENTER]",
+                "".join(
+                    segment.text
+                    for segment in app.query_one("#next", Button).render_line(0)
+                ),
+            )
             await pilot.press("backspace")
             await pilot.pause()
             self.assertEqual(
