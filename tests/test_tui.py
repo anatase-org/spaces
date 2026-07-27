@@ -217,6 +217,18 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("ctrl+c")
         self.assertIsNone(app.return_value)
 
+    async def test_name_prompt_continue_uses_enter(self) -> None:
+        app = NamePrompt()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            self.assertEqual(
+                app.query_one("#continue", Button).label.plain,
+                "Continue [ENTER]",
+            )
+            await pilot.click("#space-name")
+            await pilot.press("w", "o", "r", "k", "enter")
+        self.assertEqual(app.return_value, "work")
+
     async def test_override_step_is_prepended(self) -> None:
         app = PermissionForm(
             home=Path("/home/user"),

@@ -126,6 +126,7 @@ class NamePrompt(App[str | None], inherit_bindings=False):
     BINDINGS = [
         Binding("ctrl+c", "cancel", priority=True),
         Binding("escape", "cancel"),
+        Binding("enter", "advance", priority=True),
     ]
 
     def __init__(self) -> None:
@@ -143,7 +144,10 @@ class NamePrompt(App[str | None], inherit_bindings=False):
                     compact=True,
                 )
                 yield Button(
-                    _("Continue"),
+                    Content.from_text(
+                        _("Continue") + " [ENTER]",
+                        markup=False,
+                    ),
                     id="continue",
                     variant="primary",
                     compact=True,
@@ -155,10 +159,7 @@ class NamePrompt(App[str | None], inherit_bindings=False):
     def action_cancel(self) -> None:
         self.exit(None)
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "cancel":
-            self.exit(None)
-            return
+    def action_advance(self) -> None:
         name = self.query_one("#space-name", Input).value.strip()
         try:
             validate_space_name(name, allow_reserved=False)
@@ -166,6 +167,12 @@ class NamePrompt(App[str | None], inherit_bindings=False):
             self.query_one("#name-error", Static).update(str(error))
             return
         self.exit(name)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "cancel":
+            self.action_cancel()
+        elif event.button.id == "continue":
+            self.action_advance()
 
 
 class PermissionForm(
