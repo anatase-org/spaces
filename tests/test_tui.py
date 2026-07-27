@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from textual.color import Color
 from textual.widgets import Button, Footer, Header, RadioSet, SelectionList
 
 from spaces.tui import (
@@ -55,6 +56,16 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(app.steps, ["system", "user", "distribution"])
             self.assertTrue(app.native_ansi_color)
+            variables = app.get_css_variables()
+            selected_label_background = next(
+                segment.style.bgcolor
+                for segment in network.pressed_button.render_line(0)
+                if "Advanced" in segment.text
+            )
+            self.assertEqual(
+                selected_label_background,
+                Color.parse(variables["accent-muted"]).rich_color,
+            )
             self.assertTrue(
                 all(button.region.height == 1 for button in app.query(Button))
             )

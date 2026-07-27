@@ -8,8 +8,10 @@ from typing import Any
 from rich.segment import Segment
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.color import Color
 from textual.containers import Horizontal, Vertical
 from textual.content import Content
+from textual.style import Style
 from textual.strip import Strip
 from textual.widgets import (
     Button,
@@ -61,6 +63,23 @@ class CleanRadioButton(RadioButton):
 
     BUTTON_LEFT = ""
     BUTTON_RIGHT = " "
+
+    def render(self) -> Content:
+        content = super().render()
+        if self.has_class("-selected"):
+            # Textual retains its blue block-cursor background beneath later
+            # component styles. Apply an opaque final background here so the
+            # accent and hover states cannot blend with that cached blue.
+            background = Color.parse(
+                self.app.theme_variables[
+                    "background" if self.is_mouse_over else "accent-muted"
+                ]
+            )
+            content = content.stylize(
+                Style(background=background),
+                start=len(self._button),
+            )
+        return content
 
 
 class NamePrompt(App[str | None], inherit_bindings=False):
@@ -200,10 +219,6 @@ class PermissionForm(
         scrollbar-background-hover: ansi_default;
         scrollbar-background-active: ansi_default;
         scrollbar-corner-color: ansi_default;
-    }
-    RadioSet:focus > RadioButton.-selected > .toggle--label {
-        color: $ansi-foreground;
-        background: $accent-muted;
     }
     #home-folders > .selection-list--button,
     #home-folders > .selection-list--button-highlighted {
