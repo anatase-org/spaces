@@ -34,9 +34,19 @@ Spaces provide a chroot-like sandboxing environment for you to access your favor
 %install
 %{python3} -m installer --destdir="%{buildroot}" dist/*.whl
 
+%post
+%systemd_post spaces@.service
+
+%preun
+%systemd_preun spaces@.service
+
+%postun
+%systemd_postun_with_restart spaces@.service
+
 %files
 %doc readme.md
 %license LICENSE
 %{_bindir}/%{name}*
 %{python3_sitelib}/%{name}*
 %{_datadir}/polkit-1/actions/org.anatase.spaces.policy
+%{_unitdir}/spaces@.service

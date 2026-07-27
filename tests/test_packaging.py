@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import configparser
 import tomllib
 import unittest
 import xml.etree.ElementTree as ElementTree
@@ -25,6 +26,36 @@ class PackagingTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertNotIn("ubuntu", core_source.casefold())
+
+    def test_systemd_template_launches_unescaped_space_name(self) -> None:
+        service = ROOT / "data" / "spaces@.service"
+        unit = configparser.ConfigParser(interpolation=None)
+        unit.read(service, encoding="utf-8")
+
+        self.assertEqual(unit["Service"]["Type"], "exec")
+        self.assertEqual(
+            unit["Service"]["ExecStart"],
+            "/usr/bin/spaces.priv launch %I",
+        )
+        self.assertEqual(unit["Install"]["WantedBy"], "multi-user.target")
+
+        project = tomllib.loads(
+            (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        )
+        data_files = project["tool"]["setuptools"]["data-files"]
+        self.assertEqual(
+            data_files["lib/systemd/system"],
+            ["data/spaces@.service"],
+        )
+
+        manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8")
+        self.assertIn("include data/spaces@.service", manifest)
+
+        spec = (ROOT / "spaces.spec").read_text(encoding="utf-8")
+        self.assertIn("%{_unitdir}/spaces@.service", spec)
+        self.assertIn("%systemd_post spaces@.service", spec)
+        self.assertIn("%systemd_preun spaces@.service", spec)
+        self.assertIn("%systemd_postun_with_restart spaces@.service", spec)
 
     def test_polkit_policy_requires_admin(self) -> None:
         policy = ROOT / "data" / "org.anatase.spaces.policy"

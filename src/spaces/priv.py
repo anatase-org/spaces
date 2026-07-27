@@ -245,12 +245,18 @@ def copy(request: dict[str, Any]) -> int:
     return completed.returncode
 
 
+def launch(space: str) -> None:
+    core.validate_space_name(space)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="spaces.priv")
     subparsers = parser.add_subparsers(dest="command", required=True)
     for command in ("create", "configure", "delete", "cp"):
         command_parser = subparsers.add_parser(command)
         command_parser.add_argument("payload")
+    launch_parser = subparsers.add_parser("launch")
+    launch_parser.add_argument("space")
     return parser
 
 
@@ -260,6 +266,10 @@ def main(argv: list[str] | None = None) -> int:
             print(_("spaces.priv must run as root."), file=sys.stderr)
             return 1
         arguments = build_parser().parse_args(argv)
+        if arguments.command == "launch":
+            launch(arguments.space)
+            return 0
+
         payload = json.loads(arguments.payload)
         if arguments.command == "create":
             create(payload)

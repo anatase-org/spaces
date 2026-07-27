@@ -41,3 +41,4 @@ spaces = ["overlay/*.png"]
 
 [tool.setuptools.data-files]
 "share/polkit-1/actions" = ["data/org.anatase.spaces.policy"]
+"lib/systemd/system" = ["data/spaces@.service"]

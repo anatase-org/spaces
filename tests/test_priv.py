@@ -256,6 +256,28 @@ class PrivilegedTests(unittest.TestCase):
             check=False,
         )
 
+    def test_launch_validates_name_without_touching_state(self) -> None:
+        with (
+            mock.patch.object(priv.os, "geteuid", return_value=0),
+            mock.patch.object(priv.subprocess, "run") as run,
+        ):
+            self.assertEqual(priv.main(["launch", "work"]), 0)
+
+        self.assertFalse(self.state_root.exists())
+        run.assert_not_called()
+
+    def test_launch_rejects_invalid_name(self) -> None:
+        with (
+            mock.patch.object(priv.os, "geteuid", return_value=0),
+            mock.patch.object(priv, "print") as print_output,
+        ):
+            self.assertEqual(priv.main(["launch", "../work"]), 1)
+
+        print_output.assert_called_once_with(
+            mock.ANY,
+            file=priv.sys.stderr,
+        )
+
     def test_creation_rejects_another_uid(self) -> None:
         info = core.create_info(
             "work",

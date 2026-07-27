@@ -1,0 +1,9 @@
+[Unit]
+Description=Spaces environment %I
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/spaces.priv launch %I
+
+[Install]
+WantedBy=multi-user.target
