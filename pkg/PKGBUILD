@@ -21,22 +21,24 @@ makedepends=(
   'python-setuptools'
   'python-wheel'
 )
-source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+source=()
+sha256sums=()
+
+_project_dir="$PWD/.."
 
 build() {
-  cd "$pkgname-$pkgver"
-  python -m build --wheel --no-isolation
+  cd "$_project_dir"
+  /usr/bin/python -m build --wheel --no-isolation
 }
 
 check() {
-  cd "$pkgname-$pkgver"
-  PYTHONPATH=src python -m unittest discover -s tests -v
+  cd "$_project_dir"
+  PYTHONPATH=src /usr/bin/python -m unittest discover -s tests -v
 }
 
 package() {
-  cd "$pkgname-$pkgver"
-  python -m installer --destdir="$pkgdir" dist/*.whl
+  cd "$_project_dir"
+  /usr/bin/python -m installer --destdir="$pkgdir" dist/*.whl
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   install -Dm644 readme.md "$pkgdir/usr/share/doc/$pkgname/readme.md"
 }

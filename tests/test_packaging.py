@@ -38,12 +38,16 @@ class PackagingTests(unittest.TestCase):
         annotation = root.find("./action/annotate")
         self.assertEqual(annotation.text, "/usr/bin/spaces.priv")
 
-    def test_pkgbuild_skips_source_validation(self) -> None:
-        pkgbuild = (ROOT / "PKGBUILD").read_text(encoding="utf-8")
-        self.assertIn("sha256sums=('SKIP')", pkgbuild)
+    def test_pkgbuild_uses_current_checkout(self) -> None:
+        pkgbuild = (ROOT / "pkg" / "PKGBUILD").read_text(encoding="utf-8")
+        self.assertIn("source=()", pkgbuild)
+        self.assertIn('_project_dir="$PWD/.."', pkgbuild)
+        self.assertNotIn("archive/refs/tags", pkgbuild)
         self.assertIn("'python-textual'", pkgbuild)
         self.assertIn("'ubuntu-keyring'", pkgbuild)
-        self.assertIn("python -m unittest discover -s tests -v", pkgbuild)
+        self.assertIn(
+            "/usr/bin/python -m unittest discover -s tests -v", pkgbuild
+        )
 
     def test_pkgbuild_is_not_in_source_manifest(self) -> None:
         manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8")

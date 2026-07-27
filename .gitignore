@@ -5,3 +5,5 @@ test
 *.egg-info
 build/
 dist/
+pkg/
+!pkg/PKGBUILD
