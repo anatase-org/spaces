@@ -10,6 +10,7 @@ from typing import Any
 from . import _
 from . import core
 from .distro import DistributionError, get_driver
+from .logging import configure_logging, run_streamed
 from .tui import ask_custom_name, run_permission_wizard
 
 
@@ -70,7 +71,11 @@ def _helper_command(operation: str, payload: dict[str, Any]) -> list[str]:
 
 def _invoke_helper(operation: str, payload: dict[str, Any]) -> int:
     try:
-        completed = subprocess.run(_helper_command(operation, payload), check=False)
+        configure_logging()
+        completed = run_streamed(
+            _helper_command(operation, payload),
+            check=False,
+        )
     except OSError as error:
         raise core.SpacesError(
             _("Could not execute spaces.priv: {error}", error=error)

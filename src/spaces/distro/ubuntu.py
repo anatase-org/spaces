@@ -28,8 +28,16 @@ class UbuntuDistribution(Distribution):
         ]
 
     def bootstrap(self, metadata: Mapping[str, Any], rootfs: Path) -> None:
-        print(_("Bootstrapping Ubuntu into {rootfs}...", rootfs=rootfs))
+        version = str(metadata["version"])
+        print(_("Bootstrapping Ubuntu {version}...", version=version), flush=True)
         subprocess.run(self.command(metadata, rootfs), check=True)
+        print(
+            _(
+                "Adding additional packages:\n{packages}",
+                packages=", ".join(PACKAGES),
+            ),
+            flush=True,
+        )
         subprocess.run(
             [
                 "chroot",

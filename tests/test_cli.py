@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +11,23 @@ from spaces import __main__ as cli
 
 
 class CliTests(unittest.TestCase):
+    def test_helper_output_is_streamed_after_privilege_handoff(self) -> None:
+        command = ["pkexec", "/usr/bin/spaces.priv", "create", "{}"]
+        completed = subprocess.CompletedProcess(command, 42)
+
+        with (
+            mock.patch.object(cli, "_helper_command", return_value=command),
+            mock.patch.object(cli, "configure_logging") as configure_logging,
+            mock.patch.object(
+                cli, "run_streamed", return_value=completed
+            ) as run_streamed,
+        ):
+            returncode = cli._invoke_helper("create", {})
+
+        configure_logging.assert_called_once_with()
+        run_streamed.assert_called_once_with(command, check=False)
+        self.assertEqual(returncode, 42)
+
     def test_known_unimplemented_distribution(self) -> None:
         self.assertEqual(cli.main(["create", "arch"]), 2)
 

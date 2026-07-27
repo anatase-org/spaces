@@ -41,7 +41,10 @@ class PrivilegedTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def test_create_writes_metadata_and_bootstraps(self) -> None:
-        with mock.patch.object(ubuntu.subprocess, "run") as run:
+        with (
+            mock.patch.object(ubuntu.subprocess, "run") as run,
+            mock.patch.object(ubuntu, "print") as print_output,
+        ):
             priv.create(self.info)
         space = self.state_root / "ubuntu"
         self.assertTrue((space / "rootfs").is_dir())
@@ -80,6 +83,16 @@ class PrivilegedTests(unittest.TestCase):
             ]
         )
         self.assertEqual(run.call_count, 2)
+        self.assertEqual(
+            print_output.call_args_list,
+            [
+                mock.call("Bootstrapping Ubuntu resolute...", flush=True),
+                mock.call(
+                    "Adding additional packages:\nssh, python3, nano",
+                    flush=True,
+                ),
+            ],
+        )
 
     def test_custom_does_not_bootstrap(self) -> None:
         info = core.create_info(
