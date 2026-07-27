@@ -20,6 +20,7 @@ from textual.widgets import (
 )
 from textual.widgets.selection_list import Selection
 
+from . import _
 from .core import (
     NETWORK_LEVELS,
     SpacesError,
@@ -44,16 +45,16 @@ class NamePrompt(App[str | None]):
     Button { margin-left: 1; }
     """
 
-    BINDINGS = [("escape", "cancel", "Cancel")]
+    BINDINGS = [("escape", "cancel", _("Cancel"))]
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog"):
-            yield Label("Custom space name")
-            yield Input(placeholder="my-space", id="space-name", max_length=63)
+            yield Label(_("Custom space name"))
+            yield Input(placeholder=_("my-space"), id="space-name", max_length=63)
             yield Static("", id="name-error")
             with Horizontal():
-                yield Button("Cancel", id="cancel")
-                yield Button("Continue", id="continue", variant="primary")
+                yield Button(_("Cancel"), id="cancel")
+                yield Button(_("Continue"), id="continue", variant="primary")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -96,12 +97,12 @@ class PermissionWizard(App[dict[str, Any] | None]):
     Button { margin-left: 1; }
     """
 
-    BINDINGS = [("escape", "cancel", "Cancel")]
+    BINDINGS = [("escape", "cancel", _("Cancel"))]
 
     NETWORK_LABELS = {
-        "basic": "Basic — shared networking and unprivileged ports",
-        "advanced": "Advanced — shared networking and privileged ports",
-        "admin": "Admin — full network admin with CAP_NET_RAW and CAP_NET_ADMIN",
+        "basic": _("Basic — shared networking and unprivileged ports"),
+        "advanced": _("Advanced — shared networking and privileged ports"),
+        "admin": _("Admin — full network admin with CAP_NET_RAW and CAP_NET_ADMIN"),
     }
 
     def __init__(
@@ -116,7 +117,7 @@ class PermissionWizard(App[dict[str, Any] | None]):
         distribution_description: str,
         distribution_options: list[tuple[str, str]],
         distribution_value: str | None,
-        submit_label: str = "Create",
+        submit_label: str = _("Create"),
     ) -> None:
         super().__init__()
         self.home = home
@@ -140,9 +141,12 @@ class PermissionWizard(App[dict[str, Any] | None]):
         with Vertical(id="wizard"):
             yield Header(show_clock=False)
             with Vertical(id="system-step", classes="step"):
-                yield Label("System permissions")
+                yield Label(_("System permissions"))
                 yield Static(
-                    "Choose the networking privileges available inside this space.",
+                    _(
+                        "Choose the networking privileges available inside this "
+                        "space."
+                    ),
                     classes="description",
                 )
                 with RadioSet(id="network"):
@@ -153,15 +157,18 @@ class PermissionWizard(App[dict[str, Any] | None]):
                             id=f"network-{level}",
                         )
             with Vertical(id="user-step", classes="step"):
-                yield Label("User permissions")
+                yield Label(_("User permissions"))
                 yield Static(
-                    f"Choose folders from {self.home} to make available.",
+                    _(
+                        "Choose folders from {home} to make available.",
+                        home=self.home,
+                    ),
                     classes="description",
                 )
                 yield SelectionList(
                     *[
                         Selection(
-                            f"~/{folder}",
+                            _("~/{folder}", folder=folder),
                             folder,
                             folder in self.initial_home,
                             id=f"home-{index}",
@@ -183,9 +190,9 @@ class PermissionWizard(App[dict[str, Any] | None]):
                             id=f"option-{value}",
                         )
             with Horizontal(id="buttons"):
-                yield Button("Cancel", id="cancel")
-                yield Button("Back", id="back")
-                yield Button("Next", id="next", variant="primary")
+                yield Button(_("Cancel"), id="cancel")
+                yield Button(_("Back"), id="back")
+                yield Button(_("Next"), id="next", variant="primary")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -200,14 +207,16 @@ class PermissionWizard(App[dict[str, Any] | None]):
             self.query_one(f"#{step}-step").set_class(step != current, "hidden")
         self.query_one("#back", Button).disabled = self.step_index == 0
         self.query_one("#next", Button).label = (
-            self.submit_label if self.step_index == len(self.steps) - 1 else "Next"
+            self.submit_label
+            if self.step_index == len(self.steps) - 1
+            else _("Next")
         )
 
     @staticmethod
     def _radio_value(radio_set: RadioSet, prefix: str) -> str:
         pressed = radio_set.pressed_button
         if pressed is None or pressed.id is None:
-            raise SpacesError("A selection is required.")
+            raise SpacesError(_("A selection is required."))
         return pressed.id.removeprefix(prefix)
 
     def _result(self) -> dict[str, Any]:

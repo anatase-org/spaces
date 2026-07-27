@@ -18,6 +18,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
+from . import _
 from . import core
 from .distro import DistributionError, get_driver
 
@@ -25,7 +26,9 @@ from .distro import DistributionError, get_driver
 def _root_owned_directory(path: Path) -> None:
     path.mkdir(mode=0o755, parents=True, exist_ok=True)
     if path.is_symlink() or not path.is_dir():
-        raise core.SpacesError(f"Expected a directory at {path}.")
+        raise core.SpacesError(
+            _("Expected a directory at {path}.", path=path)
+        )
     os.chown(path, 0, 0)
     os.chmod(path, 0o755)
 
@@ -84,7 +87,9 @@ def _assert_no_mounts(path: Path) -> None:
     try:
         mountinfo = Path("/proc/self/mountinfo").read_text(encoding="utf-8")
     except OSError as error:
-        raise core.SpacesError(f"Could not inspect active mounts: {error}") from error
+        raise core.SpacesError(
+            _("Could not inspect active mounts: {error}", error=error)
+        ) from error
     for line in mountinfo.splitlines():
         fields = line.split()
         if len(fields) < 5:
@@ -92,7 +97,12 @@ def _assert_no_mounts(path: Path) -> None:
         mountpoint = Path(_unescape_mount_path(fields[4]))
         if mountpoint == rootfs or rootfs in mountpoint.parents:
             raise core.SpacesError(
-                f"Cannot recreate {rootfs} while {mountpoint} is mounted beneath it."
+                _(
+                    "Cannot recreate {rootfs} while {mountpoint} is mounted "
+                    "beneath it.",
+                    rootfs=rootfs,
+                    mountpoint=mountpoint,
+                )
             )
 
 
@@ -102,9 +112,13 @@ def _caller_uid() -> int:
             try:
                 uid = int(os.environ[variable])
             except ValueError as error:
-                raise core.SpacesError(f"{variable} must be a numeric UID.") from error
+                raise core.SpacesError(
+                    _("{variable} must be a numeric UID.", variable=variable)
+                ) from error
             if uid < 0:
-                raise core.SpacesError(f"{variable} must not be negative.")
+                raise core.SpacesError(
+                    _("{variable} must not be negative.", variable=variable)
+                )
             return uid
     return 0
 
@@ -113,7 +127,10 @@ def _assert_initiating_user(info: dict[str, Any]) -> None:
     users = info["permissions"]["users"]
     if set(users) != {str(_caller_uid())}:
         raise core.SpacesError(
-            "Creation payload must contain only the initiating user's permissions."
+            _(
+                "Creation payload must contain only the initiating user's "
+                "permissions."
+            )
         )
 
 
@@ -126,12 +143,14 @@ def create(info: dict[str, Any]) -> None:
 
     with _state_lock():
         if space.is_symlink() or (space.exists() and not space.is_dir()):
-            raise core.SpacesError(f"Unsafe space path: {space}.")
+            raise core.SpacesError(
+                _("Unsafe space path: {space}.", space=space)
+            )
         _root_owned_directory(space)
 
         home = space / "home"
         if home.is_symlink() or (home.exists() and not home.is_dir()):
-            raise core.SpacesError(f"Unsafe home path: {home}.")
+            raise core.SpacesError(_("Unsafe home path: {home}.", home=home))
         _root_owned_directory(home)
 
         rootfs = space / "rootfs"
@@ -142,7 +161,10 @@ def create(info: dict[str, Any]) -> None:
         driver = get_driver(distribution["id"])
         if driver is None:
             raise core.SpacesError(
-                f"Distribution {distribution['id']!r} is not implemented."
+                _(
+                    "Distribution {distro_id!r} is not implemented.",
+                    distro_id=distribution["id"],
+                )
             )
         try:
             driver.bootstrap(distribution, rootfs)
@@ -155,23 +177,34 @@ def configure(patch: dict[str, Any]) -> None:
     update = patch["permissions"]["user"]
     if update["uid"] != _caller_uid():
         raise core.SpacesError(
-            "Configure payload must target the initiating user's permissions."
+            _("Configure payload must target the initiating user's permissions.")
         )
 
     space = core.STATE_ROOT / patch["name"]
     with _state_lock():
         if space.is_symlink() or not space.is_dir():
-            raise core.SpacesError(f"Space {patch['name']!r} does not exist.")
+            raise core.SpacesError(
+                _("Space {name!r} does not exist.", name=patch["name"])
+            )
         info_path = space / "info.json"
         if info_path.is_symlink() or not info_path.is_file():
-            raise core.SpacesError(f"Unsafe space information path: {info_path}.")
+            raise core.SpacesError(
+                _(
+                    "Unsafe space information path: {path}.",
+                    path=info_path,
+                )
+            )
         try:
             info = json.loads(info_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error:
-            raise core.SpacesError(f"Could not read {info_path}: {error}") from error
+            raise core.SpacesError(
+                _("Could not read {path}: {error}", path=info_path, error=error)
+            ) from error
         core.validate_info(info)
         if info["name"] != patch["name"]:
-            raise core.SpacesError("Space name does not match its info.json.")
+            raise core.SpacesError(
+                _("Space name does not match its info.json.")
+            )
 
         permissions = info["permissions"]
         if "system" in patch["permissions"]:
@@ -200,7 +233,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     if os.geteuid() != 0:
-        print("spaces.priv must run as root.", file=sys.stderr)
+        print(_("spaces.priv must run as root."), file=sys.stderr)
         return 1
     arguments = build_parser().parse_args(argv)
     try:
@@ -210,17 +243,19 @@ def main(argv: list[str] | None = None) -> int:
         else:
             configure(payload)
     except json.JSONDecodeError as error:
-        print(f"Invalid JSON payload: {error}", file=sys.stderr)
+        print(_("Invalid JSON payload: {error}", error=error), file=sys.stderr)
         return 2
     except subprocess.CalledProcessError as error:
         print(
-            "Bootstrap failed; the partial rootfs and info.json were preserved "
-            "for inspection or retry.",
+            _(
+                "Bootstrap failed; the partial rootfs and info.json were "
+                "preserved for inspection or retry."
+            ),
             file=sys.stderr,
         )
         return error.returncode or 1
     except (core.SpacesError, OSError) as error:
-        print(f"spaces.priv: {error}", file=sys.stderr)
+        print(_("spaces.priv: {error}", error=error), file=sys.stderr)
         return 1
     return 0
 

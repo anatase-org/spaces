@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
+from .. import _
+
 
 class DistributionError(ValueError):
     """Invalid distribution-specific configuration."""
@@ -40,7 +42,11 @@ class Distribution:
         if self.option_key is not None:
             if option not in self.configuration_options:
                 raise DistributionError(
-                    f"Unsupported {self.id} option: {option!r}."
+                    _(
+                        "Unsupported {distribution} option: {option!r}.",
+                        distribution=self.id,
+                        option=option,
+                    )
                 )
             metadata[self.option_key] = option
         return metadata
@@ -48,13 +54,20 @@ class Distribution:
     def validate(self, metadata: Mapping[str, Any]) -> None:
         if metadata.get("id") != self.id:
             raise DistributionError(
-                f"{self.id} metadata has an invalid distribution ID."
+                _(
+                    "{distribution} metadata has an invalid distribution ID.",
+                    distribution=self.id,
+                )
             )
         if self.option_key is not None:
             selected = metadata.get(self.option_key)
             if selected not in self.configuration_options:
                 raise DistributionError(
-                    f"Unsupported {self.id} option: {selected!r}."
+                    _(
+                        "Unsupported {distribution} option: {option!r}.",
+                        distribution=self.id,
+                        option=selected,
+                    )
                 )
 
     def bootstrap(self, metadata: Mapping[str, Any], rootfs: Path) -> None:

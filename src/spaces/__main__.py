@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from . import _
 from . import core
 from .distro import DistributionError, get_driver
 from .tui import ask_custom_name, run_permission_wizard
@@ -16,17 +17,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="spaces")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    create_parser = subparsers.add_parser("create", help="create a space")
+    create_parser = subparsers.add_parser("create", help=_("create a space"))
     create_parser.add_argument("type", choices=core.KNOWN_DISTRIBUTIONS)
 
     configure_parser = subparsers.add_parser(
-        "configure", help="configure permissions for a space"
+        "configure", help=_("configure permissions for a space")
     )
     configure_parser.add_argument("name")
     configure_parser.add_argument(
         "--user",
         action="store_true",
-        help="configure only the current user's permissions",
+        help=_("configure only the current user's permissions"),
     )
     return parser
 
@@ -34,8 +35,11 @@ def build_parser() -> argparse.ArgumentParser:
 def _confirm_rebuild(path: Path) -> bool:
     try:
         answer = input(
-            f"Space {path.name!r} already exists. Recreate rootfs and preserve "
-            "home? [Y/n] "
+            _(
+                "Space {name!r} already exists. Recreate rootfs and preserve "
+                "home? [Y/n] ",
+                name=path.name,
+            )
         )
     except (EOFError, KeyboardInterrupt):
         return False
@@ -57,7 +61,9 @@ def _helper_command(operation: str, payload: dict[str, Any]) -> list[str]:
     if os.geteuid() != 0:
         pkexec = shutil.which("pkexec")
         if pkexec is None:
-            raise core.SpacesError("pkexec is required to create or configure spaces.")
+            raise core.SpacesError(
+                _("pkexec is required to create or configure spaces.")
+            )
         command.insert(0, pkexec)
     return command
 
@@ -66,7 +72,9 @@ def _invoke_helper(operation: str, payload: dict[str, Any]) -> int:
     try:
         completed = subprocess.run(_helper_command(operation, payload), check=False)
     except OSError as error:
-        raise core.SpacesError(f"Could not execute spaces.priv: {error}") from error
+        raise core.SpacesError(
+            _("Could not execute spaces.priv: {error}", error=error)
+        ) from error
     return completed.returncode
 
 
@@ -74,7 +82,11 @@ def _create(distro_id: str) -> int:
     driver = get_driver(distro_id)
     if driver is None:
         print(
-            f"spaces: distribution {distro_id!r} is known but not implemented.",
+            _(
+                "spaces: distribution {distro_id!r} is known but not "
+                "implemented.",
+                distro_id=distro_id,
+            ),
             file=sys.stderr,
         )
         return 2
@@ -90,7 +102,7 @@ def _create(distro_id: str) -> int:
     target = core.STATE_ROOT / name
     existing = target.exists() or target.is_symlink()
     if existing and not _confirm_rebuild(target):
-        print("Creation cancelled.")
+        print(_("Creation cancelled."))
         return 0
 
     existing_info = core.load_info(target / "info.json") if existing else None
@@ -111,7 +123,7 @@ def _create(distro_id: str) -> int:
         distribution_description=driver.configuration_description,
         distribution_options=distribution_options,
         distribution_value=distribution_value,
-        submit_label="Create",
+        submit_label=_("Create"),
     )
     if result is None:
         return 130
@@ -130,8 +142,12 @@ def _create(distro_id: str) -> int:
     return_code = _invoke_helper("create", info)
     if return_code == 0 and distro_id == "custom":
         print(
-            f"Custom space {name!r} created. Populate "
-            f"{core.STATE_ROOT / name / 'rootfs'} to finish setting it up."
+            _(
+                "Custom space {name!r} created. Populate {rootfs} to finish "
+                "setting it up.",
+                name=name,
+                rootfs=core.STATE_ROOT / name / "rootfs",
+            )
         )
     return return_code
 
@@ -143,7 +159,10 @@ def _configure(name: str, *, user_only: bool) -> int:
     info = core.load_info(target / "info.json")
     if info is None:
         raise core.SpacesError(
-            f"Space {name!r} does not exist or has an invalid info.json."
+            _(
+                "Space {name!r} does not exist or has an invalid info.json.",
+                name=name,
+            )
         )
     network, selected_home = core.defaults_from_info(info, identity)
     result = run_permission_wizard(
@@ -156,7 +175,7 @@ def _configure(name: str, *, user_only: bool) -> int:
         distribution_description="",
         distribution_options=[],
         distribution_value=None,
-        submit_label="Configure",
+        submit_label=_("Configure"),
     )
     if result is None:
         return 130
@@ -186,7 +205,7 @@ def main(argv: list[str] | None = None) -> int:
             return _create(arguments.type)
         return _configure(arguments.name, user_only=arguments.user)
     except core.SpacesError as error:
-        print(f"spaces: {error}", file=sys.stderr)
+        print(_("spaces: {error}", error=error), file=sys.stderr)
         return 1
 
 

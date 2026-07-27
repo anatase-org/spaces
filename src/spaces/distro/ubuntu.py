@@ -6,13 +6,14 @@ import subprocess
 from pathlib import Path
 from typing import Any, Mapping
 
+from .. import _
 from .model import Distribution
 
 
 PACKAGES = ("ssh", "python3", "nano")
 RELEASES = {
-    "noble": "Noble (24.04)",
-    "resolute": "Resolute (26.04)",
+    "noble": _("Noble (24.04)"),
+    "resolute": _("Resolute (26.04)"),
 }
 
 
@@ -28,15 +29,15 @@ class UbuntuDistribution(Distribution):
         ]
 
     def bootstrap(self, metadata: Mapping[str, Any], rootfs: Path) -> None:
-        print(f"Bootstrapping Ubuntu into {rootfs}...")
+        print(_("Bootstrapping Ubuntu into {rootfs}...", rootfs=rootfs))
         subprocess.run(self.command(metadata, rootfs), check=True)
 
 
 DISTRIBUTION = UbuntuDistribution(
     id="ubuntu",
     default_name="ubuntu",
-    configuration_title="Ubuntu version",
-    configuration_description="Choose the Ubuntu release to bootstrap.",
+    configuration_title=_("Ubuntu version"),
+    configuration_description=_("Choose the Ubuntu release to bootstrap."),
     option_key="version",
     configuration_options=RELEASES,
     default_option="resolute",
