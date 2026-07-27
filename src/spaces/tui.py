@@ -9,6 +9,7 @@ from rich.segment import Segment
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.content import Content
 from textual.strip import Strip
 from textual.widgets import (
     Button,
@@ -114,7 +115,11 @@ class NamePrompt(App[str | None], inherit_bindings=False):
             yield Input(placeholder=_("my-space"), id="space-name", max_length=63)
             yield Static("", id="name-error")
             with Horizontal():
-                yield Button(_("Cancel"), id="cancel", compact=True)
+                yield Button(
+                    Content.from_text(_("Cancel") + " [ESC]", markup=False),
+                    id="cancel",
+                    compact=True,
+                )
                 yield Button(
                     _("Continue"),
                     id="continue",
@@ -229,6 +234,9 @@ class PermissionForm(
     BINDINGS = [
         Binding("ctrl+c", "cancel", priority=True),
         Binding("escape", "cancel"),
+        Binding("space", "select_current", priority=True),
+        Binding("backspace", "back", priority=True),
+        Binding("enter", "advance", priority=True),
     ]
 
     NETWORK_LABELS = {
@@ -331,10 +339,26 @@ class PermissionForm(
                                 id=f"option-{value}",
                             )
             with Horizontal(id="buttons"):
-                yield Button(_("Cancel"), id="cancel", compact=True)
-                yield Button(_("Back"), id="back", compact=True)
                 yield Button(
-                    _("Next"),
+                    Content.from_text(_("Cancel") + " [ESC]", markup=False),
+                    id="cancel",
+                    compact=True,
+                )
+                yield Button(
+                    Content.from_text(
+                        _("Back") + " [BACKSPACE]",
+                        markup=False,
+                    ),
+                    id="back",
+                    compact=True,
+                )
+                yield Button(
+                    Content.from_text(_("Select") + " [SPACE]", markup=False),
+                    id="select",
+                    compact=True,
+                )
+                yield Button(
+                    Content.from_text(_("Next") + " [ENTER]", markup=False),
                     id="next",
                     variant="primary",
                     compact=True,
@@ -365,10 +389,14 @@ class PermissionForm(
             )
         )
         self.query_one("#back", Button).disabled = self.step_index == 0
-        self.query_one("#next", Button).label = (
+        next_label = (
             self.submit_label
             if self.step_index == len(self.steps) - 1
             else _("Next")
+        )
+        self.query_one("#next", Button).label = Content.from_text(
+            next_label + " [ENTER]",
+            markup=False,
         )
         focus_targets = {
             "system": "#network",
@@ -376,6 +404,38 @@ class PermissionForm(
             "distribution": "#distribution-option",
         }
         self.query_one(focus_targets[current]).focus()
+
+    def action_select_current(self) -> None:
+        """Select or toggle the highlighted option on the current step."""
+
+        current = self.steps[self.step_index]
+        if current == "user":
+            self.query_one(
+                "#home-folders", FolderSelectionList
+            ).action_select()
+        else:
+            target = (
+                "#network"
+                if current == "system"
+                else "#distribution-option"
+            )
+            self.query_one(target, RadioSet).action_toggle_button()
+
+    def action_advance(self) -> None:
+        """Advance to the next step or submit the completed form."""
+
+        if self.step_index < len(self.steps) - 1:
+            self.step_index += 1
+            self._show_step()
+        else:
+            self.exit(self._result())
+
+    def action_back(self) -> None:
+        """Return to the previous step."""
+
+        if self.step_index > 0:
+            self.step_index -= 1
+            self._show_step()
 
     @staticmethod
     def _radio_value(radio_set: RadioSet, prefix: str) -> str:
@@ -404,14 +464,11 @@ class PermissionForm(
         if event.button.id == "cancel":
             self.exit(None)
         elif event.button.id == "back":
-            self.step_index -= 1
-            self._show_step()
+            self.action_back()
+        elif event.button.id == "select":
+            self.action_select_current()
         elif event.button.id == "next":
-            if self.step_index < len(self.steps) - 1:
-                self.step_index += 1
-                self._show_step()
-            else:
-                self.exit(self._result())
+            self.action_advance()
 
 
 def ask_custom_name() -> str | None:

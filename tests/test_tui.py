@@ -57,7 +57,23 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                 all(button.region.height == 1 for button in app.query(Button))
             )
             self.assertTrue(
-                all(button.region.width < 16 for button in app.query(Button))
+                all(button.region.width <= 20 for button in app.query(Button))
+            )
+            self.assertEqual(
+                app.query_one("#cancel", Button).label.plain,
+                "Cancel [ESC]",
+            )
+            self.assertEqual(
+                app.query_one("#select", Button).label.plain,
+                "Select [SPACE]",
+            )
+            self.assertEqual(
+                app.query_one("#back", Button).label.plain,
+                "Back [BACKSPACE]",
+            )
+            self.assertEqual(
+                app.query_one("#next", Button).label.plain,
+                "Next [ENTER]",
             )
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
@@ -67,8 +83,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                 sum(not step.has_class("hidden") for step in app.query(".step")),
                 1,
             )
-            await pilot.hover("#next")
-            await pilot.click("#next")
+            await pilot.press("enter")
             await pilot.pause()
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
@@ -94,22 +109,49 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                 "selection-list--button-selected"
             )
             self.assertEqual(selected_folder.color, selected_radio.color)
+            await pilot.hover("#select")
+            await pilot.click("#select")
+            await pilot.pause()
+            self.assertEqual(folders.selected, ["Downloads"])
+            await pilot.press("space")
+            await pilot.pause()
+            self.assertEqual(set(folders.selected), {"Projects", "Downloads"})
             self.assertEqual(
                 sum(not step.has_class("hidden") for step in app.query(".step")),
                 1,
             )
-            await pilot.hover("#next")
-            await pilot.click("#next")
+            await pilot.press("enter")
             await pilot.pause()
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
                 "Distribution settings (3/3)",
             )
-            self.assertEqual(str(app.query_one("#next").label), "Create")
+            self.assertEqual(
+                app.query_one("#next", Button).label.plain,
+                "Create [ENTER]",
+            )
+            await pilot.press("backspace")
+            await pilot.pause()
+            self.assertEqual(
+                str(app.query_one("#step-title").render()),
+                "User permissions (2/3)",
+            )
             self.assertEqual(len(app.query(Header)), 0)
             self.assertEqual(len(app.query(Footer)), 0)
             self.assertFalse(app.ENABLE_COMMAND_PALETTE)
             self.assertNotIn("ctrl+q", app._bindings.key_to_bindings)
+            self.assertEqual(
+                app._bindings.key_to_bindings["space"][0].action,
+                "select_current",
+            )
+            self.assertEqual(
+                app._bindings.key_to_bindings["enter"][0].action,
+                "advance",
+            )
+            self.assertEqual(
+                app._bindings.key_to_bindings["backspace"][0].action,
+                "back",
+            )
 
     async def test_user_only_omits_system_controls(self) -> None:
         app = PermissionForm(
@@ -132,7 +174,10 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                 str(app.query_one("#step-title").render()),
                 "User permissions (1/1)",
             )
-            self.assertEqual(str(app.query_one("#next").label), "Configure")
+            self.assertEqual(
+                app.query_one("#next", Button).label.plain,
+                "Configure [ENTER]",
+            )
 
     async def test_ctrl_c_cancels(self) -> None:
         app = PermissionForm(
