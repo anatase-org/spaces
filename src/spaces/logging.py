@@ -144,22 +144,17 @@ class SpacesHandler(logging.Handler):
     ) -> None:
         target = error_console if levelno >= logging.WARNING else console
         for index, line in enumerate(lines):
-            line_prefix = (
-                ""
-                if levelno < logging.WARNING and line.startswith("| ")
-                else "| "
-            )
+            line_prefix = ""
             if index == 0 and levelno >= logging.WARNING:
-                line_prefix += f"{levelname}: "
+                line_prefix = f"{levelname}: "
 
             rendered_prefix: object = line_prefix
             if RichText is not None:
                 rendered_prefix = RichText(line_prefix, no_wrap=True)
                 if index == 0 and levelno >= logging.WARNING:
                     label = f"{levelname}:"
-                    start = line_prefix.index(label)
                     style = "red" if levelno >= logging.ERROR else "yellow"
-                    rendered_prefix.stylize(style, start, start + len(label))
+                    rendered_prefix.stylize(style, 0, len(label))
             self._print_line(target, rendered_prefix, line)
         target.file.flush()
 

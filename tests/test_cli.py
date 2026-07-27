@@ -31,12 +31,24 @@ class CliTests(unittest.TestCase):
     def test_known_unimplemented_distribution(self) -> None:
         self.assertEqual(cli.main(["create", "arch"]), 2)
 
+    def test_keyboard_interrupt_returns_130(self) -> None:
+        with (
+            mock.patch.object(cli, "_create", side_effect=KeyboardInterrupt),
+            mock.patch.object(cli, "print") as print_output,
+        ):
+            self.assertEqual(cli.main(["create", "ubuntu"]), 130)
+        print_output.assert_called_once_with(
+            "Exiting due to Ctrl+C", file=cli.sys.stderr
+        )
+
     def test_create_ubuntu_builds_expected_payload(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary) / "home"
             home.mkdir()
             (home / "Projects").mkdir()
             identity = core.Identity(1000, 1000, home)
+            calls = mock.Mock()
+            calls.invoke.return_value = 0
             with (
                 mock.patch.object(core, "STATE_ROOT", Path(temporary) / "state"),
                 mock.patch.object(core, "initiating_identity", return_value=identity),
@@ -49,9 +61,20 @@ class CliTests(unittest.TestCase):
                         "distribution_option": "resolute",
                     },
                 ),
-                mock.patch.object(cli, "_invoke_helper", return_value=0) as invoke,
+                mock.patch.object(cli, "configure_logging", calls.configure),
+                mock.patch.object(cli, "log", calls.log),
+                mock.patch.object(cli, "_invoke_helper", calls.invoke) as invoke,
             ):
                 self.assertEqual(cli.main(["create", "ubuntu"]), 0)
+        calls.assert_has_calls(
+            [
+                mock.call.configure(),
+                mock.call.log(
+                    "Creating Ubuntu Resolute (26.04) space 'ubuntu'..."
+                ),
+                mock.call.invoke("create", mock.ANY),
+            ]
+        )
         operation, payload = invoke.call_args.args
         self.assertEqual(operation, "create")
         self.assertEqual(payload["distribution"]["version"], "resolute")

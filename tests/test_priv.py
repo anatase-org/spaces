@@ -127,6 +127,18 @@ class PrivilegedTests(unittest.TestCase):
         self.assertTrue((space / "home").is_dir())
         self.assertTrue((space / "info.json").is_file())
 
+    def test_keyboard_interrupt_returns_130(self) -> None:
+        payload = json.dumps(self.info)
+        with (
+            mock.patch.object(priv.os, "geteuid", return_value=0),
+            mock.patch.object(priv, "create", side_effect=KeyboardInterrupt),
+            mock.patch.object(priv, "print") as print_output,
+        ):
+            self.assertEqual(priv.main(["create", payload]), 130)
+        print_output.assert_called_once_with(
+            "Exiting due to Ctrl+C", file=priv.sys.stderr
+        )
+
     def test_configure_merges_user_and_system(self) -> None:
         with mock.patch.object(ubuntu.subprocess, "run"):
             priv.create(self.info)

@@ -81,7 +81,7 @@ class SpacesLoggingTests(unittest.TestCase):
             output.getvalue().endswith("| first\n| second\n")
         )
 
-    def test_normal_records_start_with_bar_in_column_zero(self) -> None:
+    def test_normal_records_have_no_stream_prefix(self) -> None:
         output = io.StringIO()
         handler = SpacesHandler()
         record = logging.LogRecord(
@@ -94,9 +94,9 @@ class SpacesLoggingTests(unittest.TestCase):
         ):
             handler.emit(record)
 
-        self.assertEqual(output.getvalue(), "| first\n| second\n")
+        self.assertEqual(output.getvalue(), "first\nsecond\n")
 
-    def test_warning_records_keep_bar_in_column_zero(self) -> None:
+    def test_warning_records_have_no_stream_prefix(self) -> None:
         output = io.StringIO()
         handler = SpacesHandler()
         record = logging.LogRecord(
@@ -109,7 +109,7 @@ class SpacesLoggingTests(unittest.TestCase):
         ):
             handler.emit(record)
 
-        self.assertEqual(output.getvalue(), "| WARNING: careful\n")
+        self.assertEqual(output.getvalue(), "WARNING: careful\n")
 
     def test_non_terminal_stream_is_printed_directly(self) -> None:
         output = io.StringIO()

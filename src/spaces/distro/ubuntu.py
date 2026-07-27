@@ -18,6 +18,14 @@ RELEASES = {
 
 
 class UbuntuDistribution(Distribution):
+    def describe(self, metadata: Mapping[str, Any]) -> str:
+        self.validate(metadata)
+        version = str(metadata["version"])
+        return _(
+            "Ubuntu {version}",
+            version=RELEASES.get(version, version),
+        )
+
     def command(self, metadata: Mapping[str, Any], rootfs: Path) -> list[str]:
         self.validate(metadata)
         release = str(metadata["version"])

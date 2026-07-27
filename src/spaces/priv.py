@@ -232,16 +232,19 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    if os.geteuid() != 0:
-        print(_("spaces.priv must run as root."), file=sys.stderr)
-        return 1
-    arguments = build_parser().parse_args(argv)
     try:
+        if os.geteuid() != 0:
+            print(_("spaces.priv must run as root."), file=sys.stderr)
+            return 1
+        arguments = build_parser().parse_args(argv)
         payload = json.loads(arguments.payload)
         if arguments.command == "create":
             create(payload)
         else:
             configure(payload)
+    except KeyboardInterrupt:
+        print(_("Exiting due to Ctrl+C"), file=sys.stderr)
+        return 130
     except json.JSONDecodeError as error:
         print(_("Invalid JSON payload: {error}", error=error), file=sys.stderr)
         return 2

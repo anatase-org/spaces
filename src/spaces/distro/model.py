@@ -51,6 +51,10 @@ class Distribution:
             metadata[self.option_key] = option
         return metadata
 
+    def describe(self, metadata: Mapping[str, Any]) -> str:
+        self.validate(metadata)
+        return self.id
+
     def validate(self, metadata: Mapping[str, Any]) -> None:
         if metadata.get("id") != self.id:
             raise DistributionError(

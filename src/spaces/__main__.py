@@ -10,7 +10,7 @@ from typing import Any
 from . import _
 from . import core
 from .distro import DistributionError, get_driver
-from .logging import configure_logging, run_streamed
+from .logging import configure_logging, log, run_streamed
 from .tui import ask_custom_name, run_permission_wizard
 
 
@@ -128,6 +128,14 @@ def _create(distro_id: str) -> int:
         network=result["network"],
         home=result["home"],
     )
+    configure_logging()
+    log(
+        _(
+            "Creating {distribution} space {name!r}...",
+            distribution=driver.describe(distribution),
+            name=name,
+        )
+    )
     return_code = _invoke_helper("create", info)
     if return_code == 0 and distro_id == "custom":
         print(
@@ -188,11 +196,14 @@ def _configure(name: str, *, user_only: bool) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    arguments = build_parser().parse_args(argv)
     try:
+        arguments = build_parser().parse_args(argv)
         if arguments.command == "create":
             return _create(arguments.type)
         return _configure(arguments.name, user_only=arguments.user)
+    except KeyboardInterrupt:
+        print(_("Exiting due to Ctrl+C"), file=sys.stderr)
+        return 130
     except core.SpacesError as error:
         print(_("spaces: {error}", error=error), file=sys.stderr)
         return 1
