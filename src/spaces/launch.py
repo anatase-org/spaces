@@ -13,15 +13,39 @@ from . import core
 
 NSPAWN = "/usr/bin/systemd-nspawn"
 API_VFS_WRITABLE = "SYSTEMD_NSPAWN_API_VFS_WRITABLE"
-NETWORK_ARGUMENTS = {
-    "basic": (
-        "--drop-capability=CAP_NET_BIND_SERVICE,CAP_NET_RAW",
-    ),
-    "advanced": (
-        "--drop-capability=CAP_NET_RAW",
-    ),
+BASE_CAPS = (
+    # This is the initial set by nspawn and should be trimmed
+    "CAP_AUDIT_CONTROL",
+    "CAP_AUDIT_WRITE",
+    "CAP_CHOWN",
+    "CAP_DAC_OVERRIDE",
+    "CAP_DAC_READ_SEARCH",
+    "CAP_FOWNER",
+    "CAP_FSETID",
+    "CAP_IPC_OWNER",
+    "CAP_KILL",
+    "CAP_LEASE",
+    "CAP_LINUX_IMMUTABLE",
+    "CAP_MKNOD",
+    "CAP_SETFCAP",
+    "CAP_SETGID",
+    "CAP_SETPCAP",
+    "CAP_SETUID",
+    "CAP_SYS_ADMIN", # todo: slowly work towards removing this by default
+    "CAP_SYS_BOOT",
+    "CAP_SYS_CHROOT",
+    "CAP_SYS_NICE",
+    "CAP_SYS_PTRACE",
+    "CAP_SYS_RESOURCE",
+    "CAP_SYS_TTY_CONFIG",
+)
+NETWORK_CAPS = {
+    "basic": (),
+    "advanced": ("CAP_NET_BIND_SERVICE",),
     "admin": (
-        "--capability=CAP_NET_RAW,CAP_NET_ADMIN",
+        "CAP_NET_BIND_SERVICE",
+        "CAP_NET_RAW",
+        "CAP_NET_ADMIN",
     ),
 }
 
@@ -56,6 +80,7 @@ def _load_space(space_name: str) -> tuple[Path, dict[str, Any]]:
 
 
 def _command(space_name: str, rootfs: Path, network: str) -> list[str]:
+    capabilities = (*BASE_CAPS, *NETWORK_CAPS[network])
     return [
         NSPAWN,
         "--quiet",
@@ -68,7 +93,8 @@ def _command(space_name: str, rootfs: Path, network: str) -> list[str]:
         "--keep-unit",
         "--settings=no",
         "--notify-ready=yes",
-        *NETWORK_ARGUMENTS[network],
+        "--drop-capability=all",
+        f"--capability={','.join(capabilities)}",
     ]
 
 

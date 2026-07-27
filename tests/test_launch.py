@@ -44,15 +44,38 @@ class LaunchTests(unittest.TestCase):
         )
 
     def test_network_permissions_build_expected_launch(self) -> None:
-        expected_arguments = {
-            "basic": [
-                "--drop-capability=CAP_NET_BIND_SERVICE,CAP_NET_RAW",
-            ],
-            "advanced": [
-                "--drop-capability=CAP_NET_RAW",
-            ],
+        base_caps = [
+            "CAP_AUDIT_CONTROL",
+            "CAP_AUDIT_WRITE",
+            "CAP_CHOWN",
+            "CAP_DAC_OVERRIDE",
+            "CAP_DAC_READ_SEARCH",
+            "CAP_FOWNER",
+            "CAP_FSETID",
+            "CAP_IPC_OWNER",
+            "CAP_KILL",
+            "CAP_LEASE",
+            "CAP_LINUX_IMMUTABLE",
+            "CAP_MKNOD",
+            "CAP_SETFCAP",
+            "CAP_SETGID",
+            "CAP_SETPCAP",
+            "CAP_SETUID",
+            "CAP_SYS_ADMIN",
+            "CAP_SYS_BOOT",
+            "CAP_SYS_CHROOT",
+            "CAP_SYS_NICE",
+            "CAP_SYS_PTRACE",
+            "CAP_SYS_RESOURCE",
+            "CAP_SYS_TTY_CONFIG",
+        ]
+        network_caps = {
+            "basic": [],
+            "advanced": ["CAP_NET_BIND_SERVICE"],
             "admin": [
-                "--capability=CAP_NET_RAW,CAP_NET_ADMIN",
+                "CAP_NET_BIND_SERVICE",
+                "CAP_NET_RAW",
+                "CAP_NET_ADMIN",
             ],
         }
         common = [
@@ -67,9 +90,10 @@ class LaunchTests(unittest.TestCase):
             "--keep-unit",
             "--settings=no",
             "--notify-ready=yes",
+            "--drop-capability=all",
         ]
 
-        for network, network_arguments in expected_arguments.items():
+        for network, added_caps in network_caps.items():
             with self.subTest(network=network):
                 self._write_info(network)
                 caller_thread = threading.current_thread()
@@ -100,7 +124,13 @@ class LaunchTests(unittest.TestCase):
                 self.assertIs(called_thread, caller_thread)
                 run_mock.assert_called_once()
                 arguments, = run_mock.call_args.args
-                self.assertEqual(arguments, [*common, *network_arguments])
+                self.assertEqual(
+                    arguments,
+                    [
+                        *common,
+                        f"--capability={','.join((*base_caps, *added_caps))}",
+                    ],
+                )
                 self.assertFalse(run_mock.call_args.kwargs["check"])
                 environment = run_mock.call_args.kwargs["env"]
                 self.assertEqual(environment["PRESERVED"], "yes")
