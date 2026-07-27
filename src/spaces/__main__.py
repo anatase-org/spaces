@@ -33,20 +33,6 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _confirm_rebuild(path: Path) -> bool:
-    try:
-        answer = input(
-            _(
-                "Space {name!r} already exists. Recreate it while preserving "
-                "home data? [Y/n] ",
-                name=path.name,
-            )
-        )
-    except (EOFError, KeyboardInterrupt):
-        return False
-    return answer.strip().casefold() in {"", "y", "yes"}
-
-
 def _helper_command(operation: str, payload: dict[str, Any]) -> list[str]:
     helper = shutil.which("spaces.priv")
     if helper:
@@ -105,12 +91,9 @@ def _create(distro_id: str) -> int:
         name = driver.default_name
 
     target = core.STATE_ROOT / name
-    existing = target.exists() or target.is_symlink()
-    if existing and not _confirm_rebuild(target):
-        print(_("Creation cancelled."))
-        return 0
+    override = target.exists() or target.is_symlink()
 
-    existing_info = core.load_info(target / "info.json") if existing else None
+    existing_info = core.load_info(target / "info.json") if override else None
     network, selected_home = core.defaults_from_info(existing_info, identity)
     existing_distribution = (
         existing_info.get("distribution") if existing_info else None
@@ -129,6 +112,7 @@ def _create(distro_id: str) -> int:
         distribution_options=distribution_options,
         distribution_value=distribution_value,
         submit_label=_("Create"),
+        override=override,
     )
     if result is None:
         return 130

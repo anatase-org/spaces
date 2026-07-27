@@ -296,6 +296,7 @@ class PermissionForm(
         distribution_options: list[tuple[str, str]],
         distribution_value: str | None,
         submit_label: str = _("Create"),
+        override: bool = False,
     ) -> None:
         super().__init__(ansi_color=True)
         self.home = home
@@ -318,7 +319,8 @@ class PermissionForm(
         self.distribution_value = distribution_value
         self.submit_label = submit_label
         self.steps = (
-            (["system"] if include_system else [])
+            (["override"] if override else [])
+            + (["system"] if include_system else [])
             + ["user"]
             + (["distribution"] if distribution_options else [])
         )
@@ -327,6 +329,15 @@ class PermissionForm(
     def compose(self) -> ComposeResult:
         with Vertical(id="form"):
             yield Label("", id="step-title")
+            if "override" in self.steps:
+                with Vertical(id="override-step", classes="step"):
+                    yield Static(
+                        _(
+                            "The existing space will be overwritten. "
+                            "Its home data will be preserved."
+                        ),
+                        classes="description",
+                    )
             if self.include_system:
                 with Vertical(id="system-step", classes="step"):
                     yield Static(
@@ -414,6 +425,7 @@ class PermissionForm(
             self.query_one(f"#{step}-step").set_class(step != current, "hidden")
 
         titles = {
+            "override": _("Space already exists"),
             "system": _("System permissions"),
             "user": _("User permissions"),
             "distribution": _("Distribution settings"),
@@ -438,11 +450,16 @@ class PermissionForm(
             markup=False,
         )
         next_button.refresh(layout=True)
+        select_button = self.query_one("#select", Button)
+        select_button.disabled = current == "override"
         focus_targets = {
             "system": "#network",
             "user": "#home-folders",
             "distribution": "#distribution-option",
         }
+        if current == "override":
+            next_button.focus()
+            return
         focus_target = self.query_one(focus_targets[current])
         if isinstance(focus_target, RadioSet):
             pressed_index = focus_target.pressed_index
@@ -454,6 +471,8 @@ class PermissionForm(
         """Select or toggle the highlighted option on the current step."""
 
         current = self.steps[self.step_index]
+        if current == "override":
+            return
         if current == "user":
             self.query_one(
                 "#home-folders", FolderSelectionList

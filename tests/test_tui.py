@@ -217,6 +217,44 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("ctrl+c")
         self.assertIsNone(app.return_value)
 
+    async def test_override_step_is_prepended(self) -> None:
+        app = PermissionForm(
+            home=Path("/home/user"),
+            folders=["Projects"],
+            network="basic",
+            selected_home=[],
+            include_system=True,
+            distribution_title="",
+            distribution_description="",
+            distribution_options=[],
+            distribution_value=None,
+            override=True,
+        )
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            self.assertEqual(
+                app.steps,
+                ["override", "system", "user"],
+            )
+            self.assertEqual(
+                str(app.query_one("#override-step Static").render()),
+                "The existing space will be overwritten. "
+                "Its home data will be preserved.",
+            )
+            self.assertEqual(
+                str(app.query_one("#step-title").render()),
+                "Space already exists (1/3)",
+            )
+            self.assertTrue(app.query_one("#select", Button).disabled)
+            self.assertTrue(app.query_one("#next", Button).has_focus)
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertEqual(
+                str(app.query_one("#step-title").render()),
+                "System permissions (2/3)",
+            )
+            self.assertFalse(app.query_one("#select", Button).disabled)
+
     def test_name_prompt_runs_inline(self) -> None:
         with mock.patch.object(NamePrompt, "run", return_value="work") as run:
             self.assertEqual(ask_custom_name(), "work")

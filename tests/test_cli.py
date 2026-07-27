@@ -110,7 +110,7 @@ class CliTests(unittest.TestCase):
         patch = invoke.call_args.args[1]
         self.assertNotIn("system", patch["permissions"])
 
-    def test_existing_space_can_cancel_before_tui(self) -> None:
+    def test_existing_space_prepends_override_step(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary) / "state"
             (state / "ubuntu").mkdir(parents=True)
@@ -121,11 +121,12 @@ class CliTests(unittest.TestCase):
                     "initiating_identity",
                     return_value=core.Identity(1000, 1000, Path(temporary)),
                 ),
-                mock.patch.object(cli, "_confirm_rebuild", return_value=False),
-                mock.patch.object(cli, "run_permission_wizard") as wizard,
+                mock.patch.object(
+                    cli, "run_permission_wizard", return_value=None
+                ) as wizard,
             ):
-                self.assertEqual(cli.main(["create", "ubuntu"]), 0)
-        wizard.assert_not_called()
+                self.assertEqual(cli.main(["create", "ubuntu"]), 130)
+        self.assertTrue(wizard.call_args.kwargs["override"])
 
 
 if __name__ == "__main__":
