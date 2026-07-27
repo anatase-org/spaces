@@ -36,8 +36,8 @@ def _confirm_rebuild(path: Path) -> bool:
     try:
         answer = input(
             _(
-                "Space {name!r} already exists. Recreate rootfs and preserve "
-                "home? [Y/n] ",
+                "Space {name!r} already exists. Recreate it while preserving "
+                "home data? [Y/n] ",
                 name=path.name,
             )
         )
