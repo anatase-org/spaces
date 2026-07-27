@@ -239,6 +239,14 @@ def validate_configure_patch(value: object) -> dict[str, Any]:
     return patch
 
 
+def validate_delete_request(value: object) -> dict[str, Any]:
+    request = _require_mapping(value, "delete payload")
+    if set(request) != {"name"}:
+        raise SpacesError(_("Delete payload must contain only a space name."))
+    validate_space_name(request["name"])
+    return request
+
+
 def load_info(path: Path) -> dict[str, Any] | None:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))

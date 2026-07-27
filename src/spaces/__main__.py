@@ -30,6 +30,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=_("configure only the current user's permissions"),
     )
+
+    delete_parser = subparsers.add_parser(
+        "delete", help=_("permanently delete a space")
+    )
+    delete_parser.add_argument("name")
+    delete_parser.add_argument(
+        "--noconfirm",
+        action="store_true",
+        help=_("delete without prompting for confirmation"),
+    )
     return parser
 
 
@@ -49,7 +59,7 @@ def _helper_command(operation: str, payload: dict[str, Any]) -> list[str]:
         pkexec = shutil.which("pkexec")
         if pkexec is None:
             raise core.SpacesError(
-                _("pkexec is required to create or configure spaces.")
+                _("pkexec is required to create, configure, or delete spaces.")
             )
         command.insert(0, pkexec)
     return command
@@ -195,12 +205,41 @@ def _configure(name: str, *, user_only: bool) -> int:
     return _invoke_helper("configure", patch)
 
 
+def _delete(name: str, *, noconfirm: bool) -> int:
+    core.validate_space_name(name)
+    target = core.STATE_ROOT / name
+    if target.is_symlink() or not target.is_dir():
+        raise core.SpacesError(
+            _("Space {name!r} does not exist.", name=name)
+        )
+
+    if not noconfirm:
+        response = input(
+            _(
+                "Press Enter to permanently delete space {name!r} at {target}, "
+                "or type anything to cancel: ",
+                name=name,
+                target=target,
+            )
+        )
+        if response:
+            print(_("Deletion cancelled."))
+            return 130
+    return _invoke_helper("delete", {"name": name})
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         arguments = build_parser().parse_args(argv)
         if arguments.command == "create":
             return _create(arguments.type)
-        return _configure(arguments.name, user_only=arguments.user)
+        elif arguments.command == "configure":
+            return _configure(arguments.name, user_only=arguments.user)
+        elif arguments.command == "delete":
+            return _delete(arguments.name, noconfirm=arguments.noconfirm)
+        raise core.SpacesError(
+            _("Unknown command: {command!r}.", command=arguments.command)
+        )
     except KeyboardInterrupt:
         print(_("Exiting due to Ctrl+C"), file=sys.stderr)
         return 130

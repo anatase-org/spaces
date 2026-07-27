@@ -196,6 +196,40 @@ class PrivilegedTests(unittest.TestCase):
         )
         self.assertEqual(updated["permissions"]["system"]["network"], "basic")
 
+    def test_delete_removes_entire_space(self) -> None:
+        space = self.state_root / "work"
+        (space / "rootfs").mkdir(parents=True)
+        (space / "home").mkdir()
+        (space / "home" / "file").write_text("delete", encoding="utf-8")
+
+        priv.delete({"name": "work"})
+
+        self.assertFalse(space.exists())
+
+    def test_delete_rejects_symlink(self) -> None:
+        outside = Path(self.temporary.name) / "outside"
+        outside.mkdir()
+        self.state_root.mkdir()
+        (self.state_root / "work").symlink_to(outside, target_is_directory=True)
+
+        with self.assertRaises(core.SpacesError):
+            priv.delete({"name": "work"})
+
+        self.assertTrue(outside.is_dir())
+
+    def test_delete_refuses_space_with_mount(self) -> None:
+        space = self.state_root / "work"
+        (space / "rootfs").mkdir(parents=True)
+        mountinfo = f"1 0 0:1 / {space}/rootfs/proc rw - proc proc rw\n"
+
+        with (
+            mock.patch.object(Path, "read_text", return_value=mountinfo),
+            self.assertRaises(core.SpacesError),
+        ):
+            priv.delete({"name": "work"})
+
+        self.assertTrue(space.is_dir())
+
     def test_creation_rejects_another_uid(self) -> None:
         info = core.create_info(
             "work",

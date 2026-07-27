@@ -83,7 +83,7 @@ def _unescape_mount_path(value: str) -> str:
 def _assert_no_mounts(path: Path) -> None:
     if not path.exists() or path.is_symlink():
         return
-    rootfs = path.resolve()
+    target = path.resolve()
     try:
         mountinfo = Path("/proc/self/mountinfo").read_text(encoding="utf-8")
     except OSError as error:
@@ -95,12 +95,12 @@ def _assert_no_mounts(path: Path) -> None:
         if len(fields) < 5:
             continue
         mountpoint = Path(_unescape_mount_path(fields[4]))
-        if mountpoint == rootfs or rootfs in mountpoint.parents:
+        if mountpoint == target or target in mountpoint.parents:
             raise core.SpacesError(
                 _(
-                    "Cannot recreate {rootfs} while {mountpoint} is mounted "
-                    "beneath it.",
-                    rootfs=rootfs,
+                    "Cannot remove {target} while {mountpoint} is mounted "
+                    "at or beneath it.",
+                    target=target,
                     mountpoint=mountpoint,
                 )
             )
@@ -222,10 +222,24 @@ def configure(patch: dict[str, Any]) -> None:
         _write_info(space, info)
 
 
+def delete(request: dict[str, Any]) -> None:
+    core.validate_delete_request(request)
+    name = request["name"]
+    space = core.STATE_ROOT / name
+
+    with _state_lock():
+        if space.is_symlink() or not space.is_dir():
+            raise core.SpacesError(
+                _("Space {name!r} does not exist.", name=name)
+            )
+        _assert_no_mounts(space)
+        shutil.rmtree(space)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="spaces.priv")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for command in ("create", "configure"):
+    for command in ("create", "configure", "delete"):
         command_parser = subparsers.add_parser(command)
         command_parser.add_argument("payload")
     return parser
@@ -240,8 +254,14 @@ def main(argv: list[str] | None = None) -> int:
         payload = json.loads(arguments.payload)
         if arguments.command == "create":
             create(payload)
-        else:
+        elif arguments.command == "configure":
             configure(payload)
+        elif arguments.command == "delete":
+            delete(payload)
+        else:
+            raise core.SpacesError(
+                _("Unknown privileged command: {command!r}.", command=arguments.command)
+            )
     except KeyboardInterrupt:
         print(_("Exiting due to Ctrl+C"), file=sys.stderr)
         return 130

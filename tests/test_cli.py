@@ -133,6 +133,62 @@ class CliTests(unittest.TestCase):
         patch = invoke.call_args.args[1]
         self.assertNotIn("system", patch["permissions"])
 
+    def test_delete_requires_enter_before_invoking_helper(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            (state / "work").mkdir(parents=True)
+            with (
+                mock.patch.object(core, "STATE_ROOT", state),
+                mock.patch("builtins.input", return_value="") as prompt,
+                mock.patch.object(cli, "_invoke_helper", return_value=0) as invoke,
+            ):
+                self.assertEqual(cli.main(["delete", "work"]), 0)
+
+        self.assertIn("Press Enter", prompt.call_args.args[0])
+        invoke.assert_called_once_with("delete", {"name": "work"})
+
+    def test_delete_is_cancelled_by_nonempty_response(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            (state / "work").mkdir(parents=True)
+            with (
+                mock.patch.object(core, "STATE_ROOT", state),
+                mock.patch("builtins.input", return_value="no"),
+                mock.patch.object(cli, "_invoke_helper") as invoke,
+            ):
+                self.assertEqual(cli.main(["delete", "work"]), 130)
+
+        invoke.assert_not_called()
+
+    def test_delete_noconfirm_skips_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            (state / "work").mkdir(parents=True)
+            with (
+                mock.patch.object(core, "STATE_ROOT", state),
+                mock.patch("builtins.input") as prompt,
+                mock.patch.object(cli, "_invoke_helper", return_value=0) as invoke,
+            ):
+                self.assertEqual(
+                    cli.main(["delete", "work", "--noconfirm"]),
+                    0,
+                )
+
+        prompt.assert_not_called()
+        invoke.assert_called_once_with("delete", {"name": "work"})
+
+    def test_delete_rejects_missing_space_without_prompting(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            with (
+                mock.patch.object(core, "STATE_ROOT", Path(temporary)),
+                mock.patch("builtins.input") as prompt,
+                mock.patch.object(cli, "_invoke_helper") as invoke,
+            ):
+                self.assertEqual(cli.main(["delete", "missing"]), 1)
+
+        prompt.assert_not_called()
+        invoke.assert_not_called()
+
     def test_existing_space_prepends_override_step(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary) / "state"
