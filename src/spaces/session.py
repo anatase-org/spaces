@@ -927,7 +927,7 @@ def _session_unit_command(
         "--pty",
         "--pipe",
         "--property=PrivateMounts=yes",
-        "--property=PAMName=login",
+        "--property=ExitType=cgroup",
         "--property=KillMode=control-group",
     ]
     for binding in plan.binds:
@@ -982,6 +982,22 @@ def _stop_session_unit(space_name: str, unit_name: str) -> None:
     )
 
 
+def _ensure_guest_user_manager(
+    space_name: str,
+    user: pwd.struct_passwd,
+) -> None:
+    subprocess.run(
+        [
+            SYSTEMCTL,
+            f"--machine={space_name}",
+            "--no-ask-password",
+            "start",
+            f"user@{user.pw_uid}.service",
+        ],
+        check=True,
+    )
+
+
 def enter(
     user: pwd.struct_passwd,
     space_name: str,
@@ -1009,6 +1025,7 @@ def enter(
                 Path(name),
             )
             try:
+                _ensure_guest_user_manager(space_name, user)
                 _prepare_guest_session_directories(space_name, plan, user)
                 for binding in plan.binds:
                     mounted.append(binding)

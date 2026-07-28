@@ -200,7 +200,8 @@ class SessionPrivilegedTests(unittest.TestCase):
         )
 
         self.assertIn("--property=PrivateMounts=yes", command)
-        self.assertIn("--property=PAMName=login", command)
+        self.assertNotIn("--property=PAMName=login", command)
+        self.assertIn("--property=ExitType=cgroup", command)
         self.assertIn("--property=KillMode=control-group", command)
         self.assertIn("--expand-environment=no", command)
         self.assertIn("--uid=alice", command)
@@ -261,6 +262,22 @@ class SessionPrivilegedTests(unittest.TestCase):
                 "--",
                 "/run/spaces-staging/token/wayland",
             ],
+        )
+
+    def test_session_starts_guest_user_manager_for_bus(self) -> None:
+        account = mock.Mock(pw_uid=1000)
+        with mock.patch.object(session.subprocess, "run") as run:
+            session._ensure_guest_user_manager("work", account)
+
+        run.assert_called_once_with(
+            [
+                "/usr/bin/systemctl",
+                "--machine=work",
+                "--no-ask-password",
+                "start",
+                "user@1000.service",
+            ],
+            check=True,
         )
 
     def test_validated_source_rejects_escape_type_owner_and_access(
@@ -370,6 +387,7 @@ class SessionPrivilegedTests(unittest.TestCase):
                 "_prepare_session_plan",
                 return_value=plan,
             ),
+            mock.patch.object(session, "_ensure_guest_user_manager"),
             mock.patch.object(
                 session,
                 "_prepare_guest_session_directories",
@@ -496,6 +514,7 @@ class SessionPrivilegedTests(unittest.TestCase):
                 "_prepare_session_plan",
                 return_value=plan,
             ),
+            mock.patch.object(session, "_ensure_guest_user_manager"),
             mock.patch.object(
                 session,
                 "_prepare_guest_session_directories",
