@@ -17,6 +17,9 @@ class CliTests(unittest.TestCase):
 
         with (
             mock.patch.object(cli, "_helper_command", return_value=command),
+            mock.patch.object(
+                cli, "_has_controlling_terminal", return_value=False
+            ),
             mock.patch.object(cli, "configure_logging") as configure_logging,
             mock.patch.object(
                 cli, "run_streamed", return_value=completed
@@ -27,6 +30,73 @@ class CliTests(unittest.TestCase):
         configure_logging.assert_called_once_with(rich=True)
         run_streamed.assert_called_once_with(command, check=False)
         self.assertEqual(returncode, 42)
+
+    def test_helper_prefers_tty_polkit_authentication(self) -> None:
+        command = ["pkexec", "/usr/bin/spaces.priv", "create", "{}"]
+        completed = subprocess.CompletedProcess(command, 0)
+        agent = mock.Mock()
+        agent.poll.return_value = None
+
+        with (
+            mock.patch.object(cli.os, "geteuid", return_value=1000),
+            mock.patch.object(
+                cli, "_has_controlling_terminal", return_value=True
+            ),
+            mock.patch.object(
+                cli.shutil,
+                "which",
+                return_value="/usr/bin/pkttyagent",
+            ),
+            mock.patch.object(cli.os, "pipe", return_value=(10, 11)),
+            mock.patch.object(cli.os, "read", return_value=b"") as read,
+            mock.patch.object(cli.os, "close") as close,
+            mock.patch.object(
+                cli.subprocess, "Popen", return_value=agent
+            ) as popen,
+            mock.patch.object(cli, "_helper_command", return_value=command),
+            mock.patch.object(cli, "configure_logging"),
+            mock.patch.object(
+                cli, "run_streamed", return_value=completed
+            ),
+            mock.patch.object(cli.os, "getpid", return_value=1234),
+        ):
+            self.assertEqual(cli._invoke_helper("create", {}), 0)
+
+        popen.assert_called_once_with(
+            [
+                "/usr/bin/pkttyagent",
+                "--process",
+                "1234",
+                "--notify-fd",
+                "11",
+            ],
+            pass_fds=(11,),
+        )
+        read.assert_called_once_with(10, 1)
+        self.assertEqual(close.call_args_list, [mock.call(11), mock.call(10)])
+        agent.terminate.assert_called_once_with()
+        agent.wait.assert_called_once_with()
+
+    def test_helper_uses_graphical_auth_without_a_tty_agent(self) -> None:
+        command = ["pkexec", "/usr/bin/spaces.priv", "create", "{}"]
+        completed = subprocess.CompletedProcess(command, 0)
+
+        with (
+            mock.patch.object(cli.os, "geteuid", return_value=1000),
+            mock.patch.object(
+                cli, "_has_controlling_terminal", return_value=True
+            ),
+            mock.patch.object(cli.shutil, "which", return_value=None),
+            mock.patch.object(cli.subprocess, "Popen") as popen,
+            mock.patch.object(cli, "_helper_command", return_value=command),
+            mock.patch.object(cli, "configure_logging"),
+            mock.patch.object(
+                cli, "run_streamed", return_value=completed
+            ),
+        ):
+            self.assertEqual(cli._invoke_helper("create", {}), 0)
+
+        popen.assert_not_called()
 
     def test_cp_helper_keeps_callers_working_directory(self) -> None:
         with (
@@ -50,6 +120,9 @@ class CliTests(unittest.TestCase):
         with (
             mock.patch.object(
                 cli, "_raw_helper_command", return_value=command
+            ),
+            mock.patch.object(
+                cli, "_has_controlling_terminal", return_value=False
             ),
             mock.patch.object(
                 cli.subprocess, "run", return_value=completed

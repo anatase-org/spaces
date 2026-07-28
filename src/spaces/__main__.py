@@ -1,10 +1,12 @@
 import argparse
+import contextlib
 import json
 import os
 import pwd
 import shutil
 import subprocess
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -130,13 +132,81 @@ def _helper_command(operation: str, payload: dict[str, Any]) -> list[str]:
     )
 
 
+def _has_controlling_terminal() -> bool:
+    try:
+        descriptor = os.open(
+            "/dev/tty",
+            os.O_RDWR | os.O_CLOEXEC,
+        )
+    except OSError:
+        return False
+    os.close(descriptor)
+    return True
+
+
+@contextlib.contextmanager
+def _tty_polkit_agent() -> Iterator[None]:
+    if os.geteuid() == 0 or not _has_controlling_terminal():
+        yield
+        return
+
+    executable = shutil.which("pkttyagent")
+    if executable is None:
+        yield
+        return
+
+    try:
+        ready_descriptor, notify_descriptor = os.pipe()
+    except OSError:
+        yield
+        return
+    ready_descriptor_open = True
+    process: subprocess.Popen[bytes] | None = None
+    try:
+        try:
+            process = subprocess.Popen(
+                [
+                    executable,
+                    "--process",
+                    str(os.getpid()),
+                    "--notify-fd",
+                    str(notify_descriptor),
+                ],
+                pass_fds=(notify_descriptor,),
+            )
+        except OSError:
+            yield
+            return
+        finally:
+            os.close(notify_descriptor)
+
+        try:
+            os.read(ready_descriptor, 1)
+        finally:
+            os.close(ready_descriptor)
+            ready_descriptor_open = False
+
+        yield
+    finally:
+        if ready_descriptor_open:
+            os.close(ready_descriptor)
+        if process is not None:
+            if process.poll() is None:
+                try:
+                    process.terminate()
+                except ProcessLookupError:
+                    pass
+            process.wait()
+
+
 def _invoke_helper(operation: str, payload: dict[str, Any]) -> int:
     try:
         configure_logging(rich=True)
-        completed = run_streamed(
-            _helper_command(operation, payload),
-            check=False,
-        )
+        with _tty_polkit_agent():
+            completed = run_streamed(
+                _helper_command(operation, payload),
+                check=False,
+            )
     except OSError as error:
         raise core.SpacesError(
             _("Could not execute spaces.priv: {error}", error=error)
@@ -146,10 +216,11 @@ def _invoke_helper(operation: str, payload: dict[str, Any]) -> int:
 
 def _invoke_raw_helper(operation: str, arguments: list[str]) -> int:
     try:
-        completed = subprocess.run(
-            _raw_helper_command(operation, arguments),
-            check=False,
-        )
+        with _tty_polkit_agent():
+            completed = subprocess.run(
+                _raw_helper_command(operation, arguments),
+                check=False,
+            )
     except OSError as error:
         raise core.SpacesError(
             _("Could not execute spaces.priv: {error}", error=error)
