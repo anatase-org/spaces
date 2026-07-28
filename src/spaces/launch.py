@@ -15,7 +15,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -101,11 +101,6 @@ class HomeMount:
     destination: str
     source: Path
     uid: int
-    source_fd: int = field(compare=False)
-
-    @property
-    def pinned_source(self) -> str:
-        return f"/proc/{os.getpid()}/fd/{self.source_fd}"
 
 
 def _apply_rootfs_fixups(rootfs: Path) -> None:
@@ -548,77 +543,83 @@ def _ensure_user_homes(rootfs: Path, users: tuple[SpaceUser, ...]) -> None:
 
 def _prepare_mounts(users: tuple[SpaceUser, ...]) -> tuple[HomeMount, ...]:
     mounts: list[HomeMount] = []
-    try:
-        for user in users:
-            for name in user.permitted_home:
-                source = user.host_home / name
+    for user in users:
+        for name in user.permitted_home:
+            source = user.host_home / name
+            try:
+                source_fd = os.open(
+                    source,
+                    os.O_PATH
+                    | os.O_DIRECTORY
+                    | os.O_NOFOLLOW
+                    | os.O_CLOEXEC,
+                )
                 try:
-                    source_fd = os.open(
-                        source,
-                        os.O_PATH
-                        | os.O_DIRECTORY
-                        | os.O_NOFOLLOW
-                        | os.O_CLOEXEC,
-                    )
-                except OSError:
-                    logger.warning(
-                        _(
-                            "Permitted home source {path} is missing or unsafe; "
-                            "skipping it.",
-                            path=source,
-                        )
-                    )
-                    continue
-
-                persistent_target = user.space_home / name
-                created_target = False
-                try:
-                    if persistent_target.is_symlink() or (
-                        persistent_target.exists()
-                        and not persistent_target.is_dir()
+                    source_stat = os.fstat(source_fd)
+                    resolved_source = source.resolve(strict=True)
+                    resolved_stat = resolved_source.stat()
+                    if (
+                        source_stat.st_dev != resolved_stat.st_dev
+                        or source_stat.st_ino != resolved_stat.st_ino
                     ):
-                        os.close(source_fd)
-                        logger.warning(
-                            _(
-                                "Space home destination {path} is unsafe; "
-                                "skipping it.",
-                                path=persistent_target,
-                            )
+                        raise OSError(
+                            _("Permitted home source changed during validation.")
                         )
-                        continue
-                    if not persistent_target.exists():
-                        persistent_target.mkdir(mode=0o700)
-                        created_target = True
-                        os.chown(persistent_target, user.uid, user.gid)
-                except OSError as error:
+                finally:
                     os.close(source_fd)
-                    logger.warning(
-                        _(
-                            "Could not safely prepare space home destination "
-                            "{path}; skipping it: {error}",
-                            path=persistent_target,
-                            error=error,
-                        )
-                    )
-                    if created_target:
-                        try:
-                            persistent_target.rmdir()
-                        except OSError:
-                            pass
-                    continue
-
-                mounts.append(
-                    HomeMount(
-                        destination=str(user.guest_home / name),
-                        source=source,
-                        uid=user.uid,
-                        source_fd=source_fd,
+            except OSError:
+                logger.warning(
+                    _(
+                        "Permitted home source {path} is missing or unsafe; "
+                        "skipping it.",
+                        path=source,
                     )
                 )
-        return tuple(sorted(mounts))
-    except Exception:
-        _close_mounts(mounts)
-        raise
+                continue
+
+            persistent_target = user.space_home / name
+            created_target = False
+            try:
+                if persistent_target.is_symlink() or (
+                    persistent_target.exists()
+                    and not persistent_target.is_dir()
+                ):
+                    logger.warning(
+                        _(
+                            "Space home destination {path} is unsafe; "
+                            "skipping it.",
+                            path=persistent_target,
+                        )
+                    )
+                    continue
+                if not persistent_target.exists():
+                    persistent_target.mkdir(mode=0o700)
+                    created_target = True
+                    os.chown(persistent_target, user.uid, user.gid)
+            except OSError as error:
+                logger.warning(
+                    _(
+                        "Could not safely prepare space home destination "
+                        "{path}; skipping it: {error}",
+                        path=persistent_target,
+                        error=error,
+                    )
+                )
+                if created_target:
+                    try:
+                        persistent_target.rmdir()
+                    except OSError:
+                        pass
+                continue
+
+            mounts.append(
+                HomeMount(
+                    destination=str(user.guest_home / name),
+                    source=resolved_source,
+                    uid=user.uid,
+                )
+            )
+    return tuple(sorted(mounts))
 
 
 def _plan_mounts(
@@ -637,19 +638,11 @@ def _mount_summary(mounts: Iterable[HomeMount]) -> str:
     return ", ".join(descriptions) if descriptions else _("none")
 
 
-def _close_mounts(mounts: Any) -> None:
-    for mount in mounts:
-        try:
-            os.close(mount.source_fd)
-        except OSError:
-            pass
-
-
 def _bind_argument(mount: HomeMount) -> str:
     def escape(value: str) -> str:
         return value.replace("\\", "\\\\").replace(":", "\\:")
 
-    return f"--bind={escape(mount.pinned_source)}:{escape(mount.destination)}"
+    return f"--bind={escape(str(mount.source))}:{escape(mount.destination)}"
 
 
 class _LoginMonitor:
@@ -847,6 +840,10 @@ class _MountWorker:
             self._attached.wait()
             if self._stopping.is_set() or self._process is None:
                 return
+            if self._eligible_uids:
+                if not self._wait_until_registered():
+                    return
+                self._log_initial_mounts()
             self._reconcile()
             while not self._stopping.is_set() and self._monitor.wait():
                 if self._stopping.is_set():
@@ -931,6 +928,22 @@ class _MountWorker:
         self._log_user_transitions(logged_in, logged_out, added, removed)
         self._eligible_uids = eligible_uids
 
+    def _log_initial_mounts(self) -> None:
+        for user in self._users:
+            if user.uid not in self._eligible_uids:
+                continue
+            mounts = _mount_summary(
+                mount for mount in self._mounted if mount.uid == user.uid
+            )
+            identity = f"{user.name} ({user.uid}:{user.gid})"
+            logger.info(
+                _(
+                    "User {user} mounted at space launch: {mounts}.",
+                    user=identity,
+                    mounts=mounts,
+                )
+            )
+
     def _log_user_transitions(
         self,
         logged_in: frozenset[int],
@@ -972,7 +985,7 @@ class _MountWorker:
                 "--mkdir",
                 "bind",
                 self._space_name,
-                mount.pinned_source,
+                str(mount.source),
                 mount.destination,
             ],
             check=True,
@@ -1104,4 +1117,3 @@ def launch(space_name: str) -> int:
             worker.join()
         if monitor is not None:
             monitor.close()
-        _close_mounts(available_mounts)

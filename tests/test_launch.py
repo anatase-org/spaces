@@ -284,7 +284,10 @@ class LaunchTests(unittest.TestCase):
             for argument in arguments
             if argument.endswith(":/home/user/Projects")
         )
-        self.assertTrue(bind.startswith(f"--bind=/proc/{os.getpid()}/fd/"))
+        self.assertEqual(
+            bind,
+            f"--bind={self.host_home}/Projects:/home/user/Projects",
+        )
         mounts = self.worker_class.call_args.args[4]
         self.assertEqual(len(mounts), 1)
         self.assertEqual(mounts[0].destination, "/home/user/Projects")
@@ -694,40 +697,28 @@ class UserFixupTests(unittest.TestCase):
 
         with self.assertLogs(launch_module.logger, level="WARNING"):
             available = launch_module._prepare_mounts((user,))
-        try:
-            mounts = launch_module._plan_mounts(
-                available,
-                frozenset({user.uid}),
-            )
-            self.assertEqual(len(mounts), 1)
-            self.assertEqual(mounts[0].destination, "/home/alice/Project:One")
-            self.assertTrue(
-                os.path.samefile(
-                    mounts[0].pinned_source,
-                    user.host_home / "Project:One",
-                )
-            )
-            original = user.host_home / "original"
-            (user.host_home / "Project:One").rename(original)
-            (user.host_home / "Project:One").symlink_to(
-                Path("/etc"),
-                target_is_directory=True,
-            )
-            self.assertTrue(os.path.samefile(mounts[0].pinned_source, original))
-            self.assertEqual(
-                launch_module._bind_argument(mounts[0]),
-                (
-                    f"--bind=/proc/{os.getpid()}/fd/{mounts[0].source_fd}:"
-                    "/home/alice/Project\\:One"
-                ),
-            )
-            self.assertTrue((user.space_home / "Project:One").is_dir())
-            self.assertEqual(
-                launch_module._plan_mounts(available, frozenset()),
-                (),
-            )
-        finally:
-            launch_module._close_mounts(available)
+        mounts = launch_module._plan_mounts(
+            available,
+            frozenset({user.uid}),
+        )
+        self.assertEqual(len(mounts), 1)
+        self.assertEqual(mounts[0].destination, "/home/alice/Project:One")
+        self.assertEqual(
+            mounts[0].source,
+            (user.host_home / "Project:One").resolve(),
+        )
+        self.assertEqual(
+            launch_module._bind_argument(mounts[0]),
+            (
+                f"--bind={user.host_home}/Project\\:One:"
+                "/home/alice/Project\\:One"
+            ),
+        )
+        self.assertTrue((user.space_home / "Project:One").is_dir())
+        self.assertEqual(
+            launch_module._plan_mounts(available, frozenset()),
+            (),
+        )
 
     def test_mount_destination_preparation_failure_is_skipped(self) -> None:
         user = self._user(permitted=("Projects",))
@@ -795,7 +786,6 @@ class LoginAndMountWorkerTests(unittest.TestCase):
             destination="/home/user1000/Projects",
             source=Path("/host/Projects"),
             uid=1000,
-            source_fd=42,
         )
         monitor = mock.Mock()
         monitor.state.return_value = "lingering"
@@ -826,7 +816,6 @@ class LoginAndMountWorkerTests(unittest.TestCase):
             destination="/home/user1000/Projects",
             source=Path("/host/Projects"),
             uid=1000,
-            source_fd=42,
         )
         monitor = mock.Mock()
         monitor.state.return_value = "offline"
@@ -868,19 +857,57 @@ class LoginAndMountWorkerTests(unittest.TestCase):
             ],
         )
 
+    def test_initial_user_mounts_are_logged_after_registration(self) -> None:
+        user = self._user(1000)
+        mount = launch_module.HomeMount(
+            destination="/home/user1000/Projects",
+            source=Path("/host/Projects"),
+            uid=1000,
+        )
+        monitor = mock.Mock()
+        monitor.state.return_value = "active"
+        monitor.wait.return_value = False
+        worker = launch_module._MountWorker(
+            "work",
+            (user,),
+            monitor,
+            (mount,),
+            (mount,),
+            frozenset({user.uid}),
+        )
+        worker._registered = True
+        process = mock.Mock()
+        process.poll.return_value = None
+        worker.attach(process)
+
+        with self.assertLogs(
+            launch_module.logger,
+            level="INFO",
+        ) as logs:
+            worker._run()
+
+        self.assertEqual(
+            logs.output,
+            [
+                (
+                    "INFO:spaces.launch:User user1000 (1000:1000) mounted at "
+                    "space launch: /host/Projects -> "
+                    "/home/user1000/Projects."
+                )
+            ],
+        )
+
     def test_failed_runtime_mount_is_skipped(self) -> None:
         user = self._user(1000)
         failed_mount = launch_module.HomeMount(
             destination="/home/user1000/Documents",
             source=Path("/host/Documents"),
             uid=1000,
-            source_fd=42,
         )
         mounted = launch_module.HomeMount(
             destination="/home/user1000/Projects",
             source=Path("/host/Projects"),
             uid=1000,
-            source_fd=43,
         )
         monitor = mock.Mock()
         monitor.state.return_value = "active"
@@ -931,7 +958,6 @@ class LoginAndMountWorkerTests(unittest.TestCase):
             destination="/home/alice/Projects",
             source=Path("/host/Projects"),
             uid=1000,
-            source_fd=42,
         )
         completed = SimpleNamespace(stdout="home-alice-Projects.mount\n")
         with mock.patch.object(
@@ -993,7 +1019,6 @@ class LoginAndMountWorkerTests(unittest.TestCase):
             destination="/home/alice/Projects",
             source=Path("/host/Projects"),
             uid=1000,
-            source_fd=42,
         )
         with mock.patch.object(launch_module.subprocess, "run") as run:
             worker._add(mount)
@@ -1005,7 +1030,7 @@ class LoginAndMountWorkerTests(unittest.TestCase):
                 "--mkdir",
                 "bind",
                 "work",
-                f"/proc/{os.getpid()}/fd/42",
+                "/host/Projects",
                 "/home/alice/Projects",
             ],
             check=True,
