@@ -596,6 +596,29 @@ class UserFixupTests(unittest.TestCase):
             launch_module._read_database(self.etc / "group", 4),
         )
 
+    def test_reconcile_uses_bash_when_available(self) -> None:
+        binary = self.rootfs / "bin" / "bash"
+        binary.parent.mkdir()
+        binary.write_text("#!/bin/sh\n", encoding="utf-8")
+        binary.chmod(0o755)
+        self._write_accounts(
+            passwd_text=(
+                "root:x:0:0::/root:/bin/sh\n"
+                "alice:x:12345:12346::/old:/bin/sh\n"
+            ),
+            group_text="root:x:0:\nalice:x:12346:\n",
+        )
+        user = self._user(uid=12345, gid=12346)
+
+        launch_module._reconcile_accounts(self.rootfs, (user,))
+
+        passwd_records = launch_module._read_database(
+            self.etc / "passwd",
+            7,
+        )
+        account = next(record for record in passwd_records if record[0] == "alice")
+        self.assertEqual(account[6], "/bin/bash")
+
     def test_reconcile_rejects_name_and_uid_on_different_accounts(self) -> None:
         self._write_accounts(
             passwd_text=(

@@ -332,6 +332,23 @@ def _rename_members(
             )
 
 
+def _default_user_shell(rootfs: Path) -> str:
+    resolved_rootfs = rootfs.resolve(strict=True)
+    for shell in ("/bin/bash", "/usr/bin/bash"):
+        candidate = rootfs / shell.removeprefix("/")
+        try:
+            resolved = candidate.resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        if (
+            resolved.is_relative_to(resolved_rootfs)
+            and resolved.is_file()
+            and os.access(resolved, os.X_OK)
+        ):
+            return shell
+    return "/bin/sh"
+
+
 def _reconcile_accounts(rootfs: Path, users: tuple[SpaceUser, ...]) -> None:
     non_root_users = tuple(user for user in users if user.uid != 0)
     if not non_root_users:
@@ -374,6 +391,7 @@ def _reconcile_accounts(rootfs: Path, users: tuple[SpaceUser, ...]) -> None:
             _("Unsafe account database path: {path}.", path=gshadow_path)
         )
 
+    shell = _default_user_shell(rootfs)
     for user in non_root_users:
         names = {record[0]: index for index, record in enumerate(passwd_records)}
         uids = {
@@ -403,7 +421,7 @@ def _reconcile_accounts(rootfs: Path, users: tuple[SpaceUser, ...]) -> None:
                     str(user.gid),
                     "",
                     str(user.guest_home),
-                    "/bin/sh",
+                    shell,
                 ]
             )
         else:
@@ -414,7 +432,7 @@ def _reconcile_accounts(rootfs: Path, users: tuple[SpaceUser, ...]) -> None:
             account[2] = str(user.uid)
             account[3] = str(user.gid)
             account[5] = str(user.guest_home)
-            account[6] = "/bin/sh"
+            account[6] = shell
 
         gids = {
             _numeric_field(record, 2, group_path): index
