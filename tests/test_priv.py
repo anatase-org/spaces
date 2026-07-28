@@ -92,10 +92,11 @@ class PrivilegedTests(unittest.TestCase):
                         "--yes",
                         "--no-install-recommends",
                         "openssh-client",
-                        "python3",
                         "nano",
                         "sudo",
                         "polkitd",
+                        "breeze",
+                        "plasma-integration",
                     ],
                     check=True,
                 ),
@@ -136,7 +137,8 @@ class PrivilegedTests(unittest.TestCase):
                 mock.call("Bootstrapping Ubuntu Resolute (26.04)...", flush=True),
                 mock.call(
                     "Adding additional packages:\n"
-                    "openssh-client, python3, nano, sudo, polkitd",
+                    "openssh-client, nano, sudo, polkitd, "
+                    "breeze, plasma-integration",
                     flush=True,
                 ),
             ],

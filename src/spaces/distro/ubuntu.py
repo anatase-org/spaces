@@ -12,7 +12,15 @@ from .. import _
 from .model import Distribution, DistributionError
 
 
-PACKAGES = ("openssh-client", "python3", "nano", "sudo", "polkitd")
+PACKAGES = (
+    "openssh-client",
+    "nano",
+    "sudo",
+    "polkitd",
+    # these are required for plasma applications to look correct
+    "breeze",
+    "plasma-integration",
+)
 HOST_AUTHENTICATION_PROFILE = Path(
     "/usr/share/spaces/pam/spaces.ubuntu"
 )
