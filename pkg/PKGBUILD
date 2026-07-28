@@ -14,6 +14,7 @@ depends=(
   'polkit'
   'debootstrap'
   'ubuntu-keyring'
+  'systemd'
 )
 makedepends=(
   'python-build'

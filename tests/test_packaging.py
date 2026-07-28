@@ -60,6 +60,8 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("%systemd_post spaces@.service", spec)
         self.assertIn("%systemd_preun spaces@.service", spec)
         self.assertIn("%systemd_postun_with_restart spaces@.service", spec)
+        self.assertIn("Requires:       systemd\n", spec)
+        self.assertIn("Requires:       systemd-container\n", spec)
 
     def test_polkit_policy_requires_admin(self) -> None:
         policy = ROOT / "data" / "org.anatase.spaces.policy"
@@ -80,6 +82,7 @@ class PackagingTests(unittest.TestCase):
         self.assertNotIn("archive/refs/tags", pkgbuild)
         self.assertIn("'python-textual'", pkgbuild)
         self.assertIn("'ubuntu-keyring'", pkgbuild)
+        self.assertIn("'systemd'", pkgbuild)
         self.assertIn(
             "/usr/bin/python -m unittest discover -s tests -v", pkgbuild
         )

@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import pwd
+import shutil
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from spaces import core
@@ -22,23 +25,78 @@ class LaunchTests(unittest.TestCase):
         self.home = self.space / "home"
         self.home.mkdir()
         self.root_home = self.home / "root"
+        self.host_home = Path(self.temporary.name) / "host-home"
+        self.host_home.mkdir()
+        etc = self.rootfs / "etc"
+        etc.mkdir()
+        (etc / "passwd").write_text(
+            "root:x:0:0:root:/root:/bin/sh\n",
+            encoding="utf-8",
+        )
+        (etc / "group").write_text("root:x:0:\n", encoding="utf-8")
+        (etc / "shadow").write_text(
+            "root:!:20000:0:99999:7:::\n",
+            encoding="utf-8",
+        )
+        (etc / "gshadow").write_text("root:!::\n", encoding="utf-8")
+        (etc / "skel").mkdir()
         self.identity = core.Identity(1000, 1000, Path("/home/user"))
         self.state_root_patch = mock.patch.object(
             core, "STATE_ROOT", self.state_root
         )
         self.state_root_patch.start()
+        host_user = pwd.struct_passwd(
+            (
+                "user",
+                "x",
+                1000,
+                1000,
+                "Test User",
+                str(self.host_home),
+                "/bin/sh",
+            )
+        )
+        self.passwd_patch = mock.patch.object(
+            launch_module.pwd,
+            "getpwuid",
+            return_value=host_user,
+        )
+        self.passwd_patch.start()
+        self.monitor = mock.Mock()
+        self.monitor.state.return_value = "offline"
+        self.monitor_patch = mock.patch.object(
+            launch_module,
+            "_LoginMonitor",
+            return_value=self.monitor,
+        )
+        self.monitor_patch.start()
+        self.worker = mock.Mock()
+        self.worker_patch = mock.patch.object(
+            launch_module,
+            "_MountWorker",
+            return_value=self.worker,
+        )
+        self.worker_class = self.worker_patch.start()
 
     def tearDown(self) -> None:
+        self.worker_patch.stop()
+        self.monitor_patch.stop()
+        self.passwd_patch.stop()
         self.state_root_patch.stop()
         self.temporary.cleanup()
 
-    def _write_info(self, network: str = "basic", name: str = "work") -> None:
+    def _write_info(
+        self,
+        network: str = "basic",
+        name: str = "work",
+        home: list[str] | None = None,
+    ) -> None:
         info = core.create_info(
             name,
             {"id": "custom"},
             self.identity,
             network,
-            [],
+            home or [],
         )
         (self.space / "info.json").write_text(
             json.dumps(info),
@@ -203,6 +261,39 @@ class LaunchTests(unittest.TestCase):
         )
         process.wait.assert_called_once_with()
 
+    def test_initial_user_mounts_are_given_to_nspawn_and_worker(self) -> None:
+        (self.host_home / "Projects").mkdir()
+        self._write_info(home=["Projects"])
+        self.monitor.state.return_value = "lingering"
+        process = mock.Mock()
+        process.wait.return_value = 0
+
+        with (
+            mock.patch.object(
+                launch_module.subprocess,
+                "Popen",
+                return_value=process,
+            ) as run,
+            mock.patch.object(launch_module.signal, "signal"),
+        ):
+            self.assertEqual(launch_module.launch("work"), 0)
+
+        arguments = run.call_args.args[0]
+        bind = next(
+            argument
+            for argument in arguments
+            if argument.endswith(":/home/user/Projects")
+        )
+        self.assertTrue(bind.startswith(f"--bind=/proc/{os.getpid()}/fd/"))
+        mounts = self.worker_class.call_args.args[4]
+        self.assertEqual(len(mounts), 1)
+        self.assertEqual(mounts[0].destination, "/home/user/Projects")
+        self.worker.start.assert_called()
+        self.worker.attach.assert_called_once_with(process)
+        self.worker.stop.assert_called()
+        self.worker.join.assert_called()
+        self.monitor.close.assert_called()
+
     def test_rootfs_fixup_logs_conflict_and_launches(self) -> None:
         self._write_info()
         var_home = self.rootfs / "var" / "home"
@@ -336,7 +427,7 @@ class LaunchTests(unittest.TestCase):
 
     def test_missing_or_symlinked_rootfs_is_rejected(self) -> None:
         self._write_info()
-        self.rootfs.rmdir()
+        shutil.rmtree(self.rootfs)
         with self.assertRaises(core.SpacesError):
             launch_module.launch("work")
 
@@ -388,6 +479,466 @@ class LaunchTests(unittest.TestCase):
         ):
             launch_module.launch("work")
         run.assert_not_called()
+
+
+class UserFixupTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.rootfs = self.root / "rootfs"
+        self.etc = self.rootfs / "etc"
+        self.etc.mkdir(parents=True)
+        self.space_home = self.root / "home"
+        self.space_home.mkdir()
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def _user(
+        self,
+        *,
+        uid: int | None = None,
+        gid: int | None = None,
+        name: str = "alice",
+        permitted: tuple[str, ...] = (),
+    ) -> launch_module.SpaceUser:
+        fixed_uid = os.getuid() if uid is None else uid
+        fixed_gid = os.getgid() if gid is None else gid
+        return launch_module.SpaceUser(
+            uid=fixed_uid,
+            gid=fixed_gid,
+            name=name,
+            host_home=self.root / "host" / name,
+            space_home=self.space_home / name,
+            guest_home=launch_module.PurePosixPath(f"/home/{name}"),
+            permitted_home=permitted,
+        )
+
+    def _write_accounts(
+        self,
+        *,
+        passwd_text: str,
+        group_text: str,
+        shadow_text: str = "",
+        gshadow_text: str = "",
+    ) -> None:
+        (self.etc / "passwd").write_text(passwd_text, encoding="utf-8")
+        (self.etc / "group").write_text(group_text, encoding="utf-8")
+        if shadow_text:
+            (self.etc / "shadow").write_text(shadow_text, encoding="utf-8")
+        if gshadow_text:
+            (self.etc / "gshadow").write_text(gshadow_text, encoding="utf-8")
+
+    def test_reconcile_renames_and_locks_existing_uid(self) -> None:
+        uid = os.getuid()
+        gid = os.getgid()
+        self._write_accounts(
+            passwd_text=f"root:x:0:0::/root:/bin/sh\nold:x:{uid}:55::/old:/bin/zsh\n",
+            group_text=f"root:x:0:\nstaff:x:{gid}:old\n",
+            shadow_text="root:!:::::::\nold:$6$hash:::::::\n",
+            gshadow_text="root:!::\nstaff:!::old\n",
+        )
+        user = self._user(name="alice")
+
+        launch_module._reconcile_accounts(self.rootfs, (user,))
+
+        passwd_records = launch_module._read_database(self.etc / "passwd", 7)
+        account = next(record for record in passwd_records if record[0] == "alice")
+        self.assertEqual(
+            account,
+            [
+                "alice",
+                "x",
+                str(uid),
+                str(gid),
+                "",
+                "/home/alice",
+                "/bin/sh",
+            ],
+        )
+        shadow = launch_module._read_database(self.etc / "shadow", 9)
+        shadow_account = next(
+            record for record in shadow if record[0] == "alice"
+        )
+        self.assertEqual(shadow_account[1], "!")
+        group = launch_module._read_database(self.etc / "group", 4)
+        group_account = next(record for record in group if record[0] == "staff")
+        self.assertEqual(group_account[3], "alice")
+        gshadow = launch_module._read_database(self.etc / "gshadow", 4)
+        gshadow_account = next(
+            record for record in gshadow if record[0] == "staff"
+        )
+        self.assertEqual(gshadow_account[3], "alice")
+
+    def test_reconcile_creates_account_and_primary_group(self) -> None:
+        self._write_accounts(
+            passwd_text="root:!:0:0::/root:/bin/sh\n",
+            group_text="root:x:0:\n",
+        )
+        user = self._user(uid=12345, gid=12346)
+
+        launch_module._reconcile_accounts(self.rootfs, (user,))
+
+        passwd_records = launch_module._read_database(self.etc / "passwd", 7)
+        self.assertIn(
+            ["alice", "!", "12345", "12346", "", "/home/alice", "/bin/sh"],
+            passwd_records,
+        )
+        self.assertIn(
+            ["alice", "x", "12346", ""],
+            launch_module._read_database(self.etc / "group", 4),
+        )
+
+    def test_reconcile_rejects_name_and_uid_on_different_accounts(self) -> None:
+        self._write_accounts(
+            passwd_text=(
+                "root:x:0:0::/root:/bin/sh\n"
+                "alice:x:2001:2001::/home/alice:/bin/sh\n"
+                "other:x:2000:2000::/home/other:/bin/sh\n"
+            ),
+            group_text="root:x:0:\nalice:x:2001:\nother:x:2000:\n",
+        )
+        user = self._user(uid=2000, gid=2000)
+
+        with self.assertRaises(core.SpacesError):
+            launch_module._reconcile_accounts(self.rootfs, (user,))
+
+    def test_reconcile_rejects_symlinked_account_database(self) -> None:
+        outside = self.root / "passwd"
+        outside.write_text("root:x:0:0::/root:/bin/sh\n", encoding="utf-8")
+        (self.etc / "passwd").symlink_to(outside)
+        (self.etc / "group").write_text("root:x:0:\n", encoding="utf-8")
+        with self.assertRaises(core.SpacesError):
+            launch_module._reconcile_accounts(self.rootfs, (self._user(),))
+
+    def test_root_user_does_not_require_account_database_changes(self) -> None:
+        root = launch_module.SpaceUser(
+            uid=0,
+            gid=0,
+            name="root",
+            host_home=Path("/root"),
+            space_home=self.space_home / "root",
+            guest_home=launch_module.PurePosixPath("/root"),
+            permitted_home=(),
+        )
+        launch_module._reconcile_accounts(self.rootfs, (root,))
+
+    def test_new_home_copies_skeleton_once(self) -> None:
+        skeleton = self.etc / "skel"
+        nested = skeleton / ".config"
+        nested.mkdir(parents=True)
+        profile = skeleton / ".profile"
+        profile.write_text("profile\n", encoding="utf-8")
+        profile.chmod(0o640)
+        (nested / "settings").write_text("first\n", encoding="utf-8")
+        (skeleton / "config-link").symlink_to(".config")
+        user = self._user()
+
+        launch_module._ensure_user_homes(self.rootfs, (user,))
+
+        self.assertEqual((user.space_home / ".profile").read_text(), "profile\n")
+        self.assertEqual((user.space_home / ".profile").stat().st_mode & 0o777, 0o640)
+        self.assertTrue((user.space_home / "config-link").is_symlink())
+        self.assertEqual(os.readlink(user.space_home / "config-link"), ".config")
+        self.assertEqual(user.space_home.stat().st_mode & 0o777, 0o700)
+
+        (nested / "settings").write_text("second\n", encoding="utf-8")
+        launch_module._ensure_user_homes(self.rootfs, (user,))
+        self.assertEqual(
+            (user.space_home / ".config" / "settings").read_text(),
+            "first\n",
+        )
+
+    def test_missing_skeleton_creates_empty_home(self) -> None:
+        user = self._user()
+        launch_module._ensure_user_homes(self.rootfs, (user,))
+        self.assertEqual(list(user.space_home.iterdir()), [])
+
+    def test_symlinked_skeleton_is_rejected(self) -> None:
+        outside = self.root / "outside"
+        outside.mkdir()
+        (self.etc / "skel").symlink_to(outside, target_is_directory=True)
+        with self.assertRaises(core.SpacesError):
+            launch_module._ensure_user_homes(self.rootfs, (self._user(),))
+
+    def test_failed_skeleton_copy_leaves_no_home(self) -> None:
+        skeleton = self.etc / "skel"
+        skeleton.mkdir()
+        (skeleton / "file").write_text("data", encoding="utf-8")
+        user = self._user()
+        with (
+            mock.patch.object(
+                launch_module.shutil,
+                "copy2",
+                side_effect=OSError("copy failed"),
+            ),
+            self.assertRaises(core.SpacesError),
+        ):
+            launch_module._ensure_user_homes(self.rootfs, (user,))
+        self.assertFalse(user.space_home.exists())
+        self.assertEqual(list(self.space_home.iterdir()), [])
+
+    def test_mount_plan_and_nspawn_escaping(self) -> None:
+        user = self._user(permitted=("Project:One", "linked"))
+        user.host_home.mkdir(parents=True)
+        (user.host_home / "Project:One").mkdir()
+        (user.host_home / "linked").symlink_to(
+            user.host_home / "Project:One",
+            target_is_directory=True,
+        )
+        user.space_home.mkdir()
+
+        with self.assertLogs(launch_module.logger, level="WARNING"):
+            available = launch_module._prepare_mounts((user,))
+        try:
+            mounts = launch_module._plan_mounts(
+                available,
+                frozenset({user.uid}),
+            )
+            self.assertEqual(len(mounts), 1)
+            self.assertEqual(mounts[0].destination, "/home/alice/Project:One")
+            self.assertTrue(
+                os.path.samefile(
+                    mounts[0].pinned_source,
+                    user.host_home / "Project:One",
+                )
+            )
+            original = user.host_home / "original"
+            (user.host_home / "Project:One").rename(original)
+            (user.host_home / "Project:One").symlink_to(
+                Path("/etc"),
+                target_is_directory=True,
+            )
+            self.assertTrue(os.path.samefile(mounts[0].pinned_source, original))
+            self.assertEqual(
+                launch_module._bind_argument(mounts[0]),
+                (
+                    f"--bind=/proc/{os.getpid()}/fd/{mounts[0].source_fd}:"
+                    "/home/alice/Project\\:One"
+                ),
+            )
+            self.assertTrue((user.space_home / "Project:One").is_dir())
+            self.assertEqual(
+                launch_module._plan_mounts(available, frozenset()),
+                (),
+            )
+        finally:
+            launch_module._close_mounts(available)
+
+    def test_mount_destination_preparation_failure_is_skipped(self) -> None:
+        user = self._user(permitted=("Projects",))
+        user.host_home.mkdir(parents=True)
+        (user.host_home / "Projects").mkdir()
+        user.space_home.mkdir()
+        original_close = os.close
+
+        with (
+            mock.patch.object(
+                launch_module.os,
+                "chown",
+                side_effect=PermissionError("not permitted"),
+            ),
+            mock.patch.object(
+                launch_module.os,
+                "close",
+                wraps=original_close,
+            ) as close,
+            self.assertLogs(launch_module.logger, level="WARNING"),
+        ):
+            available = launch_module._prepare_mounts((user,))
+
+        self.assertEqual(available, ())
+        close.assert_called_once()
+        self.assertFalse((user.space_home / "Projects").exists())
+
+
+class LoginAndMountWorkerTests(unittest.TestCase):
+    def _user(self, uid: int) -> launch_module.SpaceUser:
+        return launch_module.SpaceUser(
+            uid=uid,
+            gid=uid,
+            name=f"user{uid}",
+            host_home=Path(f"/home/user{uid}"),
+            space_home=Path(f"/space/home/user{uid}"),
+            guest_home=launch_module.PurePosixPath(f"/home/user{uid}"),
+            permitted_home=(),
+        )
+
+    def test_eligible_states_include_lingering(self) -> None:
+        users = tuple(self._user(uid) for uid in range(1000, 1005))
+        monitor = mock.Mock()
+        monitor.state.side_effect = [
+            "active",
+            "online",
+            "lingering",
+            "closing",
+            "offline",
+        ]
+        self.assertEqual(
+            launch_module._eligible_uids(monitor, users),
+            frozenset({1000, 1001, 1002}),
+        )
+
+    def test_unknown_login_state_is_rejected(self) -> None:
+        monitor = mock.Mock()
+        monitor.state.return_value = "future-state"
+        with self.assertRaises(core.SpacesError):
+            launch_module._eligible_uids(monitor, (self._user(1000),))
+
+    def test_lingering_keeps_mount_until_user_is_closing(self) -> None:
+        user = self._user(1000)
+        mount = launch_module.HomeMount(
+            destination="/home/user1000/Projects",
+            source=Path("/host/Projects"),
+            uid=1000,
+            source_fd=42,
+        )
+        monitor = mock.Mock()
+        monitor.state.return_value = "lingering"
+        worker = launch_module._MountWorker(
+            "work",
+            (user,),
+            monitor,
+            (mount,),
+            (mount,),
+        )
+        worker._registered = True
+        worker._process = mock.Mock()
+
+        with mock.patch.object(worker, "_remove") as remove:
+            worker._reconcile()
+            remove.assert_not_called()
+            monitor.state.return_value = "closing"
+            worker._reconcile()
+            remove.assert_called_once_with(mount)
+
+    def test_failed_runtime_mount_is_skipped(self) -> None:
+        user = self._user(1000)
+        failed_mount = launch_module.HomeMount(
+            destination="/home/user1000/Documents",
+            source=Path("/host/Documents"),
+            uid=1000,
+            source_fd=42,
+        )
+        mounted = launch_module.HomeMount(
+            destination="/home/user1000/Projects",
+            source=Path("/host/Projects"),
+            uid=1000,
+            source_fd=43,
+        )
+        monitor = mock.Mock()
+        monitor.state.return_value = "active"
+        worker = launch_module._MountWorker(
+            "work",
+            (user,),
+            monitor,
+            (failed_mount, mounted),
+            (),
+        )
+        worker._registered = True
+        worker._process = mock.Mock()
+
+        with (
+            mock.patch.object(
+                worker,
+                "_add",
+                side_effect=[
+                    launch_module.subprocess.CalledProcessError(
+                        1,
+                        ["machinectl", "bind"],
+                    ),
+                    None,
+                ],
+            ) as add,
+            self.assertLogs(launch_module.logger, level="WARNING"),
+        ):
+            worker._reconcile()
+
+        self.assertEqual(
+            add.call_args_list,
+            [mock.call(failed_mount), mock.call(mounted)],
+        )
+        self.assertEqual(worker._mounted, {mounted})
+
+    def test_remove_uses_systemd_lazy_unmount(self) -> None:
+        monitor = mock.Mock()
+        worker = launch_module._MountWorker("work", (), monitor, (), ())
+        mount = launch_module.HomeMount(
+            destination="/home/alice/Projects",
+            source=Path("/host/Projects"),
+            uid=1000,
+            source_fd=42,
+        )
+        completed = SimpleNamespace(stdout="home-alice-Projects.mount\n")
+        with mock.patch.object(
+            launch_module.subprocess,
+            "run",
+            side_effect=[completed, mock.DEFAULT, mock.DEFAULT],
+        ) as run:
+            worker._remove(mount)
+
+        self.assertEqual(
+            run.call_args_list,
+            [
+                mock.call(
+                    [
+                        launch_module.SYSTEMD_ESCAPE,
+                        "--path",
+                        "--suffix=mount",
+                        "/home/alice/Projects",
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ),
+                mock.call(
+                    [
+                        launch_module.SYSTEMCTL,
+                        "--machine=work",
+                        "--no-ask-password",
+                        "set-property",
+                        "--runtime",
+                        "home-alice-Projects.mount",
+                        "LazyUnmount=yes",
+                    ],
+                    check=True,
+                ),
+                mock.call(
+                    [
+                        launch_module.SYSTEMD_UMOUNT,
+                        "--machine=work",
+                        "--no-ask-password",
+                        "--quiet",
+                        "/home/alice/Projects",
+                    ],
+                    check=True,
+                ),
+            ],
+        )
+
+    def test_add_uses_machinectl_bind(self) -> None:
+        worker = launch_module._MountWorker("work", (), mock.Mock(), (), ())
+        mount = launch_module.HomeMount(
+            destination="/home/alice/Projects",
+            source=Path("/host/Projects"),
+            uid=1000,
+            source_fd=42,
+        )
+        with mock.patch.object(launch_module.subprocess, "run") as run:
+            worker._add(mount)
+        run.assert_called_once_with(
+            [
+                launch_module.MACHINECTL,
+                "--quiet",
+                "--no-ask-password",
+                "--mkdir",
+                "bind",
+                "work",
+                f"/proc/{os.getpid()}/fd/42",
+                "/home/alice/Projects",
+            ],
+            check=True,
+        )
 
 
 if __name__ == "__main__":
