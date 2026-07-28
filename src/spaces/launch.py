@@ -64,8 +64,9 @@ NETWORK_CAPS = {
 def _apply_rootfs_fixups(rootfs: Path) -> None:
     """Apply persistent compatibility fixups to a space rootfs."""
 
-    for link_name, target in SYMLINKS:
+    for fixup in SYMLINKS:
         try:
+            link_name, target = fixup
             relative_link = Path(link_name).relative_to("/")
             parent = rootfs
             parent_is_safe = True
@@ -104,11 +105,11 @@ def _apply_rootfs_fixups(rootfs: Path) -> None:
                 )
                 continue
             link.symlink_to(target, target_is_directory=True)
-        except OSError as error:
+        except Exception as error:
             logger.error(
                 _(
-                    "Could not create rootfs symlink {link}: {error}",
-                    link=link_name,
+                    "Could not apply rootfs symlink fixup {fixup}: {error}",
+                    fixup=fixup,
                     error=error,
                 )
             )

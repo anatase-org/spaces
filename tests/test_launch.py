@@ -243,6 +243,23 @@ class LaunchTests(unittest.TestCase):
             self.assertTrue(link.is_symlink())
             self.assertEqual(os.readlink(link), target)
 
+    def test_rootfs_fixups_log_unexpected_error_and_continue(self) -> None:
+        symlinks = [
+            ("relative/path", "/invalid"),
+            ("/var/home", "/home"),
+        ]
+
+        with (
+            mock.patch.object(launch_module, "SYMLINKS", symlinks),
+            self.assertLogs(launch_module.logger, level="ERROR") as logs,
+        ):
+            launch_module._apply_rootfs_fixups(self.rootfs)
+
+        var_home = self.rootfs / "var" / "home"
+        self.assertTrue(var_home.is_symlink())
+        self.assertEqual(os.readlink(var_home), "/home")
+        self.assertIn("relative/path", logs.output[0])
+
     def test_invalid_name_is_rejected_before_state_access(self) -> None:
         with (
             mock.patch.object(launch_module.subprocess, "run") as run,
