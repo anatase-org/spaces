@@ -76,6 +76,15 @@ class PrivilegedTests(unittest.TestCase):
                     [
                         "chroot",
                         str(space / "rootfs"),
+                        "apt-get",
+                        "update",
+                    ],
+                    check=True,
+                ),
+                mock.call(
+                    [
+                        "chroot",
+                        str(space / "rootfs"),
                         "/usr/bin/env",
                         "DEBIAN_FRONTEND=noninteractive",
                         "apt-get",
@@ -92,7 +101,35 @@ class PrivilegedTests(unittest.TestCase):
                 ),
             ]
         )
-        self.assertEqual(run.call_count, 3)
+        self.assertEqual(run.call_count, 4)
+        self.assertEqual(
+            (
+                space
+                / "rootfs"
+                / "etc"
+                / "apt"
+                / "sources.list.d"
+                / "ubuntu.sources"
+            ).read_text(encoding="utf-8"),
+            "Types: deb\n"
+            "URIs: http://archive.ubuntu.com/ubuntu\n"
+            "Suites: resolute resolute-updates resolute-backports\n"
+            "Components: main restricted universe multiverse\n"
+            "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n"
+            "\n"
+            "Types: deb\n"
+            "URIs: http://security.ubuntu.com/ubuntu\n"
+            "Suites: resolute-security\n"
+            "Components: main restricted universe multiverse\n"
+            "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n",
+        )
+        self.assertEqual(
+            (space / "rootfs" / "etc" / "apt" / "sources.list").read_text(
+                encoding="utf-8"
+            ),
+            "# Ubuntu sources have moved to "
+            "/etc/apt/sources.list.d/ubuntu.sources\n",
+        )
         self.assertEqual(
             print_output.call_args_list,
             [

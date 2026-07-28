@@ -43,6 +43,44 @@ class CoreTests(unittest.TestCase):
             ],
         )
 
+    def test_ubuntu_apt_sources_keep_ports_mirror(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            rootfs = Path(temporary)
+            sources_path = rootfs / "etc" / "apt" / "sources.list"
+            sources_path.parent.mkdir(parents=True)
+            sources_path.write_text(
+                "deb http://ports.ubuntu.com/ubuntu-ports noble main\n",
+                encoding="utf-8",
+            )
+
+            ubuntu._configure_apt_sources(rootfs, "noble")
+
+            self.assertEqual(
+                (
+                    rootfs
+                    / "etc"
+                    / "apt"
+                    / "sources.list.d"
+                    / "ubuntu.sources"
+                ).read_text(encoding="utf-8"),
+                "Types: deb\n"
+                "URIs: http://ports.ubuntu.com/ubuntu-ports\n"
+                "Suites: noble noble-updates noble-backports\n"
+                "Components: main restricted universe multiverse\n"
+                "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n"
+                "\n"
+                "Types: deb\n"
+                "URIs: http://ports.ubuntu.com/ubuntu-ports\n"
+                "Suites: noble-security\n"
+                "Components: main restricted universe multiverse\n"
+                "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n",
+            )
+            self.assertEqual(
+                sources_path.read_text(encoding="utf-8"),
+                "# Ubuntu sources have moved to "
+                "/etc/apt/sources.list.d/ubuntu.sources\n",
+            )
+
     def test_discover_home_folders(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)
