@@ -20,6 +20,8 @@ class Distribution:
     id: str
     default_name: str | None
     administrator_group: str = "wheel"
+    shared_pam_policy: str | None = None
+    shared_pam_session_policy: str | None = None
     configuration_title: str = ""
     configuration_description: str = ""
     option_key: str | None = None

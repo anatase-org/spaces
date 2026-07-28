@@ -300,6 +300,7 @@ class PermissionForm(
         folders: list[str],
         network: str,
         selected_home: list[str],
+        host_authentication: bool = True,
         include_system: bool,
         distribution_title: str,
         distribution_description: str,
@@ -313,6 +314,7 @@ class PermissionForm(
         super().__init__(ansi_color=True)
         self.home = home
         self.initial_network = network
+        self.initial_host_authentication = host_authentication
         self.initial_home = set(selected_home)
         self.initial_administrator = administrator
         self.administrator_group = administrator_group
@@ -334,7 +336,11 @@ class PermissionForm(
         self.submit_label = submit_label
         self.steps = (
             (["override"] if override else [])
-            + (["system"] if include_system else [])
+            + (
+                ["system", "host-authentication"]
+                if include_system
+                else []
+            )
             + ["user", "administrator"]
             + (["distribution"] if distribution_options else [])
         )
@@ -368,6 +374,28 @@ class PermissionForm(
                                 value=level == self.initial_network,
                                 id=f"network-{level}",
                             )
+                with Vertical(
+                    id="host-authentication-step",
+                    classes="step",
+                ):
+                    yield Static(
+                        _(
+                            "Choose whether authentication requests inside "
+                            "this space are validated by the host."
+                        ),
+                        classes="description",
+                    )
+                    with RadioSet(id="host-authentication"):
+                        yield CleanRadioButton(
+                            _("Do not use host authentication"),
+                            value=not self.initial_host_authentication,
+                            id="host-authentication-false",
+                        )
+                        yield CleanRadioButton(
+                            _("Use host authentication"),
+                            value=self.initial_host_authentication,
+                            id="host-authentication-true",
+                        )
             with Vertical(id="user-step", classes="step"):
                 yield Static(
                     _(
@@ -462,6 +490,7 @@ class PermissionForm(
         titles = {
             "override": _("Space already exists"),
             "system": _("System permissions"),
+            "host-authentication": _("Host authentication permissions"),
             "user": _("User permissions"),
             "administrator": _("Administrator permissions"),
             "distribution": _("Distribution settings"),
@@ -490,6 +519,7 @@ class PermissionForm(
         select_button.disabled = current == "override"
         focus_targets = {
             "system": "#network",
+            "host-authentication": "#host-authentication",
             "user": "#home-folders",
             "administrator": "#administrator",
             "distribution": "#distribution-option",
@@ -517,6 +547,7 @@ class PermissionForm(
         else:
             targets = {
                 "system": "#network",
+                "host-authentication": "#host-authentication",
                 "administrator": "#administrator",
                 "distribution": "#distribution-option",
             }
@@ -561,6 +592,10 @@ class PermissionForm(
             result["network"] = self._radio_value(
                 self.query_one("#network", RadioSet), "network-"
             )
+            result["host_authentication"] = self._radio_value(
+                self.query_one("#host-authentication", RadioSet),
+                "host-authentication-",
+            ) == "true"
         if self.distribution_options:
             result["distribution_option"] = self._radio_value(
                 self.query_one("#distribution-option", RadioSet), "option-"

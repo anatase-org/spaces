@@ -4,7 +4,7 @@ pkgname=spaces
 pkgver=0.0.1
 pkgrel=1
 pkgdesc="Develop on the distribution of your choice, securely"
-arch=('any')
+arch=('x86_64' 'aarch64')
 url="https://github.com/anatase-org/spaces"
 license=('AGPL-3.0-or-later')
 depends=(
@@ -12,6 +12,7 @@ depends=(
   'python-rich'
   'python-textual'
   'polkit'
+  'pam'
   'debootstrap'
   'ubuntu-keyring'
   'systemd'
@@ -21,6 +22,9 @@ makedepends=(
   'python-installer'
   'python-setuptools'
   'python-wheel'
+  'gcc'
+  'binutils'
+  'pkgconf'
 )
 source=()
 sha256sums=()
@@ -30,6 +34,8 @@ _project_dir="$PWD/.."
 build() {
   cd "$_project_dir"
   /usr/bin/python -m build --wheel --no-isolation
+  make -C native
+  make -C native check-guest-abi
 }
 
 # check() {
@@ -40,6 +46,8 @@ build() {
 package() {
   cd "$_project_dir"
   /usr/bin/python -m installer --destdir="$pkgdir" dist/*.whl
+  make -C native DESTDIR="$pkgdir" install
+  install -Dm644 data/pam/spaces.system-auth "$pkgdir/etc/pam.d/spaces"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   install -Dm644 readme.md "$pkgdir/usr/share/doc/$pkgname/readme.md"
 }

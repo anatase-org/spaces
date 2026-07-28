@@ -85,6 +85,8 @@ class PrivilegedTests(unittest.TestCase):
                         "openssh-client",
                         "python3",
                         "nano",
+                        "sudo",
+                        "polkitd",
                     ],
                     check=True,
                 ),
@@ -96,7 +98,8 @@ class PrivilegedTests(unittest.TestCase):
             [
                 mock.call("Bootstrapping Ubuntu Resolute (26.04)...", flush=True),
                 mock.call(
-                    "Adding additional packages:\nopenssh-client, python3, nano",
+                    "Adding additional packages:\n"
+                    "openssh-client, python3, nano, sudo, polkitd",
                     flush=True,
                 ),
             ],
@@ -350,6 +353,7 @@ class PrivilegedTests(unittest.TestCase):
             core.Identity(1000, 1000, Path("/home/alice")),
             "basic",
             [],
+            host_authentication=False,
         )
         space = self.state_root / "work"
         space.mkdir(parents=True)
@@ -423,6 +427,7 @@ class PrivilegedTests(unittest.TestCase):
             core.Identity(1000, 1000, Path("/home/alice")),
             "basic",
             [],
+            host_authentication=False,
         )
         space = self.state_root / "work"
         space.mkdir(parents=True)
@@ -453,6 +458,7 @@ class PrivilegedTests(unittest.TestCase):
     def test_enter_rejects_another_or_unconfigured_user(self) -> None:
         space = self.state_root / "ubuntu"
         space.mkdir(parents=True)
+        self.info["permissions"]["system"]["host_authentication"] = False
         priv._write_info(space, self.info)
         with (
             mock.patch.dict(os.environ, {"PKEXEC_UID": "1000"}, clear=True),
@@ -516,11 +522,99 @@ class PrivilegedTests(unittest.TestCase):
 
         enter.assert_called_once_with("alice@work", ["--help"])
 
+    def test_enter_parser_passes_verified_subject_metadata(self) -> None:
+        with (
+            mock.patch.object(priv.os, "geteuid", return_value=0),
+            mock.patch.object(priv, "enter", return_value=0) as enter,
+        ):
+            self.assertEqual(
+                priv.main(
+                    [
+                        "enter",
+                        "--subject-pid=12",
+                        "--subject-start-time=34",
+                        "--subject-session=c1",
+                        "alice@work",
+                    ]
+                ),
+                0,
+            )
+
+        enter.assert_called_once_with(
+            "alice@work",
+            [],
+            subject_pid=12,
+            subject_start_time=34,
+            subject_session="c1",
+        )
+
+    def test_machine_shell_injects_only_opaque_session_and_runs_direct(
+        self,
+    ) -> None:
+        completed = subprocess.CompletedProcess([], 0)
+        with mock.patch.object(
+            priv.subprocess, "run", return_value=completed
+        ) as run:
+            self.assertEqual(
+                priv._machine_shell(
+                    "alice", "work", ["id", "-u"], "opaque-token"
+                ),
+                0,
+            )
+
+        self.assertEqual(
+            run.call_args.args[0],
+            [
+                "/usr/bin/machinectl",
+                "--quiet",
+                "--uid=alice",
+                "--setenv=SPACES_AUTH_SESSION=opaque-token",
+                "--",
+                "shell",
+                "work",
+                "id",
+                "-u",
+            ],
+        )
+
+    def test_verified_subject_must_be_live_unprivileged_ancestor(
+        self,
+    ) -> None:
+        account = mock.Mock(pw_gid=1000)
+        with (
+            mock.patch.object(priv, "_caller_uid", return_value=1000),
+            mock.patch.object(
+                priv.Path,
+                "stat",
+                return_value=mock.Mock(st_uid=1000),
+            ),
+            mock.patch.object(priv.os, "getpid", return_value=300),
+            mock.patch.object(
+                priv.auth,
+                "process_parent",
+                side_effect=lambda pid: {300: 200, 200: 123}[pid],
+            ),
+            mock.patch.object(
+                priv.auth, "process_start_time", return_value=456
+            ),
+            mock.patch.object(
+                priv.auth, "process_session_matches", return_value=True
+            ),
+            mock.patch.object(priv.pwd, "getpwuid", return_value=account),
+        ):
+            subject = priv._verified_subject(123, 456, "c1")
+
+        self.assertEqual(
+            subject,
+            priv.auth.LeaseSubject(123, 456, 1000, 1000, "c1"),
+        )
+
     def test_enter_as_user_uses_privileged_target_without_host_lookup(
         self,
     ) -> None:
         space = self.state_root / "ubuntu"
         space.mkdir(parents=True)
+        self.info["permissions"]["system"]["host_authentication"] = False
         priv._write_info(space, self.info)
         unavailable = subprocess.CompletedProcess([], 1)
         started = subprocess.CompletedProcess([], 0)
@@ -574,6 +668,46 @@ class PrivilegedTests(unittest.TestCase):
                     check=False,
                 ),
             ],
+        )
+
+    def test_enter_as_root_does_not_depend_on_guest_authentication_agent(
+        self,
+    ) -> None:
+        space = self.state_root / "ubuntu"
+        space.mkdir(parents=True)
+        priv._write_info(space, self.info)
+        available = subprocess.CompletedProcess([], 0)
+        entered = subprocess.CompletedProcess([], 42)
+        with mock.patch.object(
+            priv.subprocess,
+            "run",
+            side_effect=[available, entered],
+        ) as run:
+            self.assertEqual(
+                priv.enter_as_user(
+                    "root",
+                    "ubuntu",
+                    ["apt-get", "install", "polkitd"],
+                ),
+                42,
+            )
+
+        self.assertEqual(
+            run.call_args_list[1],
+            mock.call(
+                [
+                    "/usr/bin/machinectl",
+                    "--quiet",
+                    "--uid=root",
+                    "--",
+                    "shell",
+                    "ubuntu",
+                    "apt-get",
+                    "install",
+                    "polkitd",
+                ],
+                check=False,
+            ),
         )
 
     def test_enter_as_user_rejects_unsafe_user_name(self) -> None:

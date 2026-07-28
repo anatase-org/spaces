@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from . import _
+from . import auth
 from . import core
 from .distro import DistributionError, get_driver
 from .logging import configure_logging, log, run_streamed
@@ -181,7 +182,12 @@ def _create(distro_id: str) -> int:
     override = target.exists() or target.is_symlink()
 
     existing_info = core.load_info(target / "info.json") if override else None
-    network, selected_home, administrator = core.defaults_from_info(
+    (
+        network,
+        host_authentication,
+        selected_home,
+        administrator,
+    ) = core.defaults_from_info(
         existing_info, identity
     )
     existing_distribution = (
@@ -194,6 +200,7 @@ def _create(distro_id: str) -> int:
         home=identity.home,
         folders=folders,
         network=network,
+        host_authentication=host_authentication,
         selected_home=selected_home,
         administrator=administrator,
         administrator_group=driver.administrator_group,
@@ -219,6 +226,7 @@ def _create(distro_id: str) -> int:
         network=result["network"],
         home=result["home"],
         administrator=result.get("administrator", True),
+        host_authentication=result.get("host_authentication", True),
     )
     configure_logging(rich=True)
     log(
@@ -271,7 +279,12 @@ def _configure(name: str, *, user: str | None) -> int:
                 name=name,
             )
         )
-    network, selected_home, administrator = core.defaults_from_info(info, identity)
+    (
+        network,
+        host_authentication,
+        selected_home,
+        administrator,
+    ) = core.defaults_from_info(info, identity)
     driver = get_driver(info["distribution"]["id"])
     administrator_group = (
         driver.administrator_group if driver is not None else "wheel"
@@ -280,6 +293,7 @@ def _configure(name: str, *, user: str | None) -> int:
         home=identity.home,
         folders=core.discover_home_folders(identity.home),
         network=network,
+        host_authentication=host_authentication,
         selected_home=selected_home,
         administrator=administrator,
         administrator_group=administrator_group,
@@ -304,7 +318,10 @@ def _configure(name: str, *, user: str | None) -> int:
         }
     }
     if not user_only:
-        permissions["system"] = {"network": result["network"]}
+        permissions["system"] = {
+            "network": result["network"],
+            "host_authentication": result.get("host_authentication", True),
+        }
     patch = {
         "schema_version": core.SCHEMA_VERSION,
         "name": name,
@@ -370,6 +387,19 @@ def _enter(
     else:
         operation = "enter-as-user"
         enter_arguments = [enter_user, space]
+    info = core.load_info(core.STATE_ROOT / space / "info.json")
+    host_authentication = (
+        info is None
+        or info["permissions"]["system"].get("host_authentication", True)
+    )
+    if host_authentication and enter_user != "root":
+        subject_pid = os.getpid()
+        subject_arguments = [
+            f"--subject-pid={subject_pid}",
+            f"--subject-start-time={auth.process_start_time(subject_pid)}",
+            f"--subject-session={auth.client_session(subject_pid)}",
+        ]
+        enter_arguments[0:0] = subject_arguments
     if command:
         enter_arguments.extend(["--", *command])
     return _invoke_raw_helper(operation, enter_arguments)

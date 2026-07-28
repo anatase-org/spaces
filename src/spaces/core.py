@@ -149,6 +149,11 @@ def _validate_system_permissions(value: object) -> dict[str, Any]:
         raise SpacesError(
             _("Unknown network permission: {network!r}.", network=network)
         )
+    host_authentication = system.get("host_authentication", True)
+    if not isinstance(host_authentication, bool):
+        raise SpacesError(
+            _("Host authentication permission must be a boolean.")
+        )
     return system
 
 
@@ -316,17 +321,24 @@ def load_info(path: Path) -> dict[str, Any] | None:
 
 def defaults_from_info(
     info: Mapping[str, Any] | None, identity: Identity
-) -> tuple[str, list[str], bool]:
+) -> tuple[str, bool, list[str], bool]:
     network = "basic"
+    host_authentication = True
     selected_home = list(DEFAULT_HOME_FOLDERS)
     administrator = True
     if not info:
-        return network, selected_home, administrator
+        return network, host_authentication, selected_home, administrator
 
     permissions = info.get("permissions", {})
-    existing_network = permissions.get("system", {}).get("network")
+    system_permissions = permissions.get("system", {})
+    existing_network = system_permissions.get("network")
     if existing_network in NETWORK_LEVELS:
         network = existing_network
+    existing_host_authentication = system_permissions.get(
+        "host_authentication"
+    )
+    if isinstance(existing_host_authentication, bool):
+        host_authentication = existing_host_authentication
     user = permissions.get("users", {}).get(str(identity.uid), {})
     user_permissions = user.get("permissions", {})
     home = user_permissions.get("home")
@@ -341,7 +353,7 @@ def defaults_from_info(
     existing_administrator = user_permissions.get("administrator")
     if isinstance(existing_administrator, bool):
         administrator = existing_administrator
-    return network, selected_home, administrator
+    return network, host_authentication, selected_home, administrator
 
 
 def create_info(
@@ -351,13 +363,17 @@ def create_info(
     network: str,
     home: list[str],
     administrator: bool = True,
+    host_authentication: bool = True,
 ) -> dict[str, Any]:
     value = {
         "schema_version": SCHEMA_VERSION,
         "name": name,
         "distribution": distribution,
         "permissions": {
-            "system": {"network": network},
+            "system": {
+                "network": network,
+                "host_authentication": host_authentication,
+            },
             "users": {
                 str(identity.uid): {
                     "gid": identity.gid,

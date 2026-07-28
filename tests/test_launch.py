@@ -90,6 +90,7 @@ class LaunchTests(unittest.TestCase):
         network: str = "basic",
         name: str = "work",
         home: list[str] | None = None,
+        host_authentication: bool = False,
     ) -> None:
         info = core.create_info(
             name,
@@ -97,6 +98,7 @@ class LaunchTests(unittest.TestCase):
             self.identity,
             network,
             home or [],
+            host_authentication=host_authentication,
         )
         (self.space / "info.json").write_text(
             json.dumps(info),
@@ -230,6 +232,103 @@ class LaunchTests(unittest.TestCase):
                         launch_module.API_VFS_WRITABLE,
                         environment,
                     )
+
+    def test_enabled_authentication_starts_service_and_adds_exact_binds(
+        self,
+    ) -> None:
+        info = core.create_info(
+            "work",
+            {"id": "ubuntu", "version": "resolute"},
+            self.identity,
+            "basic",
+            [],
+            host_authentication=True,
+        )
+        del info["permissions"]["system"]["host_authentication"]
+        (self.space / "info.json").write_text(
+            json.dumps(info), encoding="utf-8"
+        )
+        pam_directory = self.rootfs / "etc" / "pam.d"
+        pam_directory.mkdir()
+        (pam_directory / "common-auth").write_text(
+            "auth required pam_unix.so\n", encoding="utf-8"
+        )
+        (pam_directory / "common-session").write_text(
+            "session optional pam_systemd.so\n", encoding="utf-8"
+        )
+        runtime = mock.Mock()
+        runtime.bind_arguments = (
+            "--bind-ro=/run/spaces/work/authentication/auth.sock:"
+            "/run/spaces-host/auth.sock",
+            "--bind-ro=/usr/lib/spaces/guest:/run/spaces-host/bin",
+            "--bind-ro=/run/spaces/work/authentication/common-auth:"
+            "/etc/pam.d/common-auth",
+            "--bind-ro=/run/spaces/work/authentication/common-session:"
+            "/etc/pam.d/common-session",
+        )
+        authentication = mock.Mock()
+        process = mock.Mock()
+        process.wait.return_value = 0
+
+        with (
+            mock.patch.object(
+                launch_module.auth,
+                "prepare_runtime",
+                return_value=runtime,
+            ) as prepare,
+            mock.patch.object(
+                launch_module.auth,
+                "AuthenticationService",
+                return_value=authentication,
+            ) as service,
+            mock.patch.object(
+                launch_module.subprocess, "Popen", return_value=process
+            ) as popen,
+            mock.patch.object(launch_module.signal, "signal"),
+        ):
+            self.assertEqual(launch_module.launch("work"), 0)
+
+        prepare.assert_called_once_with(
+            "work",
+            self.rootfs,
+            "/etc/pam.d/common-auth",
+            "/etc/pam.d/common-session",
+        )
+        service.assert_called_once_with("work", runtime, {1000: True})
+        authentication.start.assert_called_once_with()
+        authentication.stop.assert_called_once_with()
+        command = popen.call_args.args[0]
+        for bind in runtime.bind_arguments:
+            self.assertIn(bind, command)
+
+    def test_disabled_authentication_has_no_runtime_binds(self) -> None:
+        self._write_info(host_authentication=False)
+        process = mock.Mock()
+        process.wait.return_value = 0
+        with (
+            mock.patch.object(
+                launch_module.subprocess, "Popen", return_value=process
+            ) as popen,
+            mock.patch.object(
+                launch_module.auth, "prepare_runtime"
+            ) as prepare,
+            mock.patch.object(launch_module.signal, "signal"),
+        ):
+            self.assertEqual(launch_module.launch("work"), 0)
+
+        prepare.assert_not_called()
+        self.assertFalse(
+            any(
+                "spaces-host" in argument
+                for argument in popen.call_args.args[0]
+            )
+        )
+
+    def test_enabled_unknown_policy_is_rejected(self) -> None:
+        self._write_info(host_authentication=True)
+
+        with self.assertRaises(core.SpacesError):
+            launch_module.launch("work")
 
     def test_launch_forwards_sigterm_and_waits(self) -> None:
         self._write_info()

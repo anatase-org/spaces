@@ -17,6 +17,14 @@ class CoreTests(unittest.TestCase):
         self.assertIsInstance(ubuntu.DISTRIBUTION, Distribution)
         self.assertEqual(ubuntu.DISTRIBUTION.administrator_group, "sudo")
         self.assertEqual(
+            ubuntu.DISTRIBUTION.shared_pam_policy,
+            "/etc/pam.d/common-auth",
+        )
+        self.assertEqual(
+            ubuntu.DISTRIBUTION.shared_pam_session_policy,
+            "/etc/pam.d/common-session",
+        )
+        self.assertEqual(
             ubuntu.DISTRIBUTION.choices(),
             [
                 ("Noble (24.04)", "noble"),
@@ -48,11 +56,17 @@ class CoreTests(unittest.TestCase):
             )
 
     def test_new_space_defaults(self) -> None:
-        network, selected_home, administrator = core.defaults_from_info(
+        (
+            network,
+            host_authentication,
+            selected_home,
+            administrator,
+        ) = core.defaults_from_info(
             None,
             core.Identity(1000, 1000, Path("/home/user")),
         )
         self.assertEqual(network, "basic")
+        self.assertTrue(host_authentication)
         self.assertEqual(selected_home, ["Projects", "Downloads"])
         self.assertTrue(administrator)
 
@@ -138,6 +152,9 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(
             info["permissions"]["users"]["1000"]["permissions"]["administrator"]
         )
+        self.assertTrue(
+            info["permissions"]["system"]["host_authentication"]
+        )
 
     def test_existing_administrator_permission_is_used_as_default(self) -> None:
         identity = core.Identity(1000, 1000, Path("/home/user"))
@@ -150,7 +167,9 @@ class CoreTests(unittest.TestCase):
             administrator=False,
         )
 
-        _network, _home, administrator = core.defaults_from_info(info, identity)
+        _network, _host_auth, _home, administrator = core.defaults_from_info(
+            info, identity
+        )
 
         self.assertFalse(administrator)
 
@@ -166,9 +185,38 @@ class CoreTests(unittest.TestCase):
         del info["permissions"]["users"]["1000"]["permissions"]["administrator"]
 
         core.validate_info(info)
-        _network, _home, administrator = core.defaults_from_info(info, identity)
+        _network, _host_auth, _home, administrator = core.defaults_from_info(
+            info, identity
+        )
 
         self.assertTrue(administrator)
+
+    def test_missing_host_authentication_defaults_to_true(self) -> None:
+        identity = core.Identity(1000, 1000, Path("/home/user"))
+        info = core.create_info(
+            "work", {"id": "custom"}, identity, "basic", []
+        )
+        del info["permissions"]["system"]["host_authentication"]
+
+        core.validate_info(info)
+        _network, host_auth, _home, _administrator = core.defaults_from_info(
+            info, identity
+        )
+
+        self.assertTrue(host_auth)
+
+    def test_non_boolean_host_authentication_is_rejected(self) -> None:
+        info = core.create_info(
+            "work",
+            {"id": "custom"},
+            core.Identity(1000, 1000, Path("/home/user")),
+            "basic",
+            [],
+        )
+        info["permissions"]["system"]["host_authentication"] = 1
+
+        with self.assertRaises(core.SpacesError):
+            core.validate_info(info)
 
     def test_non_boolean_administrator_permission_is_rejected(self) -> None:
         info = core.create_info(

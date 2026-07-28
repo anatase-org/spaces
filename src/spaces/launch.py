@@ -20,6 +20,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from . import _
+from . import auth
 from . import core
 from .distro import get_driver
 from .logging import configure_logging
@@ -1141,6 +1142,7 @@ def _command(
     home: Path,
     network: str,
     mounts: tuple[HomeMount, ...] = (),
+    authentication_binds: tuple[str, ...] = (),
 ) -> list[str]:
     network_caps = NETWORK_CAPS[network]
     kept_caps = (*KEPT_CAPS, *network_caps)
@@ -1156,6 +1158,7 @@ def _command(
         f"--machine={space_name}",
         f"--bind={home}:/home",
         f"--bind={home / 'root'}:/root",
+        *authentication_binds,
         *(_bind_argument(mount) for mount in mounts),
         "--boot",
         "--setenv=SYSTEMD_GETTY_AUTO=no",
@@ -1175,6 +1178,10 @@ def launch(space_name: str) -> int:
     configure_logging(rich=False)
     rootfs, home, info = _load_space(space_name)
     network = info["permissions"]["system"]["network"]
+    host_authentication = info["permissions"]["system"].get(
+        "host_authentication",
+        True,
+    )
     environment = os.environ.copy()
     environment.pop(API_VFS_WRITABLE, None)
     if network == "admin":
@@ -1192,7 +1199,45 @@ def launch(space_name: str) -> int:
     available_mounts = _prepare_mounts(users)
     monitor: _LoginMonitor | None = None
     worker: _MountWorker | None = None
+    authentication: auth.AuthenticationService | None = None
+    authentication_binds: tuple[str, ...] = ()
     try:
+        if host_authentication:
+            policy_path = (
+                driver.shared_pam_policy if driver is not None else None
+            )
+            session_policy_path = (
+                driver.shared_pam_session_policy
+                if driver is not None
+                else None
+            )
+            if policy_path is None or session_policy_path is None:
+                raise core.SpacesError(
+                    _(
+                        "Host authentication is enabled for {space}, but its "
+                        "distribution does not declare shared PAM policies.",
+                        space=space_name,
+                    )
+                )
+            else:
+                authentication_runtime = auth.prepare_runtime(
+                    space_name,
+                    rootfs,
+                    policy_path,
+                    session_policy_path,
+                )
+                authentication = auth.AuthenticationService(
+                    space_name,
+                    authentication_runtime,
+                    {
+                        user.uid: user.administrator
+                        for user in users
+                    },
+                )
+                authentication.start()
+                authentication_binds = (
+                    authentication_runtime.bind_arguments
+                )
         monitor = _LoginMonitor()
         initial_eligible_uids = _eligible_uids(monitor, users)
         initial_mounts = _plan_mounts(
@@ -1209,12 +1254,26 @@ def launch(space_name: str) -> int:
         )
         worker.start()
         process = subprocess.Popen(
-            _command(space_name, rootfs, home, network, initial_mounts),
+            _command(
+                space_name,
+                rootfs,
+                home,
+                network,
+                initial_mounts,
+                authentication_binds,
+            ),
             env=environment,
         )
         worker.attach(process)
 
+        def stop_authentication() -> None:
+            nonlocal authentication
+            if authentication is not None:
+                authentication.stop()
+                authentication = None
+
         def forward_signal(signum: int, _frame: object) -> None:
+            stop_authentication()
             process.send_signal(signum)
 
         signal.signal(signal.SIGTERM, forward_signal)
@@ -1225,3 +1284,5 @@ def launch(space_name: str) -> int:
             worker.join()
         if monitor is not None:
             monitor.close()
+        if authentication is not None:
+            authentication.stop()

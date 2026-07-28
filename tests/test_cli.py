@@ -122,6 +122,9 @@ class CliTests(unittest.TestCase):
                 "administrator"
             ]
         )
+        self.assertTrue(
+            payload["permissions"]["system"]["host_authentication"]
+        )
 
     def test_create_custom_uses_prompted_name(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -177,6 +180,53 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("system", patch["permissions"])
         self.assertTrue(
             patch["permissions"]["user"]["permissions"]["administrator"]
+        )
+
+    def test_full_configure_includes_host_authentication(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            home = Path(temporary) / "home"
+            home.mkdir()
+            identity = core.Identity(1000, 1000, home)
+            info = core.create_info(
+                "ubuntu",
+                {"id": "ubuntu", "version": "resolute"},
+                identity,
+                "basic",
+                [],
+            )
+            info_path = state / "ubuntu" / "info.json"
+            info_path.parent.mkdir(parents=True)
+            import json
+
+            info_path.write_text(json.dumps(info), encoding="utf-8")
+            with (
+                mock.patch.object(core, "STATE_ROOT", state),
+                mock.patch.object(
+                    core, "initiating_identity", return_value=identity
+                ),
+                mock.patch.object(
+                    cli,
+                    "run_permission_wizard",
+                    return_value={
+                        "network": "advanced",
+                        "host_authentication": False,
+                        "home": [],
+                        "administrator": True,
+                    },
+                ),
+                mock.patch.object(
+                    cli, "_invoke_helper", return_value=0
+                ) as invoke,
+            ):
+                self.assertEqual(cli.main(["configure", "ubuntu"]), 0)
+
+        self.assertEqual(
+            invoke.call_args.args[1]["permissions"]["system"],
+            {
+                "network": "advanced",
+                "host_authentication": False,
+            },
         )
 
     def test_configure_named_user_targets_host_account(self) -> None:
@@ -412,6 +462,11 @@ class CliTests(unittest.TestCase):
                 "_invoke_raw_helper",
                 return_value=0,
             ) as invoke,
+            mock.patch.object(cli.os, "getpid", return_value=123),
+            mock.patch.object(
+                cli.auth, "process_start_time", return_value=456
+            ),
+            mock.patch.object(cli.auth, "client_session", return_value="c1"),
         ):
             self.assertEqual(
                 cli.main(
@@ -431,6 +486,9 @@ class CliTests(unittest.TestCase):
         invoke.assert_called_once_with(
             "enter",
             [
+                "--subject-pid=123",
+                "--subject-start-time=456",
+                "--subject-session=c1",
                 "alice@work",
                 "--",
                 "sh",
@@ -453,9 +511,63 @@ class CliTests(unittest.TestCase):
             mock.patch.object(
                 cli, "_invoke_raw_helper", return_value=0
             ) as invoke,
+            mock.patch.object(cli.os, "getpid", return_value=123),
+            mock.patch.object(
+                cli.auth, "process_start_time", return_value=456
+            ),
+            mock.patch.object(cli.auth, "client_session", return_value="c1"),
         ):
             self.assertEqual(cli.main(["enter", "work"]), 0)
 
+        invoke.assert_called_once_with(
+            "enter",
+            [
+                "--subject-pid=123",
+                "--subject-start-time=456",
+                "--subject-session=c1",
+                "alice@work",
+            ],
+        )
+
+    def test_disabled_enter_omits_host_session_routing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            home = Path(temporary) / "home"
+            home.mkdir()
+            identity = core.Identity(1000, 1000, home)
+            info = core.create_info(
+                "work",
+                {"id": "custom"},
+                identity,
+                "basic",
+                [],
+                host_authentication=False,
+            )
+            info_path = state / "work" / "info.json"
+            info_path.parent.mkdir(parents=True)
+            import json
+
+            info_path.write_text(json.dumps(info), encoding="utf-8")
+            with (
+                mock.patch.object(core, "STATE_ROOT", state),
+                mock.patch.object(
+                    core, "initiating_identity", return_value=identity
+                ),
+                mock.patch.object(
+                    cli.pwd,
+                    "getpwuid",
+                    return_value=mock.Mock(pw_name="alice"),
+                ),
+                mock.patch.object(
+                    cli.auth, "session_for_pid"
+                ) as session_for_pid,
+                mock.patch.object(
+                    cli, "_invoke_raw_helper", return_value=0
+                ) as invoke,
+            ):
+                self.assertEqual(cli.main(["enter", "work"]), 0)
+
+        session_for_pid.assert_not_called()
         invoke.assert_called_once_with("enter", ["alice@work"])
 
     def test_enter_root_and_user_root_use_privileged_helper(self) -> None:
@@ -473,6 +585,13 @@ class CliTests(unittest.TestCase):
                 mock.patch.object(
                     cli, "_invoke_raw_helper", return_value=0
                 ) as invoke,
+                mock.patch.object(cli.os, "getpid", return_value=123),
+                mock.patch.object(
+                    cli.auth, "process_start_time", return_value=456
+                ),
+                mock.patch.object(
+                    cli.auth, "session_for_pid", return_value="c1"
+                ),
             ):
                 self.assertEqual(
                     cli.main(
@@ -490,7 +609,13 @@ class CliTests(unittest.TestCase):
             initiating_identity.assert_not_called()
             invoke.assert_called_once_with(
                 "enter-as-user",
-                ["root", "work", "--", "id", "-u"],
+                [
+                    "root",
+                    "work",
+                    "--",
+                    "id",
+                    "-u",
+                ],
             )
 
     def test_enter_as_named_user_preserves_command_arguments(self) -> None:
@@ -498,6 +623,11 @@ class CliTests(unittest.TestCase):
             mock.patch.object(
                 cli, "_invoke_raw_helper", return_value=0
             ) as invoke,
+            mock.patch.object(cli.os, "getpid", return_value=123),
+            mock.patch.object(
+                cli.auth, "process_start_time", return_value=456
+            ),
+            mock.patch.object(cli.auth, "client_session", return_value="c1"),
         ):
             self.assertEqual(
                 cli.main(
@@ -518,6 +648,9 @@ class CliTests(unittest.TestCase):
         invoke.assert_called_once_with(
             "enter-as-user",
             [
+                "--subject-pid=123",
+                "--subject-start-time=456",
+                "--subject-session=c1",
                 "builder",
                 "work",
                 "--",

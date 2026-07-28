@@ -7,7 +7,11 @@ License:        AGPL-3.0-or-later
 URL:            https://github.com/anatase-org/spaces
 Source:       	https://github.com/anatase-org/spaces/archive/refs/tags/v%{version}.tar.gz
 
-BuildArch:      noarch
+ExclusiveArch:  x86_64 aarch64
+BuildRequires:  gcc
+BuildRequires:  binutils
+BuildRequires:  pam-devel
+BuildRequires:  pkgconfig(polkit-agent-1)
 BuildRequires:  systemd-rpm-macros
 BuildRequires:  python3-devel
 BuildRequires:  python3-build
@@ -19,6 +23,7 @@ Requires:       python3
 Requires:       python3-rich
 Requires:       python3-textual
 Requires:       polkit
+Requires:       pam
 Requires:       debootstrap
 Requires:       ubuntu-keyring
 Requires:       systemd
@@ -32,9 +37,14 @@ Spaces provide a chroot-like sandboxing environment for you to access your favor
 
 %build
 %{python3} -m build --wheel --no-isolation
+%make_build -C native
+%{__make} -C native check-guest-abi
 
 %install
 %{python3} -m installer --destdir="%{buildroot}" dist/*.whl
+%make_install -C native LIBEXECDIR=/usr/lib/spaces
+install -Dm644 data/pam/spaces.system-auth \
+  %{buildroot}%{_sysconfdir}/pam.d/spaces
 
 %post
 %systemd_post spaces@.service
@@ -51,4 +61,11 @@ Spaces provide a chroot-like sandboxing environment for you to access your favor
 %{_bindir}/%{name}*
 %{python3_sitelib}/%{name}*
 %{_datadir}/polkit-1/actions/org.anatase.spaces.policy
+%config(noreplace) %{_sysconfdir}/pam.d/spaces
+%dir /usr/lib/spaces
+/usr/lib/spaces/spaces-pam-worker
+/usr/lib/spaces/spaces-polkit-worker
+%dir /usr/lib/spaces/guest
+/usr/lib/spaces/guest/pam_spaces.so
+/usr/lib/spaces/guest/spaces-polkit-agent
 %{_unitdir}/spaces@.service

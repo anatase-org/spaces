@@ -10,7 +10,7 @@ from .. import _
 from .model import Distribution
 
 
-PACKAGES = ("openssh-client", "python3", "nano")
+PACKAGES = ("openssh-client", "python3", "nano", "sudo", "polkitd")
 RELEASES = {
     "noble": _("Noble (24.04)"),
     "resolute": _("Resolute (26.04)"),
@@ -66,6 +66,8 @@ DISTRIBUTION = UbuntuDistribution(
     id="ubuntu",
     default_name="ubuntu",
     administrator_group="sudo",
+    shared_pam_policy="/etc/pam.d/common-auth",
+    shared_pam_session_policy="/etc/pam.d/common-session",
     configuration_title=_("Ubuntu version"),
     configuration_description=_("Choose the Ubuntu release to bootstrap."),
     option_key="version",

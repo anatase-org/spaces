@@ -22,6 +22,22 @@ class PackagingTests(unittest.TestCase):
         self.assertFalse(
             (ROOT / "src" / "spaces" / "distro" / "ubuntu.toml").exists()
         )
+        authentication = ROOT / "src" / "spaces" / "auth"
+        self.assertFalse((ROOT / "src" / "spaces" / "auth.py").exists())
+        self.assertEqual(
+            {
+                path.name
+                for path in authentication.glob("*.py")
+            },
+            {
+                "__init__.py",
+                "protocol.py",
+                "runtime.py",
+                "service.py",
+                "session.py",
+                "worker.py",
+            },
+        )
         core_source = (ROOT / "src" / "spaces" / "core.py").read_text(
             encoding="utf-8"
         )
@@ -80,7 +96,13 @@ class PackagingTests(unittest.TestCase):
                 "auth_admin",
             ),
         }
-        self.assertEqual(set(actions), set(expected))
+        self.assertEqual(set(actions), set(expected) | {"org.anatase.spaces.root"})
+        root_action = actions["org.anatase.spaces.root"]
+        self.assertEqual(
+            [child.text for child in root_action.find("./defaults")],
+            ["auth_self", "auth_self", "auth_self"],
+        )
+        self.assertEqual(root_action.findall("./annotate"), [])
         for action_id, (operation, authorization) in expected.items():
             action = actions[action_id]
             defaults = action.find("./defaults")
@@ -108,11 +130,72 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("source=()", pkgbuild)
         self.assertIn('_project_dir="$PWD/.."', pkgbuild)
         self.assertNotIn("archive/refs/tags", pkgbuild)
+        self.assertIn("arch=('x86_64' 'aarch64')", pkgbuild)
+        self.assertIn("make -C native", pkgbuild)
+        self.assertIn(
+            'data/pam/spaces.system-auth "$pkgdir/etc/pam.d/spaces"',
+            pkgbuild,
+        )
         self.assertIn("'python-textual'", pkgbuild)
         self.assertIn("'ubuntu-keyring'", pkgbuild)
         self.assertIn("'systemd'", pkgbuild)
         self.assertIn(
             "/usr/bin/python -m unittest discover -s tests -v", pkgbuild
+        )
+
+    def test_native_authentication_assets_are_packaged_per_architecture(
+        self,
+    ) -> None:
+        spec = (ROOT / "spaces.spec").read_text(encoding="utf-8")
+        self.assertIn("ExclusiveArch:  x86_64 aarch64", spec)
+        self.assertNotIn("BuildArch:      noarch", spec)
+        self.assertIn("%make_build -C native", spec)
+        self.assertIn("%{_sysconfdir}/pam.d/spaces", spec)
+
+        makefile = (ROOT / "native" / "Makefile").read_text(encoding="utf-8")
+        self.assertIn("install: check-guest-abi", makefile)
+        self.assertIn("check_guest_abi.py", makefile)
+        for name in (
+            "pam_spaces.so",
+            "spaces-pam-worker",
+            "spaces-polkit-worker",
+            "spaces-polkit-agent",
+        ):
+            self.assertIn(name, makefile)
+        self.assertNotIn("spaces-session", makefile)
+        self.assertFalse(
+            (ROOT / "native" / "spaces_session.c").exists()
+        )
+
+        manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8")
+        self.assertIn(
+            "recursive-include native Makefile *.c *.h *.py", manifest
+        )
+        self.assertIn("recursive-include data/pam *", manifest)
+
+    def test_pam_session_notifications_use_session_callbacks(self) -> None:
+        source = (ROOT / "native" / "pam_spaces.c").read_text(
+            encoding="utf-8"
+        )
+        setcred = source.split("PAM_EXTERN int pam_sm_setcred(", 1)[1]
+        setcred, account = setcred.split(
+            "PAM_EXTERN int pam_sm_acct_mgmt(", 1
+        )
+        account, opening = account.split(
+            "PAM_EXTERN int pam_sm_open_session(", 1
+        )
+        opening, closing = opening.split(
+            "PAM_EXTERN int pam_sm_close_session(", 1
+        )
+        closing = closing.split("PAM_EXTERN int pam_sm_chauthtok(", 1)[0]
+
+        self.assertNotIn("notify_session", setcred)
+        self.assertNotIn("notify_session", account)
+        self.assertIn(
+            "notify_session(pamh, SPACES_SESSION_OPEN)", opening
+        )
+        self.assertIn(
+            "notify_session(pamh, SPACES_SESSION_CLOSE)", closing
         )
 
     def test_pkgbuild_is_not_in_source_manifest(self) -> None:

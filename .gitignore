@@ -7,3 +7,9 @@ build/
 dist/
 pkg/
 !pkg/PKGBUILD
+
+# Native authentication build outputs
+/native/pam_spaces.so
+/native/spaces-pam-worker
+/native/spaces-polkit-worker
+/native/spaces-polkit-agent
