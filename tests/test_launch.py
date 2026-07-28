@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import tempfile
 import threading
 import unittest
@@ -108,13 +107,16 @@ class LaunchTests(unittest.TestCase):
                 caller_thread = threading.current_thread()
                 called_thread: threading.Thread | None = None
 
-                def run(*args: object, **kwargs: object) -> subprocess.CompletedProcess:
+                process = mock.Mock()
+                process.wait.return_value = 42
+
+                def run(*args: object, **kwargs: object) -> mock.Mock:
                     nonlocal called_thread
                     called_thread = threading.current_thread()
                     var_home = self.rootfs / "var" / "home"
                     self.assertTrue(var_home.is_symlink())
                     self.assertEqual(os.readlink(var_home), "/home")
-                    return subprocess.CompletedProcess(args[0], 42)
+                    return process
 
                 with (
                     mock.patch.object(
@@ -131,9 +133,10 @@ class LaunchTests(unittest.TestCase):
                     ),
                     mock.patch.object(
                         launch_module.subprocess,
-                        "run",
+                        "Popen",
                         side_effect=run,
                     ) as run_mock,
+                    mock.patch.object(launch_module.signal, "signal"),
                 ):
                     self.assertEqual(launch_module.launch("work"), 42)
 
@@ -143,6 +146,7 @@ class LaunchTests(unittest.TestCase):
                 self.assertEqual(self.root_home.stat().st_mode & 0o777, 0o700)
                 run_mock.assert_called_once()
                 arguments, = run_mock.call_args.args
+                environment = run_mock.call_args.kwargs["env"]
                 expected_kept = [*kept_caps, *added_caps]
                 expected_dropped = [
                     capability
@@ -157,8 +161,6 @@ class LaunchTests(unittest.TestCase):
                         f"--capability={','.join(expected_kept)}",
                     ],
                 )
-                self.assertFalse(run_mock.call_args.kwargs["check"])
-                environment = run_mock.call_args.kwargs["env"]
                 self.assertEqual(environment["PRESERVED"], "yes")
                 if network == "admin":
                     self.assertEqual(
@@ -171,17 +173,50 @@ class LaunchTests(unittest.TestCase):
                         environment,
                     )
 
-    def test_rootfs_fixup_logs_conflict_and_launches(self) -> None:
+    def test_launch_forwards_sigterm_and_waits(self) -> None:
         self._write_info()
-        var_home = self.rootfs / "var" / "home"
-        var_home.mkdir(parents=True)
+        process = mock.Mock()
+        process.wait.return_value = 42
 
         with (
             mock.patch.object(
                 launch_module.subprocess,
-                "run",
-                return_value=subprocess.CompletedProcess([], 42),
+                "Popen",
+                return_value=process,
+            ),
+            mock.patch.object(launch_module.signal, "signal") as set_handler,
+        ):
+            self.assertEqual(launch_module.launch("work"), 42)
+
+        set_handler.assert_called_once()
+        signum, handler = set_handler.call_args.args
+        self.assertEqual(signum, launch_module.signal.SIGTERM)
+        self.assertTrue(callable(handler))
+        handler(launch_module.signal.SIGTERM, None)
+        handler(launch_module.signal.SIGTERM, None)
+        self.assertEqual(
+            process.send_signal.call_args_list,
+            [
+                mock.call(launch_module.signal.SIGTERM),
+                mock.call(launch_module.signal.SIGTERM),
+            ],
+        )
+        process.wait.assert_called_once_with()
+
+    def test_rootfs_fixup_logs_conflict_and_launches(self) -> None:
+        self._write_info()
+        var_home = self.rootfs / "var" / "home"
+        var_home.mkdir(parents=True)
+        process = mock.Mock()
+        process.wait.return_value = 42
+
+        with (
+            mock.patch.object(
+                launch_module.subprocess,
+                "Popen",
+                return_value=process,
             ) as run,
+            mock.patch.object(launch_module.signal, "signal"),
             self.assertLogs(launch_module.logger, level="ERROR") as logs,
         ):
             result = launch_module.launch("work")
@@ -193,6 +228,8 @@ class LaunchTests(unittest.TestCase):
 
     def test_rootfs_fixup_logs_os_error_and_launches(self) -> None:
         self._write_info()
+        process = mock.Mock()
+        process.wait.return_value = 0
 
         with (
             mock.patch.object(
@@ -202,9 +239,10 @@ class LaunchTests(unittest.TestCase):
             ),
             mock.patch.object(
                 launch_module.subprocess,
-                "run",
-                return_value=subprocess.CompletedProcess([], 0),
+                "Popen",
+                return_value=process,
             ) as run,
+            mock.patch.object(launch_module.signal, "signal"),
             self.assertLogs(launch_module.logger, level="ERROR") as logs,
         ):
             result = launch_module.launch("work")
@@ -218,11 +256,16 @@ class LaunchTests(unittest.TestCase):
         var_home = self.rootfs / "var" / "home"
         var_home.parent.mkdir()
         var_home.symlink_to("/srv/home", target_is_directory=True)
+        process = mock.Mock()
+        process.wait.return_value = 0
 
-        with mock.patch.object(
-            launch_module.subprocess,
-            "run",
-            return_value=subprocess.CompletedProcess([], 0),
+        with (
+            mock.patch.object(
+                launch_module.subprocess,
+                "Popen",
+                return_value=process,
+            ),
+            mock.patch.object(launch_module.signal, "signal"),
         ):
             launch_module.launch("work")
 
@@ -262,7 +305,7 @@ class LaunchTests(unittest.TestCase):
 
     def test_invalid_name_is_rejected_before_state_access(self) -> None:
         with (
-            mock.patch.object(launch_module.subprocess, "run") as run,
+            mock.patch.object(launch_module.subprocess, "Popen") as run,
             self.assertRaises(core.SpacesError),
         ):
             launch_module.launch("../work")
@@ -271,7 +314,7 @@ class LaunchTests(unittest.TestCase):
     def test_missing_space_is_rejected(self) -> None:
         self.space.rename(self.state_root / "other")
         with (
-            mock.patch.object(launch_module.subprocess, "run") as run,
+            mock.patch.object(launch_module.subprocess, "Popen") as run,
             self.assertRaises(core.SpacesError),
         ):
             launch_module.launch("work")
@@ -333,7 +376,7 @@ class LaunchTests(unittest.TestCase):
     def test_metadata_name_must_match_space(self) -> None:
         self._write_info(name="other")
         with (
-            mock.patch.object(launch_module.subprocess, "run") as run,
+            mock.patch.object(launch_module.subprocess, "Popen") as run,
             self.assertRaises(core.SpacesError),
         ):
             launch_module.launch("work")

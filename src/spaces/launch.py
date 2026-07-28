@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import signal
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -205,9 +206,13 @@ def launch(space_name: str) -> int:
     _apply_rootfs_fixups(rootfs)
 
     # Future session and mount workers must start before this blocking call.
-    completed = subprocess.run(
+    process = subprocess.Popen(
         _command(space_name, rootfs, home, network),
-        check=False,
         env=environment,
     )
-    return completed.returncode
+
+    def forward_signal(signum: int, _frame: object) -> None:
+        process.send_signal(signum)
+
+    signal.signal(signal.SIGTERM, forward_signal)
+    return process.wait()

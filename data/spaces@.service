@@ -5,6 +5,7 @@ Description=Spaces environment %I
 Type=notify
 NotifyAccess=all
 Delegate=yes
+KillMode=mixed
 SyslogIdentifier=spaces-%I
 ExecStart=/usr/bin/spaces.priv launch %I
 
