@@ -21,6 +21,7 @@ from typing import Any
 
 from . import _
 from . import core
+from .distro import get_driver
 from .logging import configure_logging
 
 
@@ -92,6 +93,7 @@ class SpaceUser:
     space_home: Path
     guest_home: PurePosixPath
     permitted_home: tuple[str, ...]
+    administrator: bool = True
 
 
 @dataclass(frozen=True, order=True)
@@ -247,6 +249,7 @@ def _resolve_users(info: dict[str, Any], home: Path) -> tuple[SpaceUser, ...]:
                 space_home=space_home,
                 guest_home=guest_home,
                 permitted_home=tuple(record["permissions"]["home"]),
+                administrator=record["permissions"].get("administrator", True),
             )
         )
     return tuple(users)
@@ -332,6 +335,63 @@ def _rename_members(
             )
 
 
+def _set_group_member(
+    records: list[list[str]],
+    group_name: str,
+    user_name: str,
+    enabled: bool,
+    field: int,
+) -> None:
+    group = next((record for record in records if record[0] == group_name), None)
+    if group is None:
+        return
+    members = group[field].split(",") if group[field] else []
+    if enabled and user_name not in members:
+        members.append(user_name)
+    elif not enabled:
+        members = [member for member in members if member != user_name]
+    group[field] = ",".join(members)
+
+
+def _ensure_administrator_group(
+    group_records: list[list[str]],
+    gshadow_records: list[list[str]] | None,
+    users: tuple[SpaceUser, ...],
+    group_path: Path,
+    group_name: str,
+) -> None:
+    if not any(user.administrator for user in users):
+        return
+
+    if not any(record[0] == group_name for record in group_records):
+        used_gids = {
+            _numeric_field(record, 2, group_path) for record in group_records
+        }
+        used_gids.update(user.gid for user in users)
+        gid = next(
+            (
+                candidate
+                for candidates in (range(999, 0, -1), range(1000, 60000))
+                for candidate in candidates
+                if candidate not in used_gids
+            ),
+            None,
+        )
+        if gid is None:
+            raise core.SpacesError(
+                _(
+                    "Could not allocate a GID for the {group} group.",
+                    group=group_name,
+                )
+            )
+        group_records.append([group_name, "x", str(gid), ""])
+
+    if gshadow_records is not None and not any(
+        record[0] == group_name for record in gshadow_records
+    ):
+        gshadow_records.append([group_name, "!", "", ""])
+
+
 def _default_user_shell(rootfs: Path) -> str:
     resolved_rootfs = rootfs.resolve(strict=True)
     for shell in ("/bin/bash", "/usr/bin/bash"):
@@ -349,7 +409,11 @@ def _default_user_shell(rootfs: Path) -> str:
     return "/bin/sh"
 
 
-def _reconcile_accounts(rootfs: Path, users: tuple[SpaceUser, ...]) -> None:
+def _reconcile_accounts(
+    rootfs: Path,
+    users: tuple[SpaceUser, ...],
+    administrator_group: str = "wheel",
+) -> None:
     non_root_users = tuple(user for user in users if user.uid != 0)
     if not non_root_users:
         return
@@ -392,6 +456,13 @@ def _reconcile_accounts(rootfs: Path, users: tuple[SpaceUser, ...]) -> None:
         )
 
     shell = _default_user_shell(rootfs)
+    _ensure_administrator_group(
+        group_records,
+        gshadow_records,
+        non_root_users,
+        group_path,
+        administrator_group,
+    )
     for user in non_root_users:
         names = {record[0]: index for index, record in enumerate(passwd_records)}
         uids = {
@@ -457,6 +528,21 @@ def _reconcile_accounts(rootfs: Path, users: tuple[SpaceUser, ...]) -> None:
         _rename_members(group_records, old_name, user.name, 3)
         if gshadow_records is not None:
             _rename_members(gshadow_records, old_name, user.name, 2, 3)
+        _set_group_member(
+            group_records,
+            administrator_group,
+            user.name,
+            user.administrator,
+            3,
+        )
+        if gshadow_records is not None:
+            _set_group_member(
+                gshadow_records,
+                administrator_group,
+                user.name,
+                user.administrator,
+                3,
+            )
 
         if shadow_records is not None:
             shadow_names = {
@@ -1096,7 +1182,11 @@ def launch(space_name: str) -> int:
 
     _apply_rootfs_fixups(rootfs)
     users = _resolve_users(info, home)
-    _reconcile_accounts(rootfs, users)
+    driver = get_driver(info["distribution"]["id"])
+    administrator_group = (
+        driver.administrator_group if driver is not None else "wheel"
+    )
+    _reconcile_accounts(rootfs, users, administrator_group)
     _ensure_user_homes(rootfs, users)
 
     available_mounts = _prepare_mounts(users)

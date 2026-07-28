@@ -176,7 +176,9 @@ def _create(distro_id: str) -> int:
     override = target.exists() or target.is_symlink()
 
     existing_info = core.load_info(target / "info.json") if override else None
-    network, selected_home = core.defaults_from_info(existing_info, identity)
+    network, selected_home, administrator = core.defaults_from_info(
+        existing_info, identity
+    )
     existing_distribution = (
         existing_info.get("distribution") if existing_info else None
     )
@@ -188,6 +190,8 @@ def _create(distro_id: str) -> int:
         folders=folders,
         network=network,
         selected_home=selected_home,
+        administrator=administrator,
+        administrator_group=driver.administrator_group,
         include_system=True,
         distribution_title=driver.configuration_title,
         distribution_description=driver.configuration_description,
@@ -209,6 +213,7 @@ def _create(distro_id: str) -> int:
         identity=identity,
         network=result["network"],
         home=result["home"],
+        administrator=result.get("administrator", True),
     )
     configure_logging(rich=True)
     log(
@@ -243,12 +248,18 @@ def _configure(name: str, *, user_only: bool) -> int:
                 name=name,
             )
         )
-    network, selected_home = core.defaults_from_info(info, identity)
+    network, selected_home, administrator = core.defaults_from_info(info, identity)
+    driver = get_driver(info["distribution"]["id"])
+    administrator_group = (
+        driver.administrator_group if driver is not None else "wheel"
+    )
     result = run_permission_wizard(
         home=identity.home,
         folders=core.discover_home_folders(identity.home),
         network=network,
         selected_home=selected_home,
+        administrator=administrator,
+        administrator_group=administrator_group,
         include_system=not user_only,
         distribution_title="",
         distribution_description="",
@@ -263,7 +274,10 @@ def _configure(name: str, *, user_only: bool) -> int:
         "user": {
             "uid": identity.uid,
             "gid": identity.gid,
-            "permissions": {"home": sorted(result["home"], key=str.casefold)},
+            "permissions": {
+                "home": sorted(result["home"], key=str.casefold),
+                "administrator": result.get("administrator", True),
+            },
         }
     }
     if not user_only:

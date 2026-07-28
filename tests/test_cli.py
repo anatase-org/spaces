@@ -94,7 +94,7 @@ class CliTests(unittest.TestCase):
                         "home": ["Projects"],
                         "distribution_option": "resolute",
                     },
-                ),
+                ) as wizard,
                 mock.patch.object(cli, "configure_logging", calls.configure),
                 mock.patch.object(cli, "log", calls.log),
                 mock.patch.object(cli, "_invoke_helper", calls.invoke) as invoke,
@@ -113,6 +113,15 @@ class CliTests(unittest.TestCase):
         self.assertEqual(operation, "create")
         self.assertEqual(payload["distribution"]["version"], "resolute")
         self.assertEqual(set(payload["permissions"]["users"]), {"1000"})
+        self.assertEqual(
+            wizard.call_args.kwargs["administrator_group"],
+            "sudo",
+        )
+        self.assertTrue(
+            payload["permissions"]["users"]["1000"]["permissions"][
+                "administrator"
+            ]
+        )
 
     def test_create_custom_uses_prompted_name(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -166,6 +175,9 @@ class CliTests(unittest.TestCase):
         self.assertFalse(wizard.call_args.kwargs["include_system"])
         patch = invoke.call_args.args[1]
         self.assertNotIn("system", patch["permissions"])
+        self.assertTrue(
+            patch["permissions"]["user"]["permissions"]["administrator"]
+        )
 
     def test_delete_requires_enter_before_invoking_helper(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

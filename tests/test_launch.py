@@ -508,6 +508,7 @@ class UserFixupTests(unittest.TestCase):
         gid: int | None = None,
         name: str = "alice",
         permitted: tuple[str, ...] = (),
+        administrator: bool = True,
     ) -> launch_module.SpaceUser:
         fixed_uid = os.getuid() if uid is None else uid
         fixed_gid = os.getgid() if gid is None else gid
@@ -519,6 +520,7 @@ class UserFixupTests(unittest.TestCase):
             space_home=self.space_home / name,
             guest_home=launch_module.PurePosixPath(f"/home/{name}"),
             permitted_home=permitted,
+            administrator=administrator,
         )
 
     def _write_accounts(
@@ -595,6 +597,98 @@ class UserFixupTests(unittest.TestCase):
             ["alice", "x", "12346", ""],
             launch_module._read_database(self.etc / "group", 4),
         )
+
+    def test_reconcile_adds_administrator_to_wheel_group(self) -> None:
+        self._write_accounts(
+            passwd_text=(
+                "root:x:0:0::/root:/bin/sh\n"
+                "alice:x:12345:12346::/home/alice:/bin/sh\n"
+            ),
+            group_text="root:x:0:\nwheel:x:10:bob\nalice:x:12346:\n",
+            shadow_text="root:!:::::::\nalice:!:::::::\n",
+            gshadow_text="root:!::\nwheel:!::bob\nalice:!::\n",
+        )
+
+        launch_module._reconcile_accounts(
+            self.rootfs,
+            (self._user(uid=12345, gid=12346, administrator=True),),
+        )
+
+        group = launch_module._read_database(self.etc / "group", 4)
+        wheel = next(record for record in group if record[0] == "wheel")
+        self.assertEqual(wheel[3], "bob,alice")
+        gshadow = launch_module._read_database(self.etc / "gshadow", 4)
+        wheel_shadow = next(record for record in gshadow if record[0] == "wheel")
+        self.assertEqual(wheel_shadow[3], "bob,alice")
+
+    def test_reconcile_uses_distribution_administrator_group(self) -> None:
+        self._write_accounts(
+            passwd_text=(
+                "root:x:0:0::/root:/bin/sh\n"
+                "alice:x:12345:12346::/home/alice:/bin/sh\n"
+            ),
+            group_text="root:x:0:\nsudo:x:27:\nalice:x:12346:\n",
+            shadow_text="root:!:::::::\nalice:!:::::::\n",
+            gshadow_text="root:!::\nsudo:!::\nalice:!::\n",
+        )
+
+        launch_module._reconcile_accounts(
+            self.rootfs,
+            (self._user(uid=12345, gid=12346, administrator=True),),
+            "sudo",
+        )
+
+        group = launch_module._read_database(self.etc / "group", 4)
+        sudo = next(record for record in group if record[0] == "sudo")
+        self.assertEqual(sudo[3], "alice")
+        self.assertNotIn("wheel", {record[0] for record in group})
+        gshadow = launch_module._read_database(self.etc / "gshadow", 4)
+        sudo_shadow = next(record for record in gshadow if record[0] == "sudo")
+        self.assertEqual(sudo_shadow[3], "alice")
+
+    def test_reconcile_creates_missing_administrator_group(self) -> None:
+        self._write_accounts(
+            passwd_text="root:x:0:0::/root:/bin/sh\n",
+            group_text="root:x:0:\nreserved:x:999:\n",
+            shadow_text="root:!:::::::\n",
+            gshadow_text="root:!::\nreserved:!::\n",
+        )
+
+        launch_module._reconcile_accounts(
+            self.rootfs,
+            (self._user(uid=12345, gid=998, administrator=True),),
+            "sudo",
+        )
+
+        group = launch_module._read_database(self.etc / "group", 4)
+        sudo = next(record for record in group if record[0] == "sudo")
+        self.assertEqual(sudo, ["sudo", "x", "997", "alice"])
+        gshadow = launch_module._read_database(self.etc / "gshadow", 4)
+        sudo_shadow = next(record for record in gshadow if record[0] == "sudo")
+        self.assertEqual(sudo_shadow, ["sudo", "!", "", "alice"])
+
+    def test_reconcile_removes_non_administrator_from_wheel_group(self) -> None:
+        self._write_accounts(
+            passwd_text=(
+                "root:x:0:0::/root:/bin/sh\n"
+                "alice:x:12345:12346::/home/alice:/bin/sh\n"
+            ),
+            group_text="root:x:0:\nwheel:x:10:bob,alice\nalice:x:12346:\n",
+            shadow_text="root:!:::::::\nalice:!:::::::\n",
+            gshadow_text="root:!::\nwheel:!::bob,alice\nalice:!::\n",
+        )
+
+        launch_module._reconcile_accounts(
+            self.rootfs,
+            (self._user(uid=12345, gid=12346, administrator=False),),
+        )
+
+        group = launch_module._read_database(self.etc / "group", 4)
+        wheel = next(record for record in group if record[0] == "wheel")
+        self.assertEqual(wheel[3], "bob")
+        gshadow = launch_module._read_database(self.etc / "gshadow", 4)
+        wheel_shadow = next(record for record in gshadow if record[0] == "wheel")
+        self.assertEqual(wheel_shadow[3], "bob")
 
     def test_reconcile_uses_bash_when_available(self) -> None:
         binary = self.rootfs / "bin" / "bash"

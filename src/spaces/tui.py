@@ -259,6 +259,9 @@ class PermissionForm(
         border: none;
         background: ansi_default;
     }
+    #next {
+        margin-right: 1;
+    }
     Button:hover, Button:focus, Button.-active, Button.-primary {
         border: none;
         background: ansi_default;
@@ -302,6 +305,8 @@ class PermissionForm(
         distribution_description: str,
         distribution_options: list[tuple[str, str]],
         distribution_value: str | None,
+        administrator: bool = True,
+        administrator_group: str = "wheel",
         submit_label: str = _("Create"),
         override: bool = False,
     ) -> None:
@@ -309,6 +314,8 @@ class PermissionForm(
         self.home = home
         self.initial_network = network
         self.initial_home = set(selected_home)
+        self.initial_administrator = administrator
+        self.administrator_group = administrator_group
         selected_folders = [
             folder
             for folder in (*DEFAULT_HOME_FOLDERS, *selected_home)
@@ -328,7 +335,7 @@ class PermissionForm(
         self.steps = (
             (["override"] if override else [])
             + (["system"] if include_system else [])
-            + ["user"]
+            + ["user", "administrator"]
             + (["distribution"] if distribution_options else [])
         )
         self.step_index = 0
@@ -381,6 +388,27 @@ class PermissionForm(
                     ],
                     id="home-folders",
                 )
+            with Vertical(id="administrator-step", classes="step"):
+                yield Static(
+                    _(
+                        "Choose whether {name} is an administrator inside "
+                        "the space (part of {group} group).",
+                        name=self.home.name,
+                        group=self.administrator_group,
+                    ),
+                    classes="description",
+                )
+                with RadioSet(id="administrator"):
+                    yield CleanRadioButton(
+                        _("User {name} is not administrator", name=self.home.name),
+                        value=not self.initial_administrator,
+                        id="administrator-false",
+                    )
+                    yield CleanRadioButton(
+                        _("User {name} is administrator", name=self.home.name),
+                        value=self.initial_administrator,
+                        id="administrator-true",
+                    )
             if self.distribution_options:
                 with Vertical(id="distribution-step", classes="step"):
                     yield Label(self.distribution_title)
@@ -435,6 +463,7 @@ class PermissionForm(
             "override": _("Space already exists"),
             "system": _("System permissions"),
             "user": _("User permissions"),
+            "administrator": _("Administrator permissions"),
             "distribution": _("Distribution settings"),
         }
         self.query_one("#step-title", Label).update(
@@ -462,6 +491,7 @@ class PermissionForm(
         focus_targets = {
             "system": "#network",
             "user": "#home-folders",
+            "administrator": "#administrator",
             "distribution": "#distribution-option",
         }
         if current == "override":
@@ -485,11 +515,12 @@ class PermissionForm(
                 "#home-folders", FolderSelectionList
             ).action_select()
         else:
-            target = (
-                "#network"
-                if current == "system"
-                else "#distribution-option"
-            )
+            targets = {
+                "system": "#network",
+                "administrator": "#administrator",
+                "distribution": "#distribution-option",
+            }
+            target = targets[current]
             self.query_one(target, RadioSet).action_toggle_button()
 
     def action_advance(self) -> None:
@@ -519,7 +550,12 @@ class PermissionForm(
         result: dict[str, Any] = {
             "home": list(
                 self.query_one("#home-folders", FolderSelectionList).selected
+            ),
+            "administrator": self._radio_value(
+                self.query_one("#administrator", RadioSet),
+                "administrator-",
             )
+            == "true",
         }
         if self.include_system:
             result["network"] = self._radio_value(

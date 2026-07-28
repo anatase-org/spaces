@@ -65,6 +65,7 @@ class UbuntuDistribution(Distribution):
 DISTRIBUTION = UbuntuDistribution(
     id="ubuntu",
     default_name="ubuntu",
+    administrator_group="sudo",
     configuration_title=_("Ubuntu version"),
     configuration_description=_("Choose the Ubuntu release to bootstrap."),
     option_key="version",

@@ -19,6 +19,7 @@ class Distribution:
 
     id: str
     default_name: str | None
+    administrator_group: str = "wheel"
     configuration_title: str = ""
     configuration_description: str = ""
     option_key: str | None = None

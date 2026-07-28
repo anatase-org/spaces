@@ -24,6 +24,8 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             folders=["Documents", "Downloads", "Projects"],
             network="advanced",
             selected_home=["Downloads", "Projects"],
+            administrator=True,
+            administrator_group="sudo",
             include_system=True,
             distribution_title="Ubuntu version",
             distribution_description="Choose the Ubuntu release to bootstrap.",
@@ -54,7 +56,10 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                 app.query_one("#home-folders", SelectionList).selected,
                 ["Projects", "Downloads"],
             )
-            self.assertEqual(app.steps, ["system", "user", "distribution"])
+            self.assertEqual(
+                app.steps,
+                ["system", "user", "administrator", "distribution"],
+            )
             self.assertTrue(app.native_ansi_color)
             variables = app.get_css_variables()
             selected_label_background = next(
@@ -90,7 +95,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
-                "System permissions (1/3)",
+                "System permissions (1/4)",
             )
             self.assertEqual(
                 sum(not step.has_class("hidden") for step in app.query(".step")),
@@ -100,7 +105,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
-                "User permissions (2/3)",
+                "User permissions (2/4)",
             )
             folders = app.query_one("#home-folders", FolderSelectionList)
             self.assertEqual(
@@ -137,7 +142,31 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
-                "Distribution settings (3/3)",
+                "Administrator permissions (3/4)",
+            )
+            administrator = app.query_one("#administrator", RadioSet)
+            self.assertEqual(
+                administrator.pressed_button.id,
+                "administrator-true",
+            )
+            self.assertEqual(
+                [
+                    button.label.plain
+                    for button in administrator.query(CleanRadioButton)
+                ],
+                ["User user is not administrator", "User user is administrator"],
+            )
+            self.assertEqual(
+                str(app.query_one("#administrator-step Static").render()),
+                "Choose whether user is an administrator inside the space "
+                "(part of sudo group).",
+            )
+            self.assertEqual(administrator._selected, administrator.pressed_index)
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertEqual(
+                str(app.query_one("#step-title").render()),
+                "Distribution settings (4/4)",
             )
             distribution = app.query_one("#distribution-option", RadioSet)
             self.assertEqual(distribution._selected, distribution.pressed_index)
@@ -156,7 +185,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
-                "User permissions (2/3)",
+                "Administrator permissions (3/4)",
             )
             self.assertEqual(len(app.query(Header)), 0)
             self.assertEqual(len(app.query(Footer)), 0)
@@ -181,6 +210,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             folders=["Projects"],
             network="basic",
             selected_home=["Projects"],
+            administrator=False,
             include_system=False,
             distribution_title="",
             distribution_description="",
@@ -190,15 +220,31 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
         )
         async with app.run_test() as pilot:
             await pilot.pause()
-            self.assertEqual(app._result(), {"home": ["Projects"]})
+            self.assertEqual(
+                app._result(),
+                {"home": ["Projects"], "administrator": False},
+            )
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertEqual(
+                str(app.query_one("#step-title").render()),
+                "Administrator permissions (2/2)",
+            )
+            await pilot.click("#administrator-true")
+            await pilot.pause()
+            self.assertTrue(app._result()["administrator"])
             self.assertEqual(len(app.query("#network")), 0)
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
-                "User permissions (1/1)",
+                "Administrator permissions (2/2)",
             )
             self.assertEqual(
                 app.query_one("#next", Button).label.plain,
                 "Configure [ENTER]",
+            )
+            self.assertLess(
+                app.query_one("#next", Button).region.right,
+                app.screen.region.right,
             )
 
     async def test_ctrl_c_cancels(self) -> None:
@@ -207,6 +253,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             folders=["Projects"],
             network="basic",
             selected_home=[],
+            administrator=True,
             include_system=False,
             distribution_title="",
             distribution_description="",
@@ -235,6 +282,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             folders=["Projects"],
             network="basic",
             selected_home=[],
+            administrator=True,
             include_system=True,
             distribution_title="",
             distribution_description="",
@@ -246,7 +294,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(
                 app.steps,
-                ["override", "system", "user"],
+                ["override", "system", "user", "administrator"],
             )
             self.assertEqual(
                 str(app.query_one("#override-step Static").render()),
@@ -255,7 +303,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
-                "Space already exists (1/3)",
+                "Space already exists (1/4)",
             )
             self.assertTrue(app.query_one("#select", Button).disabled)
             self.assertTrue(app.query_one("#next", Button).has_focus)
@@ -263,7 +311,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
-                "System permissions (2/3)",
+                "System permissions (2/4)",
             )
             self.assertFalse(app.query_one("#select", Button).disabled)
 

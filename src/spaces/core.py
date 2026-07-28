@@ -172,6 +172,11 @@ def _validate_user_record(value: object, uid_key: str) -> dict[str, Any]:
         raise SpacesError(
             _("User {uid} home permissions contain duplicates.", uid=uid_key)
         )
+    administrator = permissions.get("administrator", True)
+    if not isinstance(administrator, bool):
+        raise SpacesError(
+            _("User {uid} administrator permission must be a boolean.", uid=uid_key)
+        )
     return record
 
 
@@ -311,18 +316,20 @@ def load_info(path: Path) -> dict[str, Any] | None:
 
 def defaults_from_info(
     info: Mapping[str, Any] | None, identity: Identity
-) -> tuple[str, list[str]]:
+) -> tuple[str, list[str], bool]:
     network = "basic"
     selected_home = list(DEFAULT_HOME_FOLDERS)
+    administrator = True
     if not info:
-        return network, selected_home
+        return network, selected_home, administrator
 
     permissions = info.get("permissions", {})
     existing_network = permissions.get("system", {}).get("network")
     if existing_network in NETWORK_LEVELS:
         network = existing_network
     user = permissions.get("users", {}).get(str(identity.uid), {})
-    home = user.get("permissions", {}).get("home")
+    user_permissions = user.get("permissions", {})
+    home = user_permissions.get("home")
     if isinstance(home, list):
         selected_home = [
             name
@@ -331,7 +338,10 @@ def defaults_from_info(
             and not name.startswith(".")
             and "/" not in name
         ]
-    return network, selected_home
+    existing_administrator = user_permissions.get("administrator")
+    if isinstance(existing_administrator, bool):
+        administrator = existing_administrator
+    return network, selected_home, administrator
 
 
 def create_info(
@@ -340,6 +350,7 @@ def create_info(
     identity: Identity,
     network: str,
     home: list[str],
+    administrator: bool = True,
 ) -> dict[str, Any]:
     value = {
         "schema_version": SCHEMA_VERSION,
@@ -350,7 +361,10 @@ def create_info(
             "users": {
                 str(identity.uid): {
                     "gid": identity.gid,
-                    "permissions": {"home": sorted(home, key=str.casefold)},
+                    "permissions": {
+                        "home": sorted(home, key=str.casefold),
+                        "administrator": administrator,
+                    },
                 }
             },
         },

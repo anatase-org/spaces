@@ -15,6 +15,7 @@ from spaces.distro.model import Distribution
 class CoreTests(unittest.TestCase):
     def test_ubuntu_display_and_command_mapping(self) -> None:
         self.assertIsInstance(ubuntu.DISTRIBUTION, Distribution)
+        self.assertEqual(ubuntu.DISTRIBUTION.administrator_group, "sudo")
         self.assertEqual(
             ubuntu.DISTRIBUTION.choices(),
             [
@@ -47,12 +48,13 @@ class CoreTests(unittest.TestCase):
             )
 
     def test_new_space_defaults(self) -> None:
-        network, selected_home = core.defaults_from_info(
+        network, selected_home, administrator = core.defaults_from_info(
             None,
             core.Identity(1000, 1000, Path("/home/user")),
         )
         self.assertEqual(network, "basic")
         self.assertEqual(selected_home, ["Projects", "Downloads"])
+        self.assertTrue(administrator)
 
     def test_space_name_validation(self) -> None:
         self.assertEqual(core.validate_space_name("project-1"), "project-1")
@@ -133,6 +135,53 @@ class CoreTests(unittest.TestCase):
         )
         self.assertEqual(info["distribution"]["version"], "noble")
         self.assertEqual(set(info["permissions"]["users"]), {"1000"})
+        self.assertTrue(
+            info["permissions"]["users"]["1000"]["permissions"]["administrator"]
+        )
+
+    def test_existing_administrator_permission_is_used_as_default(self) -> None:
+        identity = core.Identity(1000, 1000, Path("/home/user"))
+        info = core.create_info(
+            "work",
+            {"id": "custom"},
+            identity,
+            "basic",
+            [],
+            administrator=False,
+        )
+
+        _network, _home, administrator = core.defaults_from_info(info, identity)
+
+        self.assertFalse(administrator)
+
+    def test_missing_administrator_permission_defaults_to_true(self) -> None:
+        identity = core.Identity(1000, 1000, Path("/home/user"))
+        info = core.create_info(
+            "work",
+            {"id": "custom"},
+            identity,
+            "basic",
+            [],
+        )
+        del info["permissions"]["users"]["1000"]["permissions"]["administrator"]
+
+        core.validate_info(info)
+        _network, _home, administrator = core.defaults_from_info(info, identity)
+
+        self.assertTrue(administrator)
+
+    def test_non_boolean_administrator_permission_is_rejected(self) -> None:
+        info = core.create_info(
+            "work",
+            {"id": "custom"},
+            core.Identity(1000, 1000, Path("/home/user")),
+            "basic",
+            [],
+        )
+        info["permissions"]["users"]["1000"]["permissions"]["administrator"] = 1
+
+        with self.assertRaises(core.SpacesError):
+            core.validate_info(info)
 
     def test_custom_info_omits_version(self) -> None:
         info = core.create_info(
