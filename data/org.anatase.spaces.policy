@@ -6,16 +6,6 @@
   <vendor>Anatase</vendor>
   <vendor_url>https://github.com/anatase-org/spaces</vendor_url>
 
-  <action id="org.anatase.spaces.root">
-    <description>Authenticate administrator access in a space</description>
-    <message>Authentication is required for administrator access in a space</message>
-    <defaults>
-      <allow_any>auth_self</allow_any>
-      <allow_inactive>auth_self</allow_inactive>
-      <allow_active>auth_self</allow_active>
-    </defaults>
-  </action>
-
   <action id="org.anatase.spaces.create">
     <description>Create a Spaces environment</description>
     <message>Administrator authentication is required to create a space</message>

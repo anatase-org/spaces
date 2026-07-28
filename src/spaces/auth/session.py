@@ -135,28 +135,3 @@ def process_session_matches(pid: int, session_id: str, uid: int) -> bool:
             f"XDG_SESSION_ID={session_id}".encode() in environment
             and f"user@{uid}.service" in components
         )
-
-
-def session_process(session_id: str, uid: int) -> tuple[int, int]:
-    """Find a live process owned by UID inside the exact logind session."""
-
-    for entry in Path("/proc").iterdir():
-        if not entry.name.isdecimal():
-            continue
-        pid = int(entry.name)
-        try:
-            if entry.stat().st_uid != uid:
-                continue
-            if session_for_pid(pid) != session_id:
-                continue
-            return pid, process_start_time(pid)
-        except (OSError, core.SpacesError):
-            continue
-    raise core.SpacesError(
-        _(
-            "No live process for UID {uid} remains in host session "
-            "{session!r}.",
-            uid=uid,
-            session=session_id,
-        )
-    )

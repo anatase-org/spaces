@@ -18,7 +18,6 @@ GUEST_SOCKET = f"{GUEST_RUNTIME}/auth.sock"
 GUEST_NATIVE = f"{GUEST_RUNTIME}/bin"
 GUEST_BINARIES = (
     "pam_spaces.so",
-    "spaces-polkit-agent",
 )
 ELF_MACHINES = {
     "x86_64": 62,

@@ -96,17 +96,7 @@ class PackagingTests(unittest.TestCase):
                 "auth_admin",
             ),
         }
-        self.assertEqual(set(actions), set(expected) | {"org.anatase.spaces.root"})
-        root_action = actions["org.anatase.spaces.root"]
-        self.assertEqual(
-            root_action.findtext("./message"),
-            "Authentication is required for administrator access in a space",
-        )
-        self.assertEqual(
-            [child.text for child in root_action.find("./defaults")],
-            ["auth_self", "auth_self", "auth_self"],
-        )
-        self.assertEqual(root_action.findall("./annotate"), [])
+        self.assertEqual(set(actions), set(expected))
         for action_id, (operation, authorization) in expected.items():
             action = actions[action_id]
             defaults = action.find("./defaults")
@@ -162,20 +152,21 @@ class PackagingTests(unittest.TestCase):
         for name in (
             "pam_spaces.so",
             "spaces-pam-worker",
-            "spaces-polkit-worker",
-            "spaces-polkit-agent",
         ):
             self.assertIn(name, makefile)
+        self.assertNotIn("spaces-polkit", makefile)
+        self.assertNotIn("polkit-agent-1", spec)
         self.assertNotIn("spaces-session", makefile)
         self.assertFalse(
             (ROOT / "native" / "spaces_session.c").exists()
         )
-        polkit_worker = (
-            ROOT / "native" / "spaces_polkit_worker.c"
-        ).read_text(encoding="utf-8")
-        self.assertIn('"--allow-user-interaction"', polkit_worker)
-        self.assertNotIn('"--detail"', polkit_worker)
-        self.assertNotIn('"--space"', polkit_worker)
+        self.assertFalse(
+            (ROOT / "native" / "spaces_polkit_worker.c").exists()
+        )
+        self.assertFalse(
+            (ROOT / "native" / "spaces_polkit_agent.c").exists()
+        )
+        self.assertFalse((ROOT / "native" / "glibc_compat.c").exists())
 
         manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8")
         self.assertIn(
@@ -204,6 +195,7 @@ class PackagingTests(unittest.TestCase):
         self.assertIn(
             "notify_session(pamh, SPACES_SESSION_OPEN)", opening
         )
+        self.assertNotIn("launch_polkit_agent", source)
         self.assertIn(
             "notify_session(pamh, SPACES_SESSION_CLOSE)", closing
         )

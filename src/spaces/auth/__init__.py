@@ -31,7 +31,6 @@ from .runtime import (
 from .service import (
     AUTHENTICATION_TIMEOUT,
     PAM_WORKER,
-    POLKIT_WORKER,
     SESSION_ENV,
     AuthenticationService,
     LeaseConnection,
@@ -43,7 +42,6 @@ from .session import (
     process_session_matches,
     process_start_time,
     session_for_pid,
-    session_process,
     session_uid,
 )
 
@@ -59,7 +57,6 @@ __all__ = [
     "MAX_PAYLOAD",
     "NATIVE_ROOT",
     "PAM_WORKER",
-    "POLKIT_WORKER",
     "REGISTER",
     "RESULT",
     "RUNTIME_ROOT",
@@ -83,7 +80,6 @@ __all__ = [
     "recv_frame",
     "send_frame",
     "session_for_pid",
-    "session_process",
     "session_uid",
     "validate_guest_architecture",
     "validate_native_bundle",

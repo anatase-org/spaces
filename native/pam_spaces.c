@@ -2,26 +2,14 @@
 
 #include "protocol.h"
 
-#include <fcntl.h>
-#include <grp.h>
-#include <limits.h>
 #include <pwd.h>
 #include <security/pam_appl.h>
 #include <security/pam_modules.h>
 #include <stdio.h>
-#include <sys/prctl.h>
-#include <sys/resource.h>
-#include <sys/stat.h>
-#include <sys/syscall.h>
 #include <sys/un.h>
-#include <sys/wait.h>
-#include <time.h>
 
 #define SPACES_SOCKET "/run/spaces-host/auth.sock"
-#define SPACES_POLKIT_AGENT "/run/spaces-host/bin/spaces-polkit-agent"
 #define SPACES_POLKIT_SERVICE "polkit-1"
-#define SPACES_AGENT_RESTART_SECONDS 5
-#define SPACES_TOKEN_SIZE 64
 
 static int connect_broker(void) {
     int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
@@ -53,7 +41,7 @@ static int safe_service(const char *value) {
 }
 
 static int safe_token(const char *value) {
-    if (value == NULL || strlen(value) != 64) return 0;
+    if (value == NULL || strlen(value) != SPACES_TOKEN_HEX_SIZE) return 0;
     for (const unsigned char *p = (const unsigned char *)value; *p; ++p) {
         if (!((*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'f')))
             return 0;
@@ -129,156 +117,6 @@ static void notify_session(pam_handle_t *pamh, uint8_t message_type) {
         (uint32_t)request_size
     );
     close(fd);
-}
-
-static void close_unrelated_descriptors(void) {
-#ifdef SYS_close_range
-    if (syscall(SYS_close_range, 3U, ~0U, 0U) == 0)
-        return;
-    if (errno != ENOSYS && errno != EINVAL)
-        return;
-#endif
-    struct rlimit limit;
-    if (getrlimit(RLIMIT_NOFILE, &limit) != 0)
-        return;
-    rlim_t maximum = limit.rlim_cur;
-    if (maximum == RLIM_INFINITY || maximum > (rlim_t)INT_MAX)
-        maximum = (rlim_t)INT_MAX;
-    for (int descriptor = 3; (rlim_t)descriptor < maximum; descriptor++)
-        close(descriptor);
-}
-
-static void redirect_standard_streams(void) {
-    int descriptor = open("/dev/null", O_RDWR | O_CLOEXEC);
-    if (descriptor < 0)
-        _exit(EXIT_FAILURE);
-    for (int standard = STDIN_FILENO; standard <= STDERR_FILENO; standard++) {
-        if (dup2(descriptor, standard) < 0)
-            _exit(EXIT_FAILURE);
-    }
-    if (descriptor > STDERR_FILENO)
-        close(descriptor);
-}
-
-static void wait_for_process(pid_t pid) {
-    int status;
-    while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
-        continue;
-}
-
-static void supervise_polkit_agent(
-    const char *token,
-    const char *session_id
-) {
-    char token_environment[
-        sizeof("SPACES_AUTH_SESSION=") + SPACES_TOKEN_SIZE
-    ];
-    char *const environment[] = {
-        token_environment,
-        "LANG=C",
-        "LC_ALL=C",
-        "PATH=/usr/bin:/bin",
-        NULL,
-    };
-    char *const arguments[] = {
-        SPACES_POLKIT_AGENT,
-        "--session",
-        (char *)session_id,
-        NULL,
-    };
-    struct timespec delay = {
-        .tv_sec = SPACES_AGENT_RESTART_SECONDS,
-        .tv_nsec = 0,
-    };
-
-    if (
-        snprintf(
-            token_environment,
-            sizeof(token_environment),
-            "SPACES_AUTH_SESSION=%s",
-            token
-        ) < 0
-    )
-        _exit(EXIT_FAILURE);
-
-    for (;;) {
-        pid_t child = fork();
-        if (child == 0) {
-            execve(SPACES_POLKIT_AGENT, arguments, environment);
-            _exit(EXIT_FAILURE);
-        }
-        if (child < 0)
-            _exit(EXIT_FAILURE);
-        wait_for_process(child);
-
-        struct timespec remaining = delay;
-        while (
-            nanosleep(&remaining, &remaining) < 0 &&
-            errno == EINTR
-        )
-            continue;
-    }
-}
-
-static void launch_polkit_agent(pam_handle_t *pamh) {
-    const char *token = pam_getenv(pamh, "SPACES_AUTH_SESSION");
-    const char *session_id = pam_getenv(pamh, "XDG_SESSION_ID");
-    const char *user = NULL;
-    struct passwd *account;
-    pid_t child;
-
-    if (token == NULL)
-        token = getenv("SPACES_AUTH_SESSION");
-    if (
-        geteuid() != 0 ||
-        !safe_token(token) ||
-        !safe_session(session_id) ||
-        pam_get_user(pamh, &user, NULL) != PAM_SUCCESS ||
-        user == NULL
-    )
-        return;
-    account = getpwnam(user);
-    if (account == NULL)
-        return;
-
-    child = fork();
-    if (child < 0)
-        return;
-    if (child == 0) {
-        pid_t supervisor = fork();
-        if (supervisor < 0)
-            _exit(EXIT_FAILURE);
-        if (supervisor > 0)
-            _exit(EXIT_SUCCESS);
-
-        redirect_standard_streams();
-        close_unrelated_descriptors();
-        umask(077);
-        if (
-            chdir("/") != 0 ||
-            setgroups(0, NULL) != 0 ||
-            setresgid(
-                account->pw_gid,
-                account->pw_gid,
-                account->pw_gid
-            ) != 0 ||
-            setresuid(
-                account->pw_uid,
-                account->pw_uid,
-                account->pw_uid
-            ) != 0
-        )
-            _exit(EXIT_FAILURE);
-
-        struct rlimit core_limit = {0, 0};
-        if (
-            setrlimit(RLIMIT_CORE, &core_limit) != 0 ||
-            prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) != 0
-        )
-            _exit(EXIT_FAILURE);
-        supervise_polkit_agent(token, session_id);
-    }
-    wait_for_process(child);
 }
 
 static int relay_message(
@@ -486,7 +324,6 @@ PAM_EXTERN int pam_sm_open_session(
 ) {
     (void)flags; (void)argc; (void)argv;
     notify_session(pamh, SPACES_SESSION_OPEN);
-    launch_polkit_agent(pamh);
     return PAM_SUCCESS;
 }
 

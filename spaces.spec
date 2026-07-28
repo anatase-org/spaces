@@ -11,7 +11,6 @@ ExclusiveArch:  x86_64 aarch64
 BuildRequires:  gcc
 BuildRequires:  binutils
 BuildRequires:  pam-devel
-BuildRequires:  pkgconfig(polkit-agent-1)
 BuildRequires:  systemd-rpm-macros
 BuildRequires:  python3-devel
 BuildRequires:  python3-build
@@ -64,8 +63,6 @@ install -Dm644 data/pam/spaces.system-auth \
 %config(noreplace) %{_sysconfdir}/pam.d/spaces
 %dir /usr/lib/spaces
 /usr/lib/spaces/spaces-pam-worker
-/usr/lib/spaces/spaces-polkit-worker
 %dir /usr/lib/spaces/guest
 /usr/lib/spaces/guest/pam_spaces.so
-/usr/lib/spaces/guest/spaces-polkit-agent
 %{_unitdir}/spaces@.service

@@ -304,6 +304,33 @@ class AuthenticationProtocolTests(unittest.TestCase):
         self.assertEqual(len(descriptors), 1)
         self.assertFalse(os.get_inheritable(descriptors[0]))
 
+    def test_lease_connection_receives_opaque_token(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            socket_path = Path(temporary) / "auth.sock"
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.addCleanup(listener.close)
+            listener.bind(str(socket_path))
+            listener.listen(1)
+
+            def register() -> None:
+                connection, _address = listener.accept()
+                with connection:
+                    message_type, _payload = auth.recv_frame(connection)
+                    self.assertEqual(message_type, auth.REGISTER)
+                    auth.send_frame(connection, auth.TOKEN, b"a" * 64)
+
+            thread = threading.Thread(target=register)
+            thread.start()
+            lease = auth.LeaseConnection(
+                socket_path,
+                auth.LeaseSubject(1, 1, 1000, 1000, "host-session"),
+            )
+            self.addCleanup(lease.close)
+            thread.join(timeout=5)
+
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(lease.token, "a" * 64)
+
     def test_lease_exists_only_while_registration_connection_is_live(
         self,
     ) -> None:
@@ -357,57 +384,6 @@ class AuthenticationProtocolTests(unittest.TestCase):
             self.assertFalse(thread.is_alive())
             self.assertEqual(service._leases, {})
 
-    def test_polkit_worker_receives_only_fixed_subject_metadata(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            directory = Path(temporary)
-            runtime = auth.AuthenticationRuntime(
-                directory=directory,
-                socket_path=directory / "auth.sock",
-                policy_binds=(
-                    (directory / "common-auth", "/etc/pam.d/common-auth"),
-                ),
-            )
-            service = auth.AuthenticationService(
-                "work", runtime, {1000: True}
-            )
-            self.addCleanup(service.stop)
-            connection, peer = socket.socketpair()
-            self.addCleanup(connection.close)
-            self.addCleanup(peer.close)
-            subject = auth.LeaseSubject(12, 34, 1000, 1000, "c1")
-            worker = directory / "spaces-polkit-worker"
-            worker.touch()
-
-            with (
-                mock.patch.object(auth_service, "POLKIT_WORKER", worker),
-                mock.patch.object(
-                    auth_service,
-                    "session_process",
-                    return_value=(12, 34),
-                ),
-                mock.patch.object(
-                    service, "_run_worker", return_value=0
-                ) as run,
-            ):
-                service._run_polkit(connection, subject)
-
-            arguments = run.call_args.args[0]
-            self.assertEqual(
-                arguments[1:],
-                [
-                    "--uid",
-                    "1000",
-                    "--gid",
-                    "1000",
-                    "--pid",
-                    "12",
-                    "--start",
-                    "34",
-                ],
-            )
-            self.assertNotIn("guest-action", json.dumps(arguments))
-            self.assertEqual(auth.recv_frame(peer)[0], auth.RESULT)
-
     def test_polkit_helper_uses_lease_for_exact_guest_session(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
@@ -458,7 +434,7 @@ class AuthenticationProtocolTests(unittest.TestCase):
                         "session-c7.scope",
                     },
                 ),
-                mock.patch.object(service, "_run_polkit") as run,
+                mock.patch.object(service, "_run_pam") as run,
             ):
                 service._authenticate(connection, payload, 42)
 
@@ -534,7 +510,7 @@ class AuthenticationProtocolTests(unittest.TestCase):
                     "cgroup_components",
                     return_value={"session-c7.scope"},
                 ),
-                mock.patch.object(service, "_run_polkit") as run,
+                mock.patch.object(service, "_run_pam") as run,
             ):
                 service._authenticate(
                     connection,
@@ -546,24 +522,17 @@ class AuthenticationProtocolTests(unittest.TestCase):
             process_from_pidfd.assert_called_once_with(123, uid)
             run.assert_called_once_with(connection, subject)
 
-    def test_agent_pidfd_is_live_and_identifies_expected_executable(
-        self,
-    ) -> None:
+    def test_agent_pidfd_is_live_and_matches_the_requested_uid(self) -> None:
         descriptor = os.pidfd_open(os.getpid())
         self.addCleanup(os.close, descriptor)
 
-        with mock.patch.object(
-            auth_service,
-            "GUEST_POLKIT_AGENT",
-            Path("/proc/self/exe"),
-        ):
-            self.assertEqual(
-                auth_service.AuthenticationService._process_from_agent_pidfd(
-                    descriptor,
-                    os.getuid(),
-                ),
-                os.getpid(),
-            )
+        self.assertEqual(
+            auth_service.AuthenticationService._process_from_agent_pidfd(
+                descriptor,
+                os.getuid(),
+            ),
+            os.getpid(),
+        )
 
     def test_direct_polkit_helper_requires_expected_binary_and_uids(
         self,

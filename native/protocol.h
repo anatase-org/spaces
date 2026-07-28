@@ -12,6 +12,7 @@
 #define SPACES_MAGIC 0x53504155U
 #define SPACES_VERSION 2
 #define SPACES_MAX_PAYLOAD (16U * 1024U)
+#define SPACES_TOKEN_HEX_SIZE 64U
 
 enum spaces_message_type {
     SPACES_REGISTER = 1,

@@ -22,7 +22,6 @@ from .protocol import (
     AUTHENTICATE,
     ERROR,
     REGISTER,
-    RESULT,
     SESSION_CLOSE,
     SESSION_OPEN,
     TOKEN,
@@ -35,12 +34,11 @@ from .protocol import (
     valid_integer,
     valid_token,
 )
-from .runtime import AuthenticationRuntime, NATIVE_ROOT
+from .runtime import AuthenticationRuntime
 from .session import (
     cgroup_components,
     process_session_matches,
     process_start_time,
-    session_process,
 )
 from .worker import WorkerPool
 
@@ -48,8 +46,6 @@ from .worker import WorkerPool
 logger = logging.getLogger(__name__)
 
 PAM_WORKER = Path("/usr/lib/spaces/spaces-pam-worker")
-POLKIT_WORKER = Path("/usr/lib/spaces/spaces-polkit-worker")
-GUEST_POLKIT_AGENT = NATIVE_ROOT / "spaces-polkit-agent"
 SESSION_ENV = "SPACES_AUTH_SESSION"
 POLKIT_SERVICE = "polkit-1"
 POLKIT_HELPER_NAME = "polkit-agent-helper-1"
@@ -63,8 +59,6 @@ RATE_LIMIT_ATTEMPTS = 5
 MAX_REQUESTS = 64
 LISTEN_BACKLOG = 16
 TOKEN_BYTES = 32
-PAM_SUCCESS = 0
-PAM_AUTH_ERR = 7
 
 
 @dataclass
@@ -359,10 +353,7 @@ class AuthenticationService:
             if not valid_token(token):
                 raise ValueError("invalid authentication request")
             lease = self._live_lease(token, uid, consume_attempt=True)
-        if service == POLKIT_SERVICE:
-            self._run_polkit(connection, lease.subject)
-        else:
-            self._run_pam(connection, lease.subject)
+        self._run_pam(connection, lease.subject)
 
     @staticmethod
     def _process_from_agent_pidfd(descriptor: int, uid: int) -> int:
@@ -382,18 +373,8 @@ class AuthenticationService:
             pid = int(fields["Pid"])
         except (KeyError, ValueError) as error:
             raise PermissionError("invalid Polkit agent pidfd") from error
-        process = Path(f"/proc/{pid}")
-        if process.stat().st_uid != uid:
+        if Path(f"/proc/{pid}").stat().st_uid != uid:
             raise PermissionError("Polkit agent UID does not match the lease")
-        try:
-            if not (process / "exe").samefile(GUEST_POLKIT_AGENT):
-                raise PermissionError(
-                    "Polkit pidfd does not identify the Spaces agent"
-                )
-        except OSError as error:
-            raise PermissionError(
-                "could not verify the Spaces Polkit agent"
-            ) from error
         readable, _writable, _exceptional = select.select(
             [descriptor], [], [], 0
         )
@@ -402,7 +383,10 @@ class AuthenticationService:
         return pid
 
     @staticmethod
-    def _validate_direct_polkit_helper(peer_pid: int, uid: int) -> int:
+    def _validate_direct_polkit_helper(
+        peer_pid: int,
+        uid: int,
+    ) -> int:
         try:
             executable = Path(f"/proc/{peer_pid}/exe").readlink()
             status = Path(f"/proc/{peer_pid}/status").read_text(
@@ -592,36 +576,6 @@ class AuthenticationService:
             ],
             pass_fds=(descriptor,),
         )
-
-    def _run_polkit(
-        self,
-        connection: socket.socket,
-        subject: LeaseSubject,
-    ) -> None:
-        if not self.users.get(subject.uid, False):
-            send_frame(connection, RESULT, struct.pack("!i", PAM_AUTH_ERR))
-            return
-        if not POLKIT_WORKER.is_file():
-            raise OSError(f"missing Polkit worker: {POLKIT_WORKER}")
-        polkit_pid, polkit_start_time = session_process(
-            subject.session_id,
-            subject.uid,
-        )
-        return_code = self._run_worker(
-            [
-                str(POLKIT_WORKER),
-                "--uid",
-                str(subject.uid),
-                "--gid",
-                str(subject.gid),
-                "--pid",
-                str(polkit_pid),
-                "--start",
-                str(polkit_start_time),
-            ]
-        )
-        result = PAM_SUCCESS if return_code == 0 else PAM_AUTH_ERR
-        send_frame(connection, RESULT, struct.pack("!i", result))
 
     def stop(self) -> None:
         with self._stop_lock:
