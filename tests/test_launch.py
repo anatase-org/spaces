@@ -249,24 +249,14 @@ class LaunchTests(unittest.TestCase):
         (self.space / "info.json").write_text(
             json.dumps(info), encoding="utf-8"
         )
-        pam_directory = self.rootfs / "etc" / "pam.d"
-        pam_directory.mkdir()
-        (pam_directory / "common-auth").write_text(
-            "auth required pam_unix.so\n", encoding="utf-8"
-        )
-        (pam_directory / "common-session").write_text(
-            "session optional pam_systemd.so\n", encoding="utf-8"
-        )
         runtime = mock.Mock()
         runtime.bind_arguments = (
             "--bind-ro=/run/spaces/work/authentication/auth.sock:"
             "/run/spaces-host/auth.sock",
             "--bind-ro=/usr/lib/spaces/guest:/run/spaces-host/bin",
-            "--bind-ro=/run/spaces/work/authentication/common-auth:"
-            "/etc/pam.d/common-auth",
-            "--bind-ro=/run/spaces/work/authentication/common-session:"
-            "/etc/pam.d/common-session",
         )
+        driver = mock.Mock(administrator_group="sudo")
+        driver.reconcile_host_authentication.return_value = True
         authentication = mock.Mock()
         process = mock.Mock()
         process.wait.return_value = 0
@@ -277,6 +267,11 @@ class LaunchTests(unittest.TestCase):
                 "prepare_runtime",
                 return_value=runtime,
             ) as prepare,
+            mock.patch.object(
+                launch_module,
+                "get_driver",
+                return_value=driver,
+            ),
             mock.patch.object(
                 launch_module.auth,
                 "AuthenticationService",
@@ -289,12 +284,11 @@ class LaunchTests(unittest.TestCase):
         ):
             self.assertEqual(launch_module.launch("work"), 0)
 
-        prepare.assert_called_once_with(
-            "work",
+        driver.reconcile_host_authentication.assert_called_once_with(
             self.rootfs,
-            "/etc/pam.d/common-auth",
-            "/etc/pam.d/common-session",
+            True,
         )
+        prepare.assert_called_once_with("work", self.rootfs)
         service.assert_called_once_with("work", runtime, {1000: True})
         authentication.start.assert_called_once_with()
         authentication.stop.assert_called_once_with()

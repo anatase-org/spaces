@@ -44,5 +44,6 @@ spaces = ["overlay/*.png"]
 "share/spaces/pam" = [
   "data/pam/spaces.common-auth",
   "data/pam/spaces.system-auth",
+  "data/pam/spaces.ubuntu",
 ]
 "lib/systemd/system" = ["data/spaces@.service"]

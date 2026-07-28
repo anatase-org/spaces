@@ -2,20 +2,67 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any, Mapping
 
 from .. import _
-from .model import Distribution
+from .model import Distribution, DistributionError
 
 
 PACKAGES = ("openssh-client", "python3", "nano", "sudo", "polkitd")
+HOST_AUTHENTICATION_PROFILE = Path(
+    "/usr/share/spaces/pam/spaces.ubuntu"
+)
+GUEST_AUTHENTICATION_PROFILE = Path(
+    "usr/share/pam-configs/spaces"
+)
 APT_COMPONENTS = ("main", "restricted", "universe", "multiverse")
 RELEASES = {
     "noble": _("Noble (24.04)"),
     "resolute": _("Resolute (26.04)"),
 }
+
+
+def _pam_profile_directory(rootfs: Path) -> Path:
+    directory = rootfs / GUEST_AUTHENTICATION_PROFILE.parent
+    try:
+        resolved_root = rootfs.resolve(strict=True)
+        resolved_directory = directory.resolve(strict=True)
+    except OSError as error:
+        raise DistributionError(
+            _("Ubuntu PAM profile directory is missing.")
+        ) from error
+    if (
+        directory.is_symlink()
+        or not directory.is_dir()
+        or not resolved_directory.is_relative_to(resolved_root)
+    ):
+        raise DistributionError(
+            _("Unsafe Ubuntu PAM profile directory.")
+        )
+    return directory
+
+
+def _write_pam_profile(destination: Path, profile: bytes) -> None:
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=destination.parent,
+            prefix=".spaces-",
+            delete=False,
+        ) as temporary:
+            temporary_path = Path(temporary.name)
+            temporary.write(profile)
+            temporary.flush()
+            os.fchmod(temporary.fileno(), 0o644)
+            os.fsync(temporary.fileno())
+        temporary_path.replace(destination)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 def _configure_apt_sources(rootfs: Path, release: str) -> None:
@@ -76,7 +123,13 @@ class UbuntuDistribution(Distribution):
 
     def bootstrap(self, metadata: Mapping[str, Any], rootfs: Path) -> None:
         version = str(metadata["version"])
-        print(_("Bootstrapping Ubuntu {version}...", version=RELEASES.get(version, version)), flush=True)
+        print(
+            _(
+                "Bootstrapping Ubuntu {version}...",
+                version=RELEASES.get(version, version),
+            ),
+            flush=True,
+        )
         subprocess.run(self.command(metadata, rootfs), check=True)
         _configure_apt_sources(rootfs, version)
         subprocess.run(
@@ -110,13 +163,64 @@ class UbuntuDistribution(Distribution):
             check=True,
         )
 
+    def reconcile_host_authentication(
+        self,
+        rootfs: Path,
+        enabled: bool,
+    ) -> bool:
+        destination = rootfs / GUEST_AUTHENTICATION_PROFILE
+        if not enabled:
+            try:
+                destination.lstat()
+            except FileNotFoundError:
+                return True
+            if destination.is_symlink() or not destination.is_file():
+                raise DistributionError(
+                    _("Unsafe Spaces PAM profile: {path}.", path=destination)
+                )
+        try:
+            profile = HOST_AUTHENTICATION_PROFILE.read_bytes()
+        except OSError as error:
+            raise DistributionError(
+                _(
+                    "Spaces PAM profile is missing: {path}.",
+                    path=HOST_AUTHENTICATION_PROFILE,
+                )
+            ) from error
+        _pam_profile_directory(rootfs)
+        if enabled:
+            _write_pam_profile(destination, profile)
+        else:
+            destination.unlink()
+
+        try:
+            subprocess.run(
+                [
+                    "chroot",
+                    str(rootfs),
+                    "/usr/bin/env",
+                    "DEBIAN_FRONTEND=noninteractive",
+                    "/usr/sbin/pam-auth-update",
+                    "--package",
+                ],
+                check=True,
+            )
+        except (OSError, subprocess.CalledProcessError) as error:
+            if not enabled:
+                try:
+                    _write_pam_profile(destination, profile)
+                except OSError:
+                    pass
+            raise DistributionError(
+                _("Could not update Ubuntu PAM configuration.")
+            ) from error
+        return True
+
 
 DISTRIBUTION = UbuntuDistribution(
     id="ubuntu",
     default_name="ubuntu",
     administrator_group="sudo",
-    shared_pam_policy="/etc/pam.d/common-auth",
-    shared_pam_session_policy="/etc/pam.d/common-session",
     configuration_title=_("Ubuntu version"),
     configuration_description=_("Choose the Ubuntu release to bootstrap."),
     option_key="version",

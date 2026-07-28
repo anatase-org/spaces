@@ -20,8 +20,6 @@ class Distribution:
     id: str
     default_name: str | None
     administrator_group: str = "wheel"
-    shared_pam_policy: str | None = None
-    shared_pam_session_policy: str | None = None
     configuration_title: str = ""
     configuration_description: str = ""
     option_key: str | None = None
@@ -79,3 +77,12 @@ class Distribution:
 
     def bootstrap(self, metadata: Mapping[str, Any], rootfs: Path) -> None:
         self.validate(metadata)
+
+    def reconcile_host_authentication(
+        self,
+        rootfs: Path,
+        enabled: bool,
+    ) -> bool:
+        """Reconcile distro PAM integration before the rootfs is started."""
+
+        return not enabled

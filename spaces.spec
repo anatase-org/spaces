@@ -60,6 +60,7 @@ install -Dm644 data/pam/spaces.system-auth \
 %{_bindir}/%{name}*
 %{python3_sitelib}/%{name}*
 %{_datadir}/polkit-1/actions/org.anatase.spaces.policy
+%{_datadir}/spaces/pam/spaces.ubuntu
 %config(noreplace) %{_sysconfdir}/pam.d/spaces
 %dir /usr/lib/spaces
 /usr/lib/spaces/spaces-pam-worker

@@ -9,21 +9,13 @@ from unittest import mock
 
 from spaces import core
 from spaces.distro import ubuntu
-from spaces.distro.model import Distribution
+from spaces.distro.model import Distribution, DistributionError
 
 
 class CoreTests(unittest.TestCase):
     def test_ubuntu_display_and_command_mapping(self) -> None:
         self.assertIsInstance(ubuntu.DISTRIBUTION, Distribution)
         self.assertEqual(ubuntu.DISTRIBUTION.administrator_group, "sudo")
-        self.assertEqual(
-            ubuntu.DISTRIBUTION.shared_pam_policy,
-            "/etc/pam.d/common-auth",
-        )
-        self.assertEqual(
-            ubuntu.DISTRIBUTION.shared_pam_session_policy,
-            "/etc/pam.d/common-session",
-        )
         self.assertEqual(
             ubuntu.DISTRIBUTION.choices(),
             [
@@ -42,6 +34,110 @@ class CoreTests(unittest.TestCase):
                 "/rootfs",
             ],
         )
+
+    def test_ubuntu_reconciles_host_authentication_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            rootfs = root / "rootfs"
+            profile_directory = rootfs / "usr" / "share" / "pam-configs"
+            profile_directory.mkdir(parents=True)
+            source = root / "spaces.ubuntu"
+            source.write_text("Name: Spaces\n", encoding="utf-8")
+            command = [
+                "chroot",
+                str(rootfs),
+                "/usr/bin/env",
+                "DEBIAN_FRONTEND=noninteractive",
+                "/usr/sbin/pam-auth-update",
+                "--package",
+            ]
+
+            with (
+                mock.patch.object(
+                    ubuntu,
+                    "HOST_AUTHENTICATION_PROFILE",
+                    source,
+                ),
+                mock.patch.object(ubuntu.subprocess, "run") as run,
+            ):
+                self.assertTrue(
+                    ubuntu.DISTRIBUTION.reconcile_host_authentication(
+                        rootfs,
+                        True,
+                    )
+                )
+                destination = profile_directory / "spaces"
+                self.assertEqual(
+                    destination.read_text(encoding="utf-8"),
+                    "Name: Spaces\n",
+                )
+                self.assertEqual(
+                    destination.stat().st_mode & 0o777,
+                    0o644,
+                )
+                run.assert_called_once_with(command, check=True)
+
+                run.reset_mock()
+                self.assertTrue(
+                    ubuntu.DISTRIBUTION.reconcile_host_authentication(
+                        rootfs,
+                        False,
+                    )
+                )
+                self.assertFalse(destination.exists())
+                run.assert_called_once_with(command, check=True)
+
+    def test_disabled_ubuntu_authentication_skips_absent_profile_fixup(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            rootfs = Path(temporary)
+            with mock.patch.object(ubuntu.subprocess, "run") as run:
+                self.assertTrue(
+                    ubuntu.DISTRIBUTION.reconcile_host_authentication(
+                        rootfs,
+                        False,
+                    )
+                )
+
+            run.assert_not_called()
+
+    def test_failed_disabled_fixup_restores_profile_for_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            rootfs = root / "rootfs"
+            profile_directory = rootfs / "usr" / "share" / "pam-configs"
+            profile_directory.mkdir(parents=True)
+            destination = profile_directory / "spaces"
+            destination.write_text("old profile\n", encoding="utf-8")
+            source = root / "spaces.ubuntu"
+            source.write_text("canonical profile\n", encoding="utf-8")
+
+            with (
+                mock.patch.object(
+                    ubuntu,
+                    "HOST_AUTHENTICATION_PROFILE",
+                    source,
+                ),
+                mock.patch.object(
+                    ubuntu.subprocess,
+                    "run",
+                    side_effect=ubuntu.subprocess.CalledProcessError(
+                        1,
+                        "pam-auth-update",
+                    ),
+                ),
+                self.assertRaises(DistributionError),
+            ):
+                ubuntu.DISTRIBUTION.reconcile_host_authentication(
+                    rootfs,
+                    False,
+                )
+
+            self.assertEqual(
+                destination.read_text(encoding="utf-8"),
+                "canonical profile\n",
+            )
 
     def test_ubuntu_apt_sources_keep_ports_mirror(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

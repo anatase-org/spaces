@@ -1295,6 +1295,22 @@ def launch(space_name: str) -> int:
     )
     _reconcile_accounts(rootfs, users, administrator_group)
     _ensure_user_homes(rootfs, users)
+    authentication_supported = (
+        driver.reconcile_host_authentication(
+            rootfs,
+            host_authentication,
+        )
+        if driver is not None
+        else not host_authentication
+    )
+    if not authentication_supported:
+        raise core.SpacesError(
+            _(
+                "Host authentication is enabled for {space}, but its "
+                "distribution does not support PAM integration.",
+                space=space_name,
+            )
+        )
 
     available_mounts = _prepare_mounts(users)
     monitor: _LoginMonitor | None = None
@@ -1303,41 +1319,22 @@ def launch(space_name: str) -> int:
     authentication_binds: tuple[str, ...] = ()
     try:
         if host_authentication:
-            policy_path = (
-                driver.shared_pam_policy if driver is not None else None
+            authentication_runtime = auth.prepare_runtime(
+                space_name,
+                rootfs,
             )
-            session_policy_path = (
-                driver.shared_pam_session_policy
-                if driver is not None
-                else None
+            authentication = auth.AuthenticationService(
+                space_name,
+                authentication_runtime,
+                {
+                    user.uid: user.administrator
+                    for user in users
+                },
             )
-            if policy_path is None or session_policy_path is None:
-                raise core.SpacesError(
-                    _(
-                        "Host authentication is enabled for {space}, but its "
-                        "distribution does not declare shared PAM policies.",
-                        space=space_name,
-                    )
-                )
-            else:
-                authentication_runtime = auth.prepare_runtime(
-                    space_name,
-                    rootfs,
-                    policy_path,
-                    session_policy_path,
-                )
-                authentication = auth.AuthenticationService(
-                    space_name,
-                    authentication_runtime,
-                    {
-                        user.uid: user.administrator
-                        for user in users
-                    },
-                )
-                authentication.start()
-                authentication_binds = (
-                    authentication_runtime.bind_arguments
-                )
+            authentication.start()
+            authentication_binds = (
+                authentication_runtime.bind_arguments
+            )
         monitor = _LoginMonitor()
         initial_eligible_uids = _eligible_uids(monitor, users)
         initial_mounts = _plan_mounts(

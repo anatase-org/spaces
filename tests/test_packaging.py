@@ -145,6 +145,7 @@ class PackagingTests(unittest.TestCase):
         self.assertNotIn("BuildArch:      noarch", spec)
         self.assertIn("%make_build -C native", spec)
         self.assertIn("%{_sysconfdir}/pam.d/spaces", spec)
+        self.assertIn("%{_datadir}/spaces/pam/spaces.ubuntu", spec)
 
         makefile = (ROOT / "native" / "Makefile").read_text(encoding="utf-8")
         self.assertIn("install: check-guest-abi", makefile)
@@ -173,6 +174,18 @@ class PackagingTests(unittest.TestCase):
             "recursive-include native Makefile *.c *.h *.py", manifest
         )
         self.assertIn("recursive-include data/pam *", manifest)
+        profile = (
+            ROOT / "data" / "pam" / "spaces.ubuntu"
+        ).read_text(encoding="utf-8")
+        self.assertIn("Default: yes", profile)
+        self.assertIn("open_err=ignore", profile)
+        self.assertIn("default=die", profile)
+        self.assertIn(
+            "/run/spaces-host/bin/pam_spaces.so",
+            profile,
+        )
+        pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        self.assertIn('"data/pam/spaces.ubuntu"', pyproject)
 
     def test_pam_session_notifications_use_session_callbacks(self) -> None:
         source = (ROOT / "native" / "pam_spaces.c").read_text(

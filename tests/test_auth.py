@@ -25,116 +25,10 @@ class AuthenticationPolicyTests(unittest.TestCase):
         value[18:20] = machine.to_bytes(2, "little")
         return bytes(value)
 
-    def test_generated_policy_replaces_only_auth_records(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            source = root / "system-auth"
-            destination = root / "generated"
-            source.write_text(
-                "# distro policy\n"
-                "auth required pam_unix.so\n"
-                "-auth optional pam_faillock.so\n"
-                "account required pam_unix.so\n"
-                "password required pam_unix.so\n"
-                "session required pam_limits.so\n",
-                encoding="utf-8",
-            )
-
-            auth.generate_pam_policy(source, destination)
-
-            self.assertEqual(
-                destination.read_text(encoding="utf-8"),
-                "# distro policy\n"
-                "auth required /run/spaces-host/bin/pam_spaces.so\n"
-                "account required pam_unix.so\n"
-                "password required pam_unix.so\n"
-                "session required pam_limits.so\n",
-            )
-            self.assertEqual(destination.stat().st_mode & 0o777, 0o400)
-
-    def test_generated_session_policy_appends_hook_after_distro_modules(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            source = root / "common-session"
-            destination = root / "generated"
-            source.write_text(
-                "session required pam_unix.so\n"
-                "session optional pam_systemd.so\n",
-                encoding="utf-8",
-            )
-
-            auth.generate_pam_session_policy(source, destination)
-
-            self.assertEqual(
-                destination.read_text(encoding="utf-8"),
-                "session required pam_unix.so\n"
-                "session optional pam_systemd.so\n"
-                "session optional /run/spaces-host/bin/pam_spaces.so\n",
-            )
-
-    def test_combined_policy_places_session_hook_after_preserved_records(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            source = root / "system-auth"
-            destination = root / "generated"
-            source.write_text(
-                "auth required pam_unix.so\n"
-                "account required pam_unix.so\n"
-                "session optional pam_systemd.so\n",
-                encoding="utf-8",
-            )
-
-            auth.generate_pam_policy(
-                source,
-                destination,
-                session_hook=True,
-            )
-
-            self.assertEqual(
-                destination.read_text(encoding="utf-8"),
-                "auth required /run/spaces-host/bin/pam_spaces.so\n"
-                "account required pam_unix.so\n"
-                "session optional pam_systemd.so\n"
-                "session optional /run/spaces-host/bin/pam_spaces.so\n",
-            )
-
-    def test_safe_policy_rejects_symlink_and_escape(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            rootfs = Path(temporary) / "rootfs"
-            rootfs.mkdir()
-            outside = Path(temporary) / "outside"
-            outside.write_text("auth required pam_unix.so\n", encoding="utf-8")
-            (rootfs / "policy").symlink_to(outside)
-
-            with self.assertRaises(core.SpacesError):
-                auth_runtime._safe_policy(rootfs, "/policy")
-            with self.assertRaises(core.SpacesError):
-                auth_runtime._safe_policy(rootfs, "/../outside")
-
     def test_runtime_bind_destinations_are_fixed_and_read_only(self) -> None:
         runtime = auth.AuthenticationRuntime(
             directory=Path("/run/spaces/work/authentication"),
             socket_path=Path("/run/spaces/work/authentication/auth.sock"),
-            policy_binds=(
-                (
-                    Path(
-                        "/run/spaces/work/authentication/"
-                        "authentication-common-auth"
-                    ),
-                    "/etc/pam.d/common-auth",
-                ),
-                (
-                    Path(
-                        "/run/spaces/work/authentication/"
-                        "session-common-session"
-                    ),
-                    "/etc/pam.d/common-session",
-                ),
-            ),
         )
         self.assertEqual(
             runtime.bind_arguments,
@@ -142,29 +36,13 @@ class AuthenticationPolicyTests(unittest.TestCase):
                 "--bind-ro=/run/spaces/work/authentication/auth.sock:"
                 "/run/spaces-host/auth.sock",
                 "--bind-ro=/usr/lib/spaces/guest:/run/spaces-host/bin",
-                "--bind-ro=/run/spaces/work/authentication/"
-                "authentication-common-auth:"
-                "/etc/pam.d/common-auth",
-                "--bind-ro=/run/spaces/work/authentication/"
-                "session-common-session:/etc/pam.d/common-session",
             ),
         )
 
-    def test_prepare_runtime_does_not_modify_the_rootfs_policy(self) -> None:
+    def test_prepare_runtime_creates_only_socket_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             rootfs = root / "rootfs"
-            pam_directory = rootfs / "etc" / "pam.d"
-            pam_directory.mkdir(parents=True)
-            original = "auth required pam_unix.so\naccount required pam_unix.so\n"
-            policy = pam_directory / "common-auth"
-            policy.write_text(original, encoding="utf-8")
-            session_original = (
-                "session required pam_unix.so\n"
-                "session optional pam_systemd.so\n"
-            )
-            session_policy = pam_directory / "common-session"
-            session_policy.write_text(session_original, encoding="utf-8")
             guest_bin = rootfs / "usr" / "bin"
             guest_bin.mkdir(parents=True)
             (guest_bin / "env").write_bytes(self._elf())
@@ -188,27 +66,11 @@ class AuthenticationPolicyTests(unittest.TestCase):
                 runtime = auth.prepare_runtime(
                     "work",
                     rootfs,
-                    "/etc/pam.d/common-auth",
-                    "/etc/pam.d/common-session",
                 )
 
-            self.assertEqual(policy.read_text(encoding="utf-8"), original)
             self.assertEqual(
-                session_policy.read_text(encoding="utf-8"),
-                session_original,
-            )
-            authentication_policy = runtime.policy_binds[0][0]
-            generated_session_policy = runtime.policy_binds[1][0]
-            self.assertEqual(
-                authentication_policy.read_text(encoding="utf-8"),
-                "auth required /run/spaces-host/bin/pam_spaces.so\n"
-                "account required pam_unix.so\n",
-            )
-            self.assertEqual(
-                generated_session_policy.read_text(encoding="utf-8"),
-                session_original
-                + "session optional "
-                "/run/spaces-host/bin/pam_spaces.so\n",
+                tuple(runtime.directory.iterdir()),
+                (),
             )
 
     def test_bundle_rejects_wrong_architecture(self) -> None:
@@ -339,9 +201,6 @@ class AuthenticationProtocolTests(unittest.TestCase):
             runtime = auth.AuthenticationRuntime(
                 directory=directory,
                 socket_path=directory / "auth.sock",
-                policy_binds=(
-                    (directory / "common-auth", "/etc/pam.d/common-auth"),
-                ),
             )
             uid = os.getuid()
             subject = auth.LeaseSubject(
@@ -390,9 +249,6 @@ class AuthenticationProtocolTests(unittest.TestCase):
             runtime = auth.AuthenticationRuntime(
                 directory=directory,
                 socket_path=directory / "auth.sock",
-                policy_binds=(
-                    (directory / "common-auth", "/etc/pam.d/common-auth"),
-                ),
             )
             uid = os.getuid()
             subject = auth.LeaseSubject(
@@ -447,7 +303,6 @@ class AuthenticationProtocolTests(unittest.TestCase):
             runtime = auth.AuthenticationRuntime(
                 directory=directory,
                 socket_path=directory / "auth.sock",
-                policy_binds=(),
             )
             service = auth.AuthenticationService(
                 "work", runtime, {os.getuid(): True}
@@ -471,7 +326,6 @@ class AuthenticationProtocolTests(unittest.TestCase):
             runtime = auth.AuthenticationRuntime(
                 directory=directory,
                 socket_path=directory / "auth.sock",
-                policy_binds=(),
             )
             uid = os.getuid()
             subject = auth.LeaseSubject(
@@ -570,7 +424,6 @@ class AuthenticationProtocolTests(unittest.TestCase):
             runtime = auth.AuthenticationRuntime(
                 directory=directory,
                 socket_path=directory / "auth.sock",
-                policy_binds=(),
             )
             service = auth.AuthenticationService(
                 "work", runtime, {os.getuid(): True}
@@ -604,9 +457,6 @@ class AuthenticationProtocolTests(unittest.TestCase):
             runtime = auth.AuthenticationRuntime(
                 directory=directory,
                 socket_path=directory / "auth.sock",
-                policy_binds=(
-                    (directory / "common-auth", "/etc/pam.d/common-auth"),
-                ),
             )
             service = auth.AuthenticationService(
                 "work", runtime, {1000: True}
@@ -655,9 +505,6 @@ class AuthenticationProtocolTests(unittest.TestCase):
             runtime = auth.AuthenticationRuntime(
                 directory=directory,
                 socket_path=directory / "auth.sock",
-                policy_binds=(
-                    (directory / "common-auth", "/etc/pam.d/common-auth"),
-                ),
             )
             uid = os.getuid()
             subject = auth.LeaseSubject(
