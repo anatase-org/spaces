@@ -19,7 +19,10 @@ logger = logging.getLogger(__name__)
 NSPAWN = "/usr/bin/systemd-nspawn"
 API_VFS_WRITABLE = "SYSTEMD_NSPAWN_API_VFS_WRITABLE"
 SYMLINKS = [
+    # Ostree system weirdness
     ("/var/home", "/home"),
+    # Serfices that should not run
+    ("/etc/systemd/system/netplan-configure.service", "/dev/null"),
 ]
 KEPT_CAPS = (
     "CAP_CHOWN",

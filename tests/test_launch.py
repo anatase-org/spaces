@@ -286,6 +286,13 @@ class LaunchTests(unittest.TestCase):
             self.assertTrue(link.is_symlink())
             self.assertEqual(os.readlink(link), target)
 
+    def test_rootfs_fixups_mask_netplan_configure(self) -> None:
+        launch_module._apply_rootfs_fixups(self.rootfs)
+
+        mask = self.rootfs / "etc" / "systemd" / "system" / "netplan-configure.service"
+        self.assertTrue(mask.is_symlink())
+        self.assertEqual(os.readlink(mask), "/dev/null")
+
     def test_rootfs_fixups_log_unexpected_error_and_continue(self) -> None:
         symlinks = [
             ("relative/path", "/invalid"),
