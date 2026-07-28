@@ -12,6 +12,26 @@ from spaces.logging import SpacesHandler, _PlainConsole
 
 
 class SpacesLoggingTests(unittest.TestCase):
+    def test_plain_logging_does_not_enable_rich(self) -> None:
+        with (
+            patch.object(spaces_logging, "_logging_configured", False),
+            patch.object(spaces_logging, "_enable_rich") as enable_rich,
+            patch.object(spaces_logging.logger, "handlers", []),
+        ):
+            spaces_logging.configure_logging(rich=False)
+
+        enable_rich.assert_not_called()
+
+    def test_rich_logging_enables_rich(self) -> None:
+        with (
+            patch.object(spaces_logging, "_logging_configured", False),
+            patch.object(spaces_logging, "_enable_rich") as enable_rich,
+            patch.object(spaces_logging.logger, "handlers", []),
+        ):
+            spaces_logging.configure_logging(rich=True)
+
+        enable_rich.assert_called_once_with()
+
     def test_run_streamed_combines_stdout_and_stderr(self) -> None:
         process = mock.Mock()
         process.stdout = io.StringIO("stdout line\nstderr line\n")

@@ -84,7 +84,7 @@ def _helper_command(operation: str, payload: dict[str, Any]) -> list[str]:
 
 def _invoke_helper(operation: str, payload: dict[str, Any]) -> int:
     try:
-        configure_logging()
+        configure_logging(rich=True)
         completed = run_streamed(
             _helper_command(operation, payload),
             check=False,
@@ -155,7 +155,7 @@ def _create(distro_id: str) -> int:
         network=result["network"],
         home=result["home"],
     )
-    configure_logging()
+    configure_logging(rich=True)
     log(
         _(
             "Creating {distribution} space {name!r}...",

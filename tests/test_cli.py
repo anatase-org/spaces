@@ -24,7 +24,7 @@ class CliTests(unittest.TestCase):
         ):
             returncode = cli._invoke_helper("create", {})
 
-        configure_logging.assert_called_once_with()
+        configure_logging.assert_called_once_with(rich=True)
         run_streamed.assert_called_once_with(command, check=False)
         self.assertEqual(returncode, 42)
 
@@ -84,7 +84,7 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(cli.main(["create", "ubuntu"]), 0)
         calls.assert_has_calls(
             [
-                mock.call.configure(),
+                mock.call.configure(rich=True),
                 mock.call.log(
                     "Creating Ubuntu Resolute (26.04) space 'ubuntu'..."
                 ),

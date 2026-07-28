@@ -15,14 +15,8 @@ class _PlainMarkupError(Exception):
     pass
 
 
-try:
-    from rich.console import Console as RichConsole
-    from rich.errors import MarkupError as RichMarkupError
-    from rich.text import Text as RichText
-except ImportError:
-    RichConsole = None  # type: ignore[assignment,misc]
-    RichMarkupError = _PlainMarkupError  # type: ignore[assignment,misc]
-    RichText = None  # type: ignore[assignment,misc]
+RichMarkupError: type[Exception] = _PlainMarkupError
+RichText: Any = None
 
 
 class _PlainCapture:
@@ -76,12 +70,8 @@ class _PlainConsole:
         return _PlainCapture(self)
 
 
-console = RichConsole() if RichConsole is not None else _PlainConsole()
-error_console = (
-    RichConsole(stderr=True)
-    if RichConsole is not None
-    else _PlainConsole(stderr=True)
-)
+console: Any = _PlainConsole()
+error_console: Any = _PlainConsole(stderr=True)
 
 AGENT = (
     os.environ.get("CODEX_CI") == "1"
@@ -265,11 +255,29 @@ logger = logging.getLogger("spaces")
 _logging_configured = False
 
 
-def configure_logging() -> None:
+def _enable_rich() -> None:
+    global RichMarkupError, RichText, console, error_console
+
+    try:
+        from rich.console import Console
+        from rich.errors import MarkupError
+        from rich.text import Text
+    except ImportError:
+        return
+
+    RichMarkupError = MarkupError
+    RichText = Text
+    console = Console()
+    error_console = Console(stderr=True)
+
+
+def configure_logging(rich: bool) -> None:
     global _logging_configured
 
     if _logging_configured:
         return
+    if rich:
+        _enable_rich()
     logger.setLevel(logging.INFO)
     logger.propagate = False
     logger.handlers.clear()

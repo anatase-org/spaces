@@ -111,9 +111,16 @@ class LaunchTests(unittest.TestCase):
                 def run(*args: object, **kwargs: object) -> subprocess.CompletedProcess:
                     nonlocal called_thread
                     called_thread = threading.current_thread()
+                    var_home = self.rootfs / "var" / "home"
+                    self.assertTrue(var_home.is_symlink())
+                    self.assertEqual(os.readlink(var_home), "/home")
                     return subprocess.CompletedProcess(args[0], 42)
 
                 with (
+                    mock.patch.object(
+                        launch_module,
+                        "configure_logging",
+                    ) as configure_logging,
                     mock.patch.dict(
                         os.environ,
                         {
@@ -131,6 +138,7 @@ class LaunchTests(unittest.TestCase):
                     self.assertEqual(launch_module.launch("work"), 42)
 
                 self.assertIs(called_thread, caller_thread)
+                configure_logging.assert_called_once_with(rich=False)
                 self.assertTrue(self.root_home.is_dir())
                 self.assertEqual(self.root_home.stat().st_mode & 0o777, 0o700)
                 run_mock.assert_called_once()
@@ -162,6 +170,78 @@ class LaunchTests(unittest.TestCase):
                         launch_module.API_VFS_WRITABLE,
                         environment,
                     )
+
+    def test_rootfs_fixup_logs_conflict_and_launches(self) -> None:
+        self._write_info()
+        var_home = self.rootfs / "var" / "home"
+        var_home.mkdir(parents=True)
+
+        with (
+            mock.patch.object(
+                launch_module.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess([], 42),
+            ) as run,
+            self.assertLogs(launch_module.logger, level="ERROR") as logs,
+        ):
+            result = launch_module.launch("work")
+
+        self.assertEqual(result, 42)
+        run.assert_called_once()
+        self.assertTrue(var_home.is_dir())
+        self.assertIn("the path exists and is not a symlink", logs.output[0])
+
+    def test_rootfs_fixup_logs_os_error_and_launches(self) -> None:
+        self._write_info()
+
+        with (
+            mock.patch.object(
+                Path,
+                "symlink_to",
+                side_effect=PermissionError("not permitted"),
+            ),
+            mock.patch.object(
+                launch_module.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess([], 0),
+            ) as run,
+            self.assertLogs(launch_module.logger, level="ERROR") as logs,
+        ):
+            result = launch_module.launch("work")
+
+        self.assertEqual(result, 0)
+        run.assert_called_once()
+        self.assertIn("not permitted", logs.output[0])
+
+    def test_rootfs_fixup_replaces_an_incorrect_symlink(self) -> None:
+        self._write_info()
+        var_home = self.rootfs / "var" / "home"
+        var_home.parent.mkdir()
+        var_home.symlink_to("/srv/home", target_is_directory=True)
+
+        with mock.patch.object(
+            launch_module.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess([], 0),
+        ):
+            launch_module.launch("work")
+
+        self.assertTrue(var_home.is_symlink())
+        self.assertEqual(os.readlink(var_home), "/home")
+
+    def test_rootfs_fixups_apply_each_configured_symlink(self) -> None:
+        symlinks = [
+            ("/var/home", "/home"),
+            ("/srv/spaces/data", "/data"),
+        ]
+
+        with mock.patch.object(launch_module, "SYMLINKS", symlinks):
+            launch_module._apply_rootfs_fixups(self.rootfs)
+
+        for link_name, target in symlinks:
+            link = self.rootfs / link_name.removeprefix("/")
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(os.readlink(link), target)
 
     def test_invalid_name_is_rejected_before_state_access(self) -> None:
         with (

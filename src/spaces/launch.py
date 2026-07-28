@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 from pathlib import Path
@@ -9,10 +10,16 @@ from typing import Any
 
 from . import _
 from . import core
+from .logging import configure_logging
 
+
+logger = logging.getLogger(__name__)
 
 NSPAWN = "/usr/bin/systemd-nspawn"
 API_VFS_WRITABLE = "SYSTEMD_NSPAWN_API_VFS_WRITABLE"
+SYMLINKS = [
+    ("/var/home", "/home"),
+]
 KEPT_CAPS = (
     "CAP_CHOWN",
     "CAP_DAC_OVERRIDE",
@@ -52,6 +59,59 @@ NETWORK_CAPS = {
         "CAP_NET_ADMIN",
     ),
 }
+
+
+def _apply_rootfs_fixups(rootfs: Path) -> None:
+    """Apply persistent compatibility fixups to a space rootfs."""
+
+    for link_name, target in SYMLINKS:
+        try:
+            relative_link = Path(link_name).relative_to("/")
+            parent = rootfs
+            parent_is_safe = True
+            for component in relative_link.parts[:-1]:
+                parent /= component
+                try:
+                    parent.mkdir()
+                except FileExistsError:
+                    pass
+                if parent.is_symlink() or not parent.is_dir():
+                    logger.error(
+                        _(
+                            "Could not create rootfs symlink {link}: "
+                            "unsafe parent path {parent}.",
+                            link=link_name,
+                            parent=parent,
+                        )
+                    )
+                    parent_is_safe = False
+                    break
+            if not parent_is_safe:
+                continue
+
+            link = parent / relative_link.name
+            if link.is_symlink():
+                if os.readlink(link) == target:
+                    continue
+                link.unlink()
+            elif link.exists():
+                logger.error(
+                    _(
+                        "Could not create rootfs symlink {link}: "
+                        "the path exists and is not a symlink.",
+                        link=link,
+                    )
+                )
+                continue
+            link.symlink_to(target, target_is_directory=True)
+        except OSError as error:
+            logger.error(
+                _(
+                    "Could not create rootfs symlink {link}: {error}",
+                    link=link_name,
+                    error=error,
+                )
+            )
 
 
 def _load_space(space_name: str) -> tuple[Path, Path, dict[str, Any]]:
@@ -133,12 +193,15 @@ def _command(
 def launch(space_name: str) -> int:
     """Run a space until its nspawn machine exits."""
 
+    configure_logging(rich=False)
     rootfs, home, info = _load_space(space_name)
     network = info["permissions"]["system"]["network"]
     environment = os.environ.copy()
     environment.pop(API_VFS_WRITABLE, None)
     if network == "admin":
         environment[API_VFS_WRITABLE] = "network"
+
+    _apply_rootfs_fixups(rootfs)
 
     # Future session and mount workers must start before this blocking call.
     completed = subprocess.run(
