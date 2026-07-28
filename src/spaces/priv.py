@@ -143,6 +143,10 @@ def create(info: dict[str, Any]) -> None:
     space = core.STATE_ROOT / name
 
     with _state_lock():
+        subprocess.run(
+            ["/usr/bin/systemctl", "stop", f"spaces@{name}.service"],
+            check=True,
+        )
         if space.is_symlink() or (space.exists() and not space.is_dir()):
             raise core.SpacesError(
                 _("Unsafe space path: {space}.", space=space)

@@ -58,6 +58,14 @@ class PrivilegedTests(unittest.TestCase):
             [
                 mock.call(
                     [
+                        "/usr/bin/systemctl",
+                        "stop",
+                        "spaces@ubuntu.service",
+                    ],
+                    check=True,
+                ),
+                mock.call(
+                    [
                         "debootstrap",
                         "resolute",
                         str(space / "rootfs"),
@@ -82,7 +90,7 @@ class PrivilegedTests(unittest.TestCase):
                 ),
             ]
         )
-        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_count, 3)
         self.assertEqual(
             print_output.call_args_list,
             [
@@ -94,13 +102,20 @@ class PrivilegedTests(unittest.TestCase):
             ],
         )
 
-    def test_custom_does_not_bootstrap(self) -> None:
+    def test_custom_stops_service_without_bootstrapping(self) -> None:
         info = core.create_info(
             "work", {"id": "custom"}, self.identity, "basic", ["Projects"]
         )
         with mock.patch.object(ubuntu.subprocess, "run") as run:
             priv.create(info)
-        run.assert_not_called()
+        run.assert_called_once_with(
+            [
+                "/usr/bin/systemctl",
+                "stop",
+                "spaces@work.service",
+            ],
+            check=True,
+        )
 
     def test_rebuild_removes_rootfs_and_preserves_home(self) -> None:
         with mock.patch.object(ubuntu.subprocess, "run"):
@@ -118,7 +133,21 @@ class PrivilegedTests(unittest.TestCase):
     def test_bootstrap_failure_leaves_partial_space(self) -> None:
         error = subprocess.CalledProcessError(42, ["debootstrap"])
         with (
-            mock.patch.object(ubuntu.subprocess, "run", side_effect=error),
+            mock.patch.object(
+                ubuntu.subprocess,
+                "run",
+                side_effect=[
+                    subprocess.CompletedProcess(
+                        [
+                            "/usr/bin/systemctl",
+                            "stop",
+                            "spaces@ubuntu.service",
+                        ],
+                        0,
+                    ),
+                    error,
+                ],
+            ),
             self.assertRaises(subprocess.CalledProcessError),
         ):
             priv.create(self.info)
@@ -126,6 +155,29 @@ class PrivilegedTests(unittest.TestCase):
         self.assertTrue((space / "rootfs").is_dir())
         self.assertTrue((space / "home").is_dir())
         self.assertTrue((space / "info.json").is_file())
+
+    def test_create_stop_failure_preserves_existing_space(self) -> None:
+        space = self.state_root / "ubuntu"
+        rootfs = space / "rootfs"
+        rootfs.mkdir(parents=True)
+        existing = rootfs / "keep"
+        existing.write_text("preserve", encoding="utf-8")
+        error = subprocess.CalledProcessError(
+            1,
+            [
+                "/usr/bin/systemctl",
+                "stop",
+                "spaces@ubuntu.service",
+            ],
+        )
+
+        with (
+            mock.patch.object(ubuntu.subprocess, "run", side_effect=error),
+            self.assertRaises(subprocess.CalledProcessError),
+        ):
+            priv.create(self.info)
+
+        self.assertEqual(existing.read_text(encoding="utf-8"), "preserve")
 
     def test_keyboard_interrupt_returns_130(self) -> None:
         payload = json.dumps(self.info)
