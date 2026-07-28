@@ -29,12 +29,13 @@ from .protocol import (
     LeaseSubject,
     decode_object,
     recv_frame,
+    recv_frame_with_descriptors,
     send_frame,
     valid_guest_session_id,
     valid_integer,
     valid_token,
 )
-from .runtime import AuthenticationRuntime, GUEST_NATIVE
+from .runtime import AuthenticationRuntime, NATIVE_ROOT
 from .session import (
     cgroup_components,
     process_session_matches,
@@ -48,15 +49,14 @@ logger = logging.getLogger(__name__)
 
 PAM_WORKER = Path("/usr/lib/spaces/spaces-pam-worker")
 POLKIT_WORKER = Path("/usr/lib/spaces/spaces-polkit-worker")
-SYSTEMD_RUN = "/usr/bin/systemd-run"
-SYSTEMCTL = "/usr/bin/systemctl"
+GUEST_POLKIT_AGENT = NATIVE_ROOT / "spaces-polkit-agent"
 SESSION_ENV = "SPACES_AUTH_SESSION"
 POLKIT_SERVICE = "polkit-1"
+POLKIT_HELPER_NAME = "polkit-agent-helper-1"
 
 LEASE_LIFETIME = 12 * 60 * 60
 LISTENER_POLL_INTERVAL = 0.5
 AUTHENTICATION_TIMEOUT = 120
-AGENT_CONTROL_TIMEOUT = 10
 SHUTDOWN_TIMEOUT = 5
 RATE_LIMIT_WINDOW = 30
 RATE_LIMIT_ATTEMPTS = 5
@@ -65,24 +65,21 @@ LISTEN_BACKLOG = 16
 TOKEN_BYTES = 32
 PAM_SUCCESS = 0
 PAM_AUTH_ERR = 7
+
+
 @dataclass
 class LiveLease:
     subject: LeaseSubject
     pidfd: int
     created_at: float
     attempts: list[float] = field(default_factory=list)
-    agents: dict[str, str] = field(default_factory=dict)
+    guest_sessions: set[str] = field(default_factory=set)
 
     def close(self) -> None:
         try:
             os.close(self.pidfd)
         except OSError:
             pass
-
-    def drain_agents(self) -> tuple[str, ...]:
-        units = tuple(self.agents.values())
-        self.agents.clear()
-        return units
 
 
 class AuthenticationService:
@@ -201,9 +198,23 @@ class AuthenticationService:
         consume_attempt: bool = False,
     ) -> LiveLease:
         lease = self._leases.get(token)
+        if lease is None:
+            raise PermissionError("invalid or expired authentication lease")
+        return self._validate_lease_locked(
+            lease,
+            uid,
+            consume_attempt=consume_attempt,
+        )
+
+    def _validate_lease_locked(
+        self,
+        lease: LiveLease,
+        uid: int,
+        *,
+        consume_attempt: bool = False,
+    ) -> LiveLease:
         if (
-            lease is None
-            or lease.subject.uid != uid
+            lease.subject.uid != uid
             or uid not in self.users
             or time.monotonic() - lease.created_at > LEASE_LIFETIME
             or not self._subject_alive(lease)
@@ -236,18 +247,28 @@ class AuthenticationService:
             )
 
     def _retire_lease(self, lease: LiveLease) -> None:
-        for unit in lease.drain_agents():
-            self._stop_agent(unit)
+        lease.guest_sessions.clear()
         lease.close()
 
     def _handle(self, connection: socket.socket) -> None:
+        descriptors: tuple[int, ...] = ()
         try:
             connection.settimeout(AUTHENTICATION_TIMEOUT)
-            message_type, payload = recv_frame(connection)
+            message_type, payload, descriptors = recv_frame_with_descriptors(
+                connection
+            )
             peer_pid, peer_uid, _peer_gid = self._peer_credentials(connection)
             if message_type == REGISTER:
+                if descriptors:
+                    raise ValueError(
+                        "registration included an unexpected descriptor"
+                    )
                 self._register(connection, payload, peer_uid)
             elif message_type in {SESSION_OPEN, SESSION_CLOSE}:
+                if descriptors:
+                    raise ValueError(
+                        "session event included an unexpected descriptor"
+                    )
                 if not self._peer_in_space(peer_pid):
                     raise PermissionError(
                         "session event did not originate in this space"
@@ -262,7 +283,12 @@ class AuthenticationService:
                     raise PermissionError(
                         "request did not originate in this space"
                     )
-                self._authenticate(connection, payload)
+                self._authenticate(
+                    connection,
+                    payload,
+                    peer_pid,
+                    descriptors,
+                )
             else:
                 raise ValueError("unexpected authentication message")
         except (
@@ -271,12 +297,15 @@ class AuthenticationService:
             ValueError,
             PermissionError,
             core.SpacesError,
-        ):
+        ) as error:
+            logger.debug("Rejected authentication request: %s", error)
             try:
                 send_frame(connection, ERROR)
             except OSError:
                 pass
         finally:
+            for descriptor in descriptors:
+                os.close(descriptor)
             connection.close()
             with self._handlers_lock:
                 self._handlers.discard(threading.current_thread())
@@ -287,24 +316,169 @@ class AuthenticationService:
         self,
         connection: socket.socket,
         payload: bytes,
+        peer_pid: int,
+        descriptors: tuple[int, ...] = (),
     ) -> None:
-        value = decode_object(payload, {"token", "uid", "service"})
-        token = value["token"]
+        value = json.loads(payload)
+        if not isinstance(value, dict):
+            raise ValueError("invalid authentication request")
+        fields = set(value)
+        if fields not in (
+            {"token", "uid", "service"},
+            {"uid", "service"},
+        ):
+            raise ValueError("invalid authentication request")
+        token = value.get("token")
         uid = value["uid"]
         service = value["service"]
         if (
-            not valid_token(token)
-            or not valid_integer(uid)
+            not valid_integer(uid)
             or not isinstance(service, str)
             or not service
             or len(service) > 128
         ):
             raise ValueError("invalid authentication request")
-        lease = self._live_lease(token, uid, consume_attempt=True)
+        if token is None:
+            if service != POLKIT_SERVICE:
+                raise PermissionError(
+                    "only the Polkit helper may omit a lease token"
+                )
+            if len(descriptors) > 1:
+                raise ValueError("invalid number of Polkit agent pidfds")
+            routing_pid = (
+                self._process_from_agent_pidfd(descriptors[0], uid)
+                if descriptors
+                else self._validate_direct_polkit_helper(peer_pid, uid)
+            )
+            lease = self._lease_for_guest_session(routing_pid, uid)
+        else:
+            if descriptors:
+                raise ValueError(
+                    "token authentication included an unexpected descriptor"
+                )
+            if not valid_token(token):
+                raise ValueError("invalid authentication request")
+            lease = self._live_lease(token, uid, consume_attempt=True)
         if service == POLKIT_SERVICE:
             self._run_polkit(connection, lease.subject)
         else:
             self._run_pam(connection, lease.subject)
+
+    @staticmethod
+    def _process_from_agent_pidfd(descriptor: int, uid: int) -> int:
+        readable, _writable, _exceptional = select.select(
+            [descriptor], [], [], 0
+        )
+        if readable:
+            raise PermissionError("Polkit agent pidfd is no longer live")
+        fields = {}
+        for line in Path(f"/proc/self/fdinfo/{descriptor}").read_text(
+            encoding="utf-8"
+        ).splitlines():
+            key, separator, value = line.partition(":")
+            if separator:
+                fields[key] = value.strip()
+        try:
+            pid = int(fields["Pid"])
+        except (KeyError, ValueError) as error:
+            raise PermissionError("invalid Polkit agent pidfd") from error
+        process = Path(f"/proc/{pid}")
+        if process.stat().st_uid != uid:
+            raise PermissionError("Polkit agent UID does not match the lease")
+        try:
+            if not (process / "exe").samefile(GUEST_POLKIT_AGENT):
+                raise PermissionError(
+                    "Polkit pidfd does not identify the Spaces agent"
+                )
+        except OSError as error:
+            raise PermissionError(
+                "could not verify the Spaces Polkit agent"
+            ) from error
+        readable, _writable, _exceptional = select.select(
+            [descriptor], [], [], 0
+        )
+        if readable:
+            raise PermissionError("Polkit agent pidfd is no longer live")
+        return pid
+
+    @staticmethod
+    def _validate_direct_polkit_helper(peer_pid: int, uid: int) -> int:
+        try:
+            executable = Path(f"/proc/{peer_pid}/exe").readlink()
+            status = Path(f"/proc/{peer_pid}/status").read_text(
+                encoding="utf-8"
+            )
+        except OSError as error:
+            raise PermissionError(
+                "could not verify the Polkit helper"
+            ) from error
+        if executable.name != POLKIT_HELPER_NAME:
+            raise PermissionError(
+                "tokenless request did not originate from the Polkit helper"
+            )
+        uid_line = next(
+            (line for line in status.splitlines() if line.startswith("Uid:")),
+            "",
+        )
+        try:
+            real_uid, effective_uid, _saved_uid, _filesystem_uid = (
+                int(value) for value in uid_line.removeprefix("Uid:").split()
+            )
+        except ValueError as error:
+            raise PermissionError(
+                "could not verify the Polkit helper credentials"
+            ) from error
+        if real_uid != uid or effective_uid != 0:
+            raise PermissionError(
+                "Polkit helper credentials do not match the lease"
+            )
+        return peer_pid
+
+    def _lease_for_guest_session(
+        self,
+        peer_pid: int,
+        uid: int,
+    ) -> LiveLease:
+        components = cgroup_components(peer_pid)
+        session_ids = {
+            component.removeprefix("session-").removesuffix(".scope")
+            for component in components
+            if component.startswith("session-")
+            and component.endswith(".scope")
+            and valid_guest_session_id(
+                component.removeprefix("session-").removesuffix(".scope")
+            )
+        }
+        if len(session_ids) != 1:
+            raise PermissionError(
+                "Polkit helper does not belong to one guest login session"
+            )
+        session_id = session_ids.pop()
+        with self._leases_lock:
+            matches: list[LiveLease] = []
+            for lease in self._leases.values():
+                if session_id not in lease.guest_sessions:
+                    continue
+                try:
+                    matches.append(
+                        self._validate_lease_locked(
+                            lease,
+                            uid,
+                            consume_attempt=False,
+                        )
+                    )
+                except PermissionError:
+                    continue
+            if len(matches) != 1:
+                raise PermissionError(
+                    "guest login session has no unique live lease"
+                )
+            lease = matches[0]
+            return self._validate_lease_locked(
+                lease,
+                uid,
+                consume_attempt=True,
+            )
 
     def _register(
         self,
@@ -349,9 +523,7 @@ class AuthenticationService:
             with self._leases_lock:
                 if self._leases.get(token) is lease:
                     self._leases.pop(token)
-                units = lease.drain_agents()
-            for unit in units:
-                self._stop_agent(unit)
+                lease.guest_sessions.clear()
             lease.close()
 
     def _session_event(
@@ -374,82 +546,12 @@ class AuthenticationService:
         if opening and not self._peer_in_guest_session(peer_pid, session_id):
             raise PermissionError("guest login session does not match peer")
 
-        unit: str | None
         with self._leases_lock:
             lease = self._live_lease_locked(token, uid)
             if opening:
-                if session_id in lease.agents:
-                    return
-                unit = f"spaces-auth-agent-{secrets.token_hex(8)}.service"
-                lease.agents[session_id] = unit
+                lease.guest_sessions.add(session_id)
             else:
-                unit = lease.agents.pop(session_id, None)
-        if unit is None:
-            return
-        if not opening:
-            self._stop_agent(unit)
-            return
-
-        self._start_agent(unit, lease, token, session_id)
-        with self._leases_lock:
-            active = (
-                self._leases.get(token) is lease
-                and lease.agents.get(session_id) == unit
-            )
-        if not active:
-            self._stop_agent(unit)
-
-    def _start_agent(
-        self,
-        unit: str,
-        lease: LiveLease,
-        token: str,
-        session_id: str,
-    ) -> None:
-        self._run_worker(
-            [
-                SYSTEMD_RUN,
-                "--quiet",
-                "--no-ask-password",
-                "--collect",
-                f"--machine={self.space_name}",
-                f"--unit={unit}",
-                "--property=Type=exec",
-                f"--property=User={lease.subject.uid}",
-                f"--property=Group={lease.subject.gid}",
-                "--property=StandardInput=null",
-                "--property=StandardOutput=null",
-                "--property=StandardError=null",
-                "--property=UMask=0077",
-                "--property=LimitCORE=0",
-                "--property=TimeoutStopSec=2s",
-                "--property=KillMode=mixed",
-                "--property=Restart=on-failure",
-                "--property=RestartSec=5s",
-                "--property=StartLimitIntervalSec=0",
-                f"--property=BindsTo=session-{session_id}.scope",
-                f"--property=After=session-{session_id}.scope",
-                f"--setenv={SESSION_ENV}={token}",
-                "--",
-                f"{GUEST_NATIVE}/spaces-polkit-agent",
-                "--session",
-                session_id,
-            ],
-            timeout=AGENT_CONTROL_TIMEOUT,
-        )
-
-    def _stop_agent(self, unit: str) -> None:
-        self._run_worker(
-            [
-                SYSTEMCTL,
-                "--quiet",
-                "--no-ask-password",
-                f"--machine={self.space_name}",
-                "stop",
-                unit,
-            ],
-            timeout=AGENT_CONTROL_TIMEOUT,
-        )
+                lease.guest_sessions.discard(session_id)
 
     def _run_worker(
         self,
@@ -516,8 +618,6 @@ class AuthenticationService:
                 str(polkit_pid),
                 "--start",
                 str(polkit_start_time),
-                "--space",
-                self.space_name,
             ]
         )
         result = PAM_SUCCESS if return_code == 0 else PAM_AUTH_ERR

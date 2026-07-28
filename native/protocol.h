@@ -10,7 +10,7 @@
 #include <unistd.h>
 
 #define SPACES_MAGIC 0x53504155U
-#define SPACES_VERSION 1
+#define SPACES_VERSION 2
 #define SPACES_MAX_PAYLOAD (16U * 1024U)
 
 enum spaces_message_type {
@@ -78,6 +78,69 @@ static int spaces_send_frame(
     };
     if (spaces_write_all(fd, &header, sizeof(header)) < 0) return -1;
     if (size > 0 && spaces_write_all(fd, payload, size) < 0) return -1;
+    return 0;
+}
+
+static inline int spaces_send_frame_with_descriptor(
+    int fd,
+    uint8_t type,
+    const void *payload,
+    uint32_t size,
+    int descriptor
+) {
+    if (size > SPACES_MAX_PAYLOAD || descriptor < 0) return -1;
+    size_t frame_size = sizeof(struct spaces_header) + (size_t)size;
+    unsigned char *frame = malloc(frame_size);
+    if (frame == NULL) return -1;
+    struct spaces_header header = {
+        .magic = htonl(SPACES_MAGIC),
+        .version = SPACES_VERSION,
+        .type = type,
+        .size = htonl(size),
+    };
+    memcpy(frame, &header, sizeof(header));
+    if (size > 0) memcpy(frame + sizeof(header), payload, size);
+
+    struct iovec vector = {
+        .iov_base = frame,
+        .iov_len = frame_size,
+    };
+    union {
+        struct cmsghdr alignment;
+        unsigned char bytes[CMSG_SPACE(sizeof(int))];
+    } control;
+    memset(&control, 0, sizeof(control));
+    struct msghdr message = {
+        .msg_iov = &vector,
+        .msg_iovlen = 1,
+        .msg_control = control.bytes,
+        .msg_controllen = sizeof(control.bytes),
+    };
+    struct cmsghdr *control_message = CMSG_FIRSTHDR(&message);
+    control_message->cmsg_level = SOL_SOCKET;
+    control_message->cmsg_type = SCM_RIGHTS;
+    control_message->cmsg_len = CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(control_message), &descriptor, sizeof(descriptor));
+
+    ssize_t written;
+    do {
+        written = sendmsg(fd, &message, 0);
+    } while (written < 0 && errno == EINTR);
+    if (
+        written < 0 ||
+        (
+            (size_t)written < frame_size &&
+            spaces_write_all(
+                fd,
+                frame + (size_t)written,
+                frame_size - (size_t)written
+            ) < 0
+        )
+    ) {
+        free(frame);
+        return -1;
+    }
+    free(frame);
     return 0;
 }
 

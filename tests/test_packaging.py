@@ -99,6 +99,10 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(set(actions), set(expected) | {"org.anatase.spaces.root"})
         root_action = actions["org.anatase.spaces.root"]
         self.assertEqual(
+            root_action.findtext("./message"),
+            "Authentication is required for administrator access in a space",
+        )
+        self.assertEqual(
             [child.text for child in root_action.find("./defaults")],
             ["auth_self", "auth_self", "auth_self"],
         )
@@ -166,6 +170,12 @@ class PackagingTests(unittest.TestCase):
         self.assertFalse(
             (ROOT / "native" / "spaces_session.c").exists()
         )
+        polkit_worker = (
+            ROOT / "native" / "spaces_polkit_worker.c"
+        ).read_text(encoding="utf-8")
+        self.assertIn('"--allow-user-interaction"', polkit_worker)
+        self.assertNotIn('"--detail"', polkit_worker)
+        self.assertNotIn('"--space"', polkit_worker)
 
         manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8")
         self.assertIn(

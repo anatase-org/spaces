@@ -24,23 +24,6 @@ static bool parse_id(const char *value, unsigned long *result)
     return errno == 0 && value[0] != '\0' && end != NULL && *end == '\0';
 }
 
-static bool safe_space_name(const char *name)
-{
-    size_t length = strlen(name);
-
-    if (length == 0 || length > 128)
-        return false;
-    for (size_t index = 0; index < length; index++) {
-        char character = name[index];
-        if (!((character >= 'a' && character <= 'z') ||
-              (character >= 'A' && character <= 'Z') ||
-              (character >= '0' && character <= '9') ||
-              character == '-' || character == '_'))
-            return false;
-    }
-    return true;
-}
-
 static bool harden_and_drop(uid_t uid, gid_t gid)
 {
     struct rlimit limit = {0, 0};
@@ -71,18 +54,17 @@ int main(int argc, char **argv)
         NULL,
     };
 
-    if (argc != 11 ||
+    if (argc != 9 ||
         strcmp(argv[1], "--uid") != 0 ||
         strcmp(argv[3], "--gid") != 0 ||
         strcmp(argv[5], "--pid") != 0 ||
         strcmp(argv[7], "--start") != 0 ||
-        strcmp(argv[9], "--space") != 0 ||
         !parse_id(argv[2], &uid_value) ||
         !parse_id(argv[4], &gid_value) ||
         !parse_id(argv[6], &pid_value) ||
         !parse_id(argv[8], &start_value) ||
         uid_value > UINT_MAX || gid_value > UINT_MAX ||
-        pid_value > INT_MAX || !safe_space_name(argv[10]))
+        pid_value > INT_MAX)
         return EXIT_FAILURE;
 
     if (!harden_and_drop((uid_t)uid_value, (gid_t)gid_value))
@@ -101,9 +83,6 @@ int main(int argc, char **argv)
         "--process",
         subject,
         "--allow-user-interaction",
-        "--detail",
-        "space",
-        argv[10],
         NULL,
     };
     execve(PKCHECK, arguments, environment);

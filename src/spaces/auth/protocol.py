@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import array
 import json
+import os
 import socket
 import struct
 from dataclasses import dataclass
@@ -11,8 +13,9 @@ from typing import Any
 
 
 MAGIC = b"SPAU"
-VERSION = 1
+VERSION = 2
 MAX_PAYLOAD = 16 * 1024
+MAX_DESCRIPTORS = 1
 TOKEN_HEX_SIZE = 64
 MAX_IDENTIFIER_SIZE = 128
 HEADER = struct.Struct("!4sBBI")
@@ -93,13 +96,51 @@ def _recv_exact(connection: socket.socket, size: int) -> bytes:
     return b"".join(chunks)
 
 
+def recv_frame_with_descriptors(
+    connection: socket.socket,
+) -> tuple[int, bytes, tuple[int, ...]]:
+    descriptors: list[int] = []
+    try:
+        header_start, ancillary, flags, _address = connection.recvmsg(
+            HEADER.size,
+            socket.CMSG_SPACE(MAX_DESCRIPTORS * array.array("i").itemsize),
+            socket.MSG_CMSG_CLOEXEC,
+        )
+        if not header_start:
+            raise EOFError
+        if flags & socket.MSG_CTRUNC:
+            raise ValueError("authentication descriptor data was truncated")
+        for level, kind, data in ancillary:
+            if level != socket.SOL_SOCKET or kind != socket.SCM_RIGHTS:
+                continue
+            values = array.array("i")
+            usable = len(data) - (len(data) % values.itemsize)
+            values.frombytes(data[:usable])
+            descriptors.extend(values)
+        if len(descriptors) > MAX_DESCRIPTORS:
+            raise ValueError("too many authentication descriptors")
+
+        header = header_start + _recv_exact(
+            connection,
+            HEADER.size - len(header_start),
+        )
+        magic, version, message_type, size = HEADER.unpack(header)
+        if magic != MAGIC or version != VERSION or size > MAX_PAYLOAD:
+            raise ValueError("invalid authentication protocol frame")
+        return message_type, _recv_exact(connection, size), tuple(descriptors)
+    except BaseException:
+        for descriptor in descriptors:
+            os.close(descriptor)
+        raise
+
+
 def recv_frame(connection: socket.socket) -> tuple[int, bytes]:
-    magic, version, message_type, size = HEADER.unpack(
-        _recv_exact(connection, HEADER.size)
-    )
-    if magic != MAGIC or version != VERSION or size > MAX_PAYLOAD:
-        raise ValueError("invalid authentication protocol frame")
-    return message_type, _recv_exact(connection, size)
+    message_type, payload, descriptors = recv_frame_with_descriptors(connection)
+    for descriptor in descriptors:
+        os.close(descriptor)
+    if descriptors:
+        raise ValueError("unexpected authentication descriptor")
+    return message_type, payload
 
 
 def send_frame(
