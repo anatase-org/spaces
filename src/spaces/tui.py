@@ -380,8 +380,7 @@ class PermissionForm(
                 ):
                     yield Static(
                         _(
-                            "Choose whether authentication requests inside "
-                            "this space are validated by the host."
+                            "Should authentication requests be handled by the system (use your system password for sudo)?"
                         ),
                         classes="description",
                     )

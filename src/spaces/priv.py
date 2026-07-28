@@ -480,6 +480,14 @@ def configure(patch: dict[str, Any]) -> None:
         }
         core.validate_info(info)
         _write_info(space, info)
+        subprocess.run(
+            [
+                SYSTEMCTL,
+                "try-restart",
+                f"spaces@{patch['name']}.service",
+            ],
+            check=True,
+        )
 
 
 def delete(request: dict[str, Any]) -> None:

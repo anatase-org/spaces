@@ -220,7 +220,8 @@ class PrivilegedTests(unittest.TestCase):
                 },
             },
         }
-        priv.configure(patch)
+        with mock.patch.object(priv.subprocess, "run") as run:
+            priv.configure(patch)
         updated = json.loads(info_path.read_text(encoding="utf-8"))
         self.assertEqual(updated["distribution"], self.info["distribution"])
         self.assertEqual(updated["permissions"]["system"]["network"], "admin")
@@ -229,23 +230,32 @@ class PrivilegedTests(unittest.TestCase):
             updated["permissions"]["users"]["0"]["permissions"]["future"],
             {"enabled": True},
         )
+        run.assert_called_once_with(
+            [
+                "/usr/bin/systemctl",
+                "try-restart",
+                "spaces@ubuntu.service",
+            ],
+            check=True,
+        )
 
     def test_user_only_configure_preserves_system(self) -> None:
         with mock.patch.object(ubuntu.subprocess, "run"):
             priv.create(self.info)
-        priv.configure(
-            {
-                "schema_version": 1,
-                "name": "ubuntu",
-                "permissions": {
-                    "user": {
-                        "uid": 0,
-                        "gid": 0,
-                        "permissions": {"home": []},
-                    }
-                },
-            }
-        )
+        with mock.patch.object(priv.subprocess, "run"):
+            priv.configure(
+                {
+                    "schema_version": 1,
+                    "name": "ubuntu",
+                    "permissions": {
+                        "user": {
+                            "uid": 0,
+                            "gid": 0,
+                            "permissions": {"home": []},
+                        },
+                    },
+                }
+            )
         updated = json.loads(
             (self.state_root / "ubuntu" / "info.json").read_text(encoding="utf-8")
         )
@@ -255,22 +265,23 @@ class PrivilegedTests(unittest.TestCase):
         with mock.patch.object(ubuntu.subprocess, "run"):
             priv.create(self.info)
 
-        priv.configure(
-            {
-                "schema_version": 1,
-                "name": "ubuntu",
-                "permissions": {
-                    "user": {
-                        "uid": 1001,
-                        "gid": 1002,
-                        "permissions": {
-                            "home": ["Documents"],
-                            "administrator": False,
+        with mock.patch.object(priv.subprocess, "run"):
+            priv.configure(
+                {
+                    "schema_version": 1,
+                    "name": "ubuntu",
+                    "permissions": {
+                        "user": {
+                            "uid": 1001,
+                            "gid": 1002,
+                            "permissions": {
+                                "home": ["Documents"],
+                                "administrator": False,
+                            },
                         },
-                    }
-                },
-            }
-        )
+                    },
+                }
+            )
 
         updated = json.loads(
             (self.state_root / "ubuntu" / "info.json").read_text(encoding="utf-8")
