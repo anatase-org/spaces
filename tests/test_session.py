@@ -1,614 +1,872 @@
 from __future__ import annotations
 
+import json
 import os
+import pwd
+import shlex
+import shutil
+import signal
+import socket
 import stat
+import subprocess
 import tempfile
+import time
 import unittest
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 from unittest import mock
 
 from spaces import core, session
 
 
-class SessionManifestTests(unittest.TestCase):
-    def test_discovery_requires_a_session_endpoint_and_uses_allowlist(
-        self,
-    ) -> None:
+def graphical(
+    session_id: str = "2",
+    *,
+    active: bool = True,
+    remote: bool = False,
+    session_type: str = "wayland",
+    session_class: str = "user",
+) -> session.LoginSession:
+    return session.LoginSession(
+        session_id,
+        active,
+        remote,
+        session_type,
+        session_class,
+    )
+
+
+def user(root: Path, *, desktop: bool = True, uid: int | None = None) -> object:
+    actual_uid = os.getuid() if uid is None else uid
+    home = root / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    return SimpleNamespace(
+        uid=actual_uid,
+        gid=os.getgid(),
+        name=pwd.getpwuid(os.getuid()).pw_name,
+        host_home=home,
+        guest_home=PurePosixPath(f"/home/{pwd.getpwuid(os.getuid()).pw_name}"),
+        desktop=desktop,
+    )
+
+
+class GraphicalSessionTests(unittest.TestCase):
+    def test_selects_only_matching_active_local_graphical_user_session(self) -> None:
+        records = (
+            graphical("1", session_type="tty"),
+            graphical("2"),
+            graphical("3", remote=True),
+            graphical("4", session_class="greeter"),
+            graphical("5", active=False),
+        )
+        self.assertEqual(
+            session.select_graphical_session(
+                records, {"XDG_SESSION_ID": "2"}
+            ),
+            records[1],
+        )
+        for session_id in ("1", "3", "4", "5", "missing"):
+            with self.subTest(session_id=session_id):
+                self.assertIsNone(
+                    session.select_graphical_session(
+                        records, {"XDG_SESSION_ID": session_id}
+                    )
+                )
+        self.assertIsNone(session.select_graphical_session(records, {}))
+
+    def test_ambiguous_matching_records_are_rejected(self) -> None:
+        duplicate = graphical("2")
         self.assertIsNone(
-            session.discover(
-                {
-                    "DBUS_SESSION_BUS_ADDRESS": "unix:path=/host/bus",
-                    "SSH_AUTH_SOCK": "/run/user/1000/agent",
-                    "XDG_CURRENT_DESKTOP": "KDE",
-                }
+            session.select_graphical_session(
+                (duplicate, duplicate), {"XDG_SESSION_ID": "2"}
             )
         )
 
-        runtime = f"/run/user/{session.os.getuid()}"
+    def test_host_manager_environment_is_sanitized(self) -> None:
+        completed = subprocess.CompletedProcess(
+            [],
+            0,
+            stdout=(
+                "DISPLAY=:0\n"
+                "WAYLAND_DISPLAY=wayland-0\n"
+                "XDG_SESSION_ID=2\n"
+                "XDG_RUNTIME_DIR=/run/user/1000\n"
+                "DBUS_SESSION_BUS_ADDRESS=unix:path=/host/bus\n"
+                "SSH_AUTH_SOCK=/run/user/1000/agent\n"
+            ),
+        )
         with mock.patch.object(
-            session,
-            "_is_socket",
-            side_effect=lambda path: path.name == "wayland-0",
-        ):
-            manifest = session.discover(
-                {
-                    "XDG_RUNTIME_DIR": runtime,
-                    "WAYLAND_DISPLAY": "wayland-0",
-                    "XAUTHORITY": "/run/user/1000/xauth",
-                    "QT_SCALE_FACTOR": "1.5",
-                    "DBUS_SESSION_BUS_ADDRESS": "unix:path=/host/bus",
-                    "SSH_AUTH_SOCK": "/run/user/1000/agent",
-                }
+            session.subprocess, "run", return_value=completed
+        ) as run:
+            environment = session.host_manager_environment(
+                SimpleNamespace(uid=1000, gid=100)
             )
         self.assertEqual(
-            manifest,
+            environment,
             {
-                "version": 1,
-                "resources": ["appearance", "wayland"],
-                "environment": {
-                    "QT_SCALE_FACTOR": "1.5",
-                    "WAYLAND_DISPLAY": "wayland-0",
-                },
+                "DISPLAY": ":0",
+                "WAYLAND_DISPLAY": "wayland-0",
+                "XDG_SESSION_ID": "2",
+                "XDG_RUNTIME_DIR": "/run/user/1000",
+                "DBUS_SESSION_BUS_ADDRESS": "unix:path=/host/bus",
             },
         )
-
-    def test_invalid_values_are_omitted_during_discovery(self) -> None:
-        self.assertIsNone(
-            session.discover(
-                {
-                    "DISPLAY": "bad\nvalue",
-                    "WAYLAND_DISPLAY": "\0",
-                }
-            )
-        )
-
-    def test_discovery_detects_fixed_audio_sockets_without_a_display(
-        self,
-    ) -> None:
-        runtime = f"/run/user/{session.os.getuid()}"
-
-        with mock.patch.object(
-            session,
-            "_is_socket",
-            side_effect=lambda path: path.name in {
-                "native",
-                "pipewire-0",
-            },
-        ):
-            manifest = session.discover(
-                {
-                    "XDG_RUNTIME_DIR": runtime,
-                    "TERM": "xterm-256color",
-                }
-            )
-
         self.assertEqual(
-            manifest,
-            {
-                "version": 1,
-                "resources": [
-                    "appearance",
-                    "pipewire",
-                    "pulseaudio",
-                ],
-                "environment": {"TERM": "xterm-256color"},
-            },
+            run.call_args.args[0],
+            [
+                "/usr/bin/systemctl",
+                "--user",
+                "--no-ask-password",
+                "show-environment",
+            ],
         )
-
-    def test_validation_rejects_unknown_keys_and_host_bus(self) -> None:
-        invalid = (
+        self.assertEqual(
+            run.call_args.kwargs["env"],
             {
-                "version": 1,
-                "resources": ["appearance", "x11"],
-                "environment": {"DISPLAY": ":0"},
-                "mounts": ["/etc/shadow"],
-            },
-            {
-                "version": 1,
-                "resources": ["appearance", "x11"],
-                "environment": {
-                    "DISPLAY": ":0",
-                    "DBUS_SESSION_BUS_ADDRESS": "unix:path=/host/bus",
-                },
-            },
-            {
-                "version": 2,
-                "resources": ["appearance", "x11"],
-                "environment": {"DISPLAY": ":0"},
-            },
-            {
-                "version": 1,
-                "resources": ["appearance", "devices", "x11"],
-                "environment": {"DISPLAY": ":0"},
-            },
-            {
-                "version": 1,
-                "resources": ["appearance", "x11", "x11"],
-                "environment": {"DISPLAY": ":0"},
-            },
-            {
-                "version": 1,
-                "resources": ["appearance", "wayland"],
-                "environment": {"DISPLAY": ":0"},
-            },
-        )
-        for manifest in invalid:
-            with self.subTest(manifest=manifest), self.assertRaises(
-                core.SpacesError
-            ):
-                session.validate_manifest(manifest)
-
-    def test_validation_copies_valid_manifest(self) -> None:
-        manifest = {
-            "version": 1,
-            "resources": ["appearance", "x11"],
-            "environment": {
-                "DISPLAY": "localhost:10.0",
-                "TERM": "xterm-256color",
-            },
-        }
-        self.assertEqual(session.validate_manifest(manifest), manifest)
-        self.assertIsNot(
-            session.validate_manifest(manifest)["environment"],
-            manifest["environment"],
-        )
-
-
-class SessionUserPathTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
-        self.root = Path(self.temporary.name)
-        self.home = self.root / "home"
-        self.home.mkdir()
-
-    def tearDown(self) -> None:
-        self.temporary.cleanup()
-
-    def test_prepares_user_owned_session_mountpoints(self) -> None:
-        uid = os.getuid()
-        gid = os.getgid()
-
-        session.prepare_user_paths(self.home, uid, gid, "alice")
-
-        config = self.home / ".config"
-        paths = [
-            config,
-            *(config / name for name in session.CONFIG_DIRECTORIES),
-            *(config / name for name in session.CONFIG_FILES),
-        ]
-        for path in paths:
-            with self.subTest(path=path):
-                metadata = path.stat()
-                self.assertEqual(metadata.st_uid, uid)
-                self.assertEqual(metadata.st_gid, gid)
-        self.assertTrue((config / "kdeglobals").is_file())
-
-    def test_rejects_unsafe_session_mountpoint(self) -> None:
-        outside = self.root / "outside"
-        outside.mkdir()
-        (self.home / ".config").symlink_to(
-            outside,
-            target_is_directory=True,
-        )
-
-        with self.assertRaises(core.SpacesError):
-            session.prepare_user_paths(
-                self.home,
-                os.getuid(),
-                os.getgid(),
-                "alice",
-            )
-
-
-class SessionPrivilegedTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
-        self.state_root = Path(self.temporary.name) / "spaces"
-        self.state_patch = mock.patch.object(
-            core,
-            "STATE_ROOT",
-            self.state_root,
-        )
-        self.state_patch.start()
-
-    def tearDown(self) -> None:
-        self.state_patch.stop()
-        self.temporary.cleanup()
-
-    def test_session_unit_uses_private_mounts_and_guest_bus(self) -> None:
-        binding = session._SessionBind(
-            source=Path("/host/wayland-0"),
-            staging="/run/spaces-staging/token/wayland",
-            destination="/tmp/.spaces-session-token/wayland/wayland-0",
-            device=1,
-            inode=2,
-        )
-        plan = session._SessionPlan(
-            binds=(binding,),
-            environment={
-                "WAYLAND_DISPLAY": (
-                    "/tmp/.spaces-session-token/wayland/wayland-0"
-                ),
                 "DBUS_SESSION_BUS_ADDRESS": (
                     "unix:path=/run/user/1000/bus"
                 ),
+                "XDG_RUNTIME_DIR": "/run/user/1000",
             },
-            staging_root="/run/spaces-staging/token",
-            destination_root="/tmp/.spaces-session-token",
         )
-        account = mock.Mock(pw_name="alice")
-        command = session._session_unit_command(
-            "work",
-            account,
-            plan,
-            "spaces-enter-token.service",
-            ["/usr/bin/kate", "--new"],
-        )
+        self.assertEqual(run.call_args.kwargs["user"], 1000)
+        self.assertEqual(run.call_args.kwargs["group"], 100)
 
-        self.assertIn("--property=PrivateMounts=yes", command)
-        self.assertNotIn("--property=PAMName=login", command)
-        self.assertIn("--property=ExitType=cgroup", command)
-        self.assertIn("--property=KillMode=control-group", command)
-        self.assertIn("--expand-environment=no", command)
-        self.assertIn("--uid=alice", command)
-        self.assertIn("--working-directory=/home/alice", command)
-        self.assertIn("--pty", command)
-        self.assertIn("--pipe", command)
-        self.assertIn(
-            "--property=BindReadOnlyPaths="
-            "/run/spaces-staging/token/wayland:"
-            "/tmp/.spaces-session-token/wayland/wayland-0",
-            command,
-        )
-        self.assertIn(
-            "--setenv=DBUS_SESSION_BUS_ADDRESS="
-            "unix:path=/run/user/1000/bus",
-            command,
-        )
-        self.assertEqual(command[-3], "--")
-        self.assertEqual(command[-2:], ["/usr/bin/kate", "--new"])
 
-    def test_session_unit_uses_guest_login_shell_by_default(self) -> None:
-        passwd = self.state_root / "work" / "rootfs" / "etc" / "passwd"
-        passwd.parent.mkdir(parents=True)
-        passwd.write_text(
-            "alice:x:1000:1000::/home/alice:/bin/bash\n",
-            encoding="utf-8",
-        )
-        plan = session._SessionPlan(
-            binds=(),
-            environment={},
-            staging_root="/run/spaces-staging/token",
-            destination_root="/tmp/.spaces-session-token",
-        )
-        account = mock.Mock(pw_name="alice")
-
-        command = session._session_unit_command(
-            "work",
-            account,
-            plan,
-            "spaces-enter-token.service",
-            [],
-        )
-
-        self.assertEqual(command[-3:], ["--", "/bin/bash", "-l"])
-
-    def test_session_staging_uses_machinectl_lazy_unmount(self) -> None:
-        with mock.patch.object(session, "_machine_root_command") as run:
-            session._unmount_session_resource(
-                "work",
-                "/run/spaces-staging/token/wayland",
+class DesktopPathTests(unittest.TestCase):
+    def test_prepare_user_paths_are_owned_and_include_vscode_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            session.prepare_user_paths(
+                home, os.getuid(), os.getgid(), "alice"
             )
+            self.assertTrue((home / ".config").is_dir())
+            self.assertTrue((home / ".config" / "gtk-3.0").is_dir())
+            self.assertTrue((home / ".config" / "gtk-4.0").is_dir())
+            self.assertTrue((home / ".config" / "fontconfig").is_dir())
+            self.assertTrue((home / ".config" / "kdeglobals").is_file())
+            self.assertEqual((home / ".config").stat().st_uid, os.getuid())
 
-        run.assert_called_once_with(
-            "work",
-            [
-                "/usr/bin/umount",
-                "--lazy",
-                "--",
-                "/run/spaces-staging/token/wayland",
-            ],
-        )
+    def test_validated_source_rejects_symlink_escape_and_wrong_type(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "allowed"
+            root.mkdir()
+            regular = root / "file"
+            regular.write_text("data", encoding="utf-8")
+            outside = Path(temporary) / "outside"
+            outside.write_text("data", encoding="utf-8")
+            (root / "escape").symlink_to(outside)
+            account = pwd.getpwuid(os.getuid())
 
-    def test_session_starts_guest_user_manager_for_bus(self) -> None:
-        account = mock.Mock(pw_uid=1000)
-        with mock.patch.object(session.subprocess, "run") as run:
-            session._ensure_guest_user_manager("work", account)
-
-        run.assert_called_once_with(
-            [
-                "/usr/bin/systemctl",
-                "--machine=work",
-                "--no-ask-password",
-                "start",
-                "user@1000.service",
-            ],
-            check=True,
-        )
-
-    def test_validated_source_rejects_escape_type_owner_and_access(
-        self,
-    ) -> None:
-        root = Path(self.temporary.name) / "allowed"
-        root.mkdir()
-        readable = root / "readable"
-        readable.write_text("data", encoding="utf-8")
-        outside = Path(self.temporary.name) / "outside"
-        outside.write_text("data", encoding="utf-8")
-        escaped = root / "escaped"
-        escaped.symlink_to(outside)
-        account = mock.Mock(
-            pw_uid=os.getuid(),
-            pw_gid=os.getgid(),
-            pw_name="alice",
-        )
-
-        with mock.patch.object(
-            session.os,
-            "getgrouplist",
-            return_value=[os.getgid()],
-        ):
             checked = session._validated_source(
-                readable,
+                regular,
                 roots=(root,),
                 kinds=(stat.S_IFREG,),
+                user=account,
                 owner=os.getuid(),
-                access_user=account,
             )
-            self.assertIsNotNone(checked)
-
-            for path, kinds, owner in (
-                (escaped, (stat.S_IFREG,), os.getuid()),
-                (Path("/etc/not-a-session-resource"), (stat.S_IFREG,), None),
-                (readable, (stat.S_IFSOCK,), os.getuid()),
-                (readable, (stat.S_IFREG,), os.getuid() + 1),
-            ):
-                with self.subTest(path=path), self.assertRaises(
-                    core.SpacesError
-                ):
-                    session._validated_source(
-                        path,
-                        roots=(root,),
-                        kinds=kinds,
-                        owner=owner,
-                        access_user=account,
-                    )
-
-            readable.chmod(0)
+            self.assertEqual(checked[0], regular.resolve())
             with self.assertRaises(core.SpacesError):
                 session._validated_source(
-                    readable,
+                    root / "escape",
                     roots=(root,),
                     kinds=(stat.S_IFREG,),
-                    owner=os.getuid(),
-                    access_user=account,
+                    user=account,
+                )
+            with self.assertRaises(core.SpacesError):
+                session._validated_source(
+                    regular,
+                    roots=(root,),
+                    kinds=(stat.S_IFDIR,),
+                    user=account,
                 )
 
-    def test_session_plan_rejects_forged_xdg_directory(self) -> None:
-        account = mock.Mock(
-            pw_uid=os.getuid(),
-            pw_gid=os.getgid(),
-            pw_name="alice",
-            pw_dir=self.temporary.name,
-        )
-        manifest = {
-            "version": 1,
-            "resources": ["appearance", "x11"],
-            "environment": {
-                "DISPLAY": "localhost:10.0",
-                "XDG_CONFIG_HOME": "/etc",
-            },
-        }
-
-        with self.assertRaises(core.SpacesError):
-            session._prepare_session_plan(
-                manifest,
-                account,
-                "token",
-                Path(self.temporary.name),
+    def test_plan_uses_fixed_destinations_and_excludes_host_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            desktop_user = user(root)
+            metadata = SimpleNamespace(
+                st_mode=stat.S_IFSOCK | 0o700,
+                st_uid=desktop_user.uid,
+                st_gid=desktop_user.gid,
+                st_dev=1,
+                st_ino=2,
             )
 
-    def test_environment_only_session_still_uses_transient_unit(self) -> None:
-        plan = session._SessionPlan(
-            binds=(),
-            environment={"DISPLAY": "localhost:10.0"},
-            staging_root="/run/spaces-staging/token",
-            destination_root="/tmp/.spaces-session-token",
+            def validate(path: Path, **_kwargs: object) -> object:
+                if path.name in {"wayland-0", "native", "pipewire-0"}:
+                    return path, metadata
+                return None
+
+            environment = {
+                "XDG_SESSION_ID": "2",
+                "XDG_RUNTIME_DIR": f"/run/user/{desktop_user.uid}",
+                "DBUS_SESSION_BUS_ADDRESS": "unix:path=/host/bus",
+                "WAYLAND_DISPLAY": "wayland-0",
+                "PULSE_SERVER": (
+                    f"unix:/run/user/{desktop_user.uid}/pulse/native"
+                ),
+                "QT_SCALE_FACTOR": "1.5",
+            }
+            with (
+                mock.patch.object(
+                    session.pwd,
+                    "getpwuid",
+                    return_value=pwd.getpwuid(os.getuid()),
+                ),
+                mock.patch.object(
+                    session, "_validated_source", side_effect=validate
+                ),
+            ):
+                plan = session._plan(
+                    desktop_user,
+                    graphical(),
+                    environment,
+                    root / "generated",
+                )
+
+            destination_root = f"/run/spaces/desktop/{desktop_user.uid}"
+            self.assertEqual(
+                plan.environment["WAYLAND_DISPLAY"],
+                f"{destination_root}/wayland/wayland-0",
+            )
+            self.assertEqual(
+                plan.environment["PULSE_SERVER"],
+                f"unix:{destination_root}/pulse/native",
+            )
+            self.assertEqual(plan.environment["QT_SCALE_FACTOR"], "1.5")
+            self.assertNotIn("DBUS_SESSION_BUS_ADDRESS", plan.environment)
+            self.assertNotIn("XDG_RUNTIME_DIR", plan.environment)
+            self.assertNotIn("XDG_SESSION_ID", plan.environment)
+            self.assertTrue(
+                all(
+                    binding.destination.startswith(destination_root)
+                    for binding in plan.binds
+                )
+            )
+
+    def test_remote_x11_display_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            desktop_user = user(Path(temporary))
+            with (
+                mock.patch.object(
+                    session.pwd,
+                    "getpwuid",
+                    return_value=pwd.getpwuid(os.getuid()),
+                ),
+                self.assertRaises(core.SpacesError),
+            ):
+                session._plan(
+                    desktop_user,
+                    graphical(session_type="x11"),
+                    {"DISPLAY": "localhost:10.0"},
+                    Path(temporary) / "generated",
+                )
+
+
+class StatusAndEnvironmentTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.runtime = Path(self.temporary.name)
+        self.runtime_patch = mock.patch.object(
+            session, "RUNTIME_ROOT", self.runtime
         )
-        account = mock.Mock(pw_name="alice")
-        process = mock.Mock()
-        process.poll.return_value = 42
-        process.wait.return_value = 42
-        temporary_context = mock.MagicMock()
-        temporary_context.__enter__.return_value = self.temporary.name
-        removed = mock.Mock()
+        self.state_patch = mock.patch.object(
+            core, "STATE_ROOT", self.runtime / "state"
+        )
+        self.runtime_patch.start()
+        self.state_patch.start()
+        (core.STATE_ROOT / "work").mkdir(parents=True)
+
+    def tearDown(self) -> None:
+        self.state_patch.stop()
+        self.runtime_patch.stop()
+        self.temporary.cleanup()
+
+    def test_status_is_atomic_and_pending_barrier_returns_allowlist(self) -> None:
+        session._write_record(
+            "work", 1000, "active", "2", {"DISPLAY": ":0"}
+        )
+        path = core.STATE_ROOT / "work" / "env" / "1000.json"
+        self.assertEqual(json.loads(path.read_text())["state"], "active")
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(
+            session.desktop_environment("work", 1000),
+            {"DISPLAY": ":0"},
+        )
+
+    def test_inactive_status_clears_environment_in_same_record(self) -> None:
+        session._write_record(
+            "work", 1000, "active", "2", {"DISPLAY": ":0"}
+        )
+        session.set_status("work", 1000, "inactive")
+        self.assertEqual(session.desktop_environment("work", 1000), {})
+        self.assertEqual(
+            session._read_record("work", 1000),
+            ("inactive", None, {}),
+        )
+
+    def test_environment_file_rejects_host_bus_and_unsafe_permissions(self) -> None:
+        with self.assertRaises(core.SpacesError):
+            session._write_record(
+                "work",
+                1000,
+                "active",
+                "2",
+                {"DBUS_SESSION_BUS_ADDRESS": "unix:path=/host/bus"},
+            )
+
+        session._write_record(
+            "work", 1000, "active", "2", {"DISPLAY": ":0"}
+        )
+        path = core.STATE_ROOT / "work" / "env" / "1000.json"
+        path.chmod(0o644)
+        with self.assertRaises(core.SpacesError):
+            session.desktop_environment("work", 1000)
+
+    def test_initialize_status_respects_permission_and_root(self) -> None:
+        enabled = user(self.runtime / "one", uid=1000)
+        disabled = user(self.runtime / "two", desktop=False, uid=1001)
+        root = user(self.runtime / "three", uid=0)
+        session._write_record(
+            "work", 1000, "active", "old", {"DISPLAY": ":9"}
+        )
+        session.initialize_status("work", (enabled, disabled, root))
+        self.assertEqual(
+            session._read_record("work", 1000),
+            ("pending", None, {}),
+        )
+        self.assertEqual(session._read_status("work", 1000), "pending")
+        self.assertEqual(session._read_status("work", 1001), "inactive")
+        self.assertEqual(session._read_status("work", 0), "inactive")
+
+
+class DesktopControllerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.desktop_user = user(self.root)
+        self.runtime_patch = mock.patch.object(
+            session, "RUNTIME_ROOT", self.root / "runtime"
+        )
+        self.state_patch = mock.patch.object(
+            core, "STATE_ROOT", self.root / "state"
+        )
+        self.runtime_patch.start()
+        self.state_patch.start()
+        (core.STATE_ROOT / "work").mkdir(parents=True)
+        self.controller = session.DesktopController(
+            "work", (self.desktop_user,)
+        )
+
+    def tearDown(self) -> None:
+        self.state_patch.stop()
+        self.runtime_patch.stop()
+        self.temporary.cleanup()
+
+    def test_mount_pins_identity_and_is_read_only(self) -> None:
+        source = self.root / "socket"
+        source.write_text("", encoding="utf-8")
+        metadata = source.stat()
+        binding = session.DesktopBind(
+            "/run/spaces/desktop/1000/socket",
+            source,
+            metadata.st_dev,
+            metadata.st_ino,
+        )
+        with mock.patch.object(session.subprocess, "run") as run:
+            self.controller._mount(self.desktop_user.uid, binding)
+        command = run.call_args.args[0]
+        self.assertIn("--read-only", command)
+        self.assertIn("--mkdir", command)
+        self.assertEqual(command[-1], binding.destination)
+        self.assertTrue(command[-2].startswith(f"/proc/{os.getpid()}/fd/"))
+
+    def test_shared_destination_is_mounted_and_unmounted_once(self) -> None:
+        binding = session.DesktopBind(
+            "/tmp/.X11-unix/X0", Path("/source"), 1, 2
+        )
+        self.controller.destination_users[binding.destination] = {1000}
+        self.controller.destination_sources[binding.destination] = (1, 2)
+        with mock.patch.object(
+            self.controller, "_machine_root"
+        ) as machine_root:
+            self.controller._mount(1001, binding)
+            self.controller._unmount(1000, binding)
+            machine_root.assert_not_called()
+            self.controller._unmount(1001, binding)
+        machine_root.assert_called_once_with(
+            ["/usr/bin/umount", "--lazy", "--", binding.destination]
+        )
+
+    def test_setup_failure_is_nonfatal_and_marks_inactive(self) -> None:
         with (
             mock.patch.object(
-                session.tempfile,
-                "TemporaryDirectory",
-                return_value=temporary_context,
+                session,
+                "host_manager_environment",
+                return_value={"XDG_SESSION_ID": "2"},
             ),
             mock.patch.object(
                 session,
-                "_prepare_session_plan",
-                return_value=plan,
+                "_plan",
+                side_effect=core.SpacesError("unsafe"),
             ),
-            mock.patch.object(session, "_ensure_guest_user_manager"),
-            mock.patch.object(
-                session,
-                "_prepare_guest_session_directories",
-            ),
-            mock.patch.object(
-                session,
-                "_session_unit_command",
-                return_value=["systemd-run"],
-            ),
-            mock.patch.object(
-                session.subprocess,
-                "Popen",
-                return_value=process,
-            ),
-            mock.patch.object(
-                session,
-                "_wait_for_private_unit",
-                return_value=True,
-            ),
-            mock.patch.object(
-                session,
-                "_remove_guest_session_paths",
-                removed,
-            ),
-            mock.patch.object(session, "_stop_session_unit") as stop,
-            mock.patch.object(
-                session.signal,
-                "signal",
-                return_value=None,
-            ),
+            self.assertRaises(session.DesktopSetupError),
         ):
+            self.controller.reconcile(
+                self.desktop_user, (graphical(),)
+            )
+        self.assertEqual(
+            session._read_status(
+                self.controller.space_name, self.desktop_user.uid
+            ),
+            "inactive",
+        )
+
+    def test_record_publish_failure_unmounts_resources(self) -> None:
+        binding = session.DesktopBind("/desktop/socket", Path("/host"), 1, 2)
+        plan = session.DesktopPlan("2", (binding,), {"DISPLAY": ":0"})
+        with (
+            mock.patch.object(self.controller, "_prepare_guest_root"),
+            mock.patch.object(self.controller, "_mount") as mount,
+            mock.patch.object(
+                session,
+                "_write_record",
+                side_effect=OSError("write failed"),
+            ),
+            mock.patch.object(self.controller, "_unmount") as unmount,
+            self.assertRaises(OSError),
+        ):
+            self.controller._activate(self.desktop_user, plan)
+        mount.assert_called_once_with(self.desktop_user.uid, binding)
+        unmount.assert_called_once_with(self.desktop_user.uid, binding)
+
+    def test_forwarding_publishes_and_clears_combined_record(self) -> None:
+        plan = session.DesktopPlan("2", (), {"DISPLAY": ":0"})
+        with mock.patch.object(self.controller, "_prepare_guest_root"):
+            active = self.controller._activate(self.desktop_user, plan)
+            self.controller.active[self.desktop_user.uid] = active
             self.assertEqual(
-                session.enter(
-                    account,
-                    "work",
-                    ["/usr/bin/kate"],
-                    {
-                        "version": 1,
-                        "resources": ["appearance", "x11"],
-                        "environment": {"DISPLAY": "localhost:10.0"},
-                    },
-                ),
-                42,
+                session._read_record("work", self.desktop_user.uid),
+                ("active", "2", {"DISPLAY": ":0"}),
+            )
+            self.controller.deactivate(self.desktop_user)
+
+        self.assertEqual(
+            session._read_record("work", self.desktop_user.uid),
+            ("inactive", None, {}),
+        )
+
+    def test_logout_lazily_revokes_active_generation(self) -> None:
+        binding = session.DesktopBind("/desktop/socket", Path("/host"), 1, 2)
+        plan = session.DesktopPlan("2", (binding,), {"DISPLAY": ":0"})
+        self.controller.active[self.desktop_user.uid] = (
+            session._ActiveDesktop(plan)
+        )
+        self.controller.destination_users[binding.destination] = {
+            self.desktop_user.uid
+        }
+        self.controller.destination_sources[binding.destination] = (1, 2)
+        with mock.patch.object(
+            self.controller, "_machine_root"
+        ) as machine_root:
+            self.controller.deactivate(self.desktop_user)
+        machine_root.assert_called_once_with(
+            ["/usr/bin/umount", "--lazy", "--", binding.destination]
+        )
+        self.assertEqual(
+            session._read_status("work", self.desktop_user.uid), "inactive"
+        )
+
+    def test_failed_revocation_is_fatal(self) -> None:
+        binding = session.DesktopBind("/desktop/socket", Path("/host"), 1, 2)
+        plan = session.DesktopPlan("2", (binding,), {"DISPLAY": ":0"})
+        active = session._ActiveDesktop(plan)
+        with (
+            mock.patch.object(
+                self.controller,
+                "_unmount",
+                side_effect=OSError("mount unavailable"),
+            ),
+            self.assertRaises(session.DesktopRevocationError),
+        ):
+            self.controller._deactivate(self.desktop_user, active)
+
+
+class PolkitAgentTests(unittest.TestCase):
+    def test_recognizes_ubuntu_multiarch_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            rootfs = Path(temporary)
+            agent = (
+                rootfs
+                / "usr/lib/x86_64-linux-gnu/libexec"
+                / "polkit-kde-authentication-agent-1"
+            )
+            agent.parent.mkdir(parents=True)
+            agent.write_text("#!/bin/sh\n", encoding="utf-8")
+            agent.chmod(0o755)
+            self.assertEqual(
+                session.polkit_agent(rootfs),
+                "/usr/lib/x86_64-linux-gnu/libexec/"
+                "polkit-kde-authentication-agent-1",
             )
 
-        stop.assert_called_once()
-        self.assertEqual(
-            removed.call_args_list,
+    def test_ignores_unrecognized_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            rootfs = Path(temporary)
+            (rootfs / "tmp").mkdir()
+            agent = rootfs / "tmp/agent"
+            agent.write_text("", encoding="utf-8")
+            agent.chmod(0o755)
+            self.assertIsNone(session.polkit_agent(rootfs))
+
+
+class NativeLauncherTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.temporary = tempfile.TemporaryDirectory()
+        cls.launcher = Path(cls.temporary.name) / "launcher"
+        cls.dbus_update = Path(cls.temporary.name) / "dbus-update"
+        cls.dbus_update.write_text(
+            "#!/bin/sh\n"
+            "if test -n \"$SPACES_DBUS_ENV_NAMES\"; then\n"
+            "  printf '%s\\n' \"$@\" > \"$SPACES_DBUS_ENV_NAMES\"\n"
+            "fi\n"
+            "if test -n \"$SPACES_DBUS_DISPLAY\"; then\n"
+            "  printf '%s' \"$DISPLAY\" > \"$SPACES_DBUS_DISPLAY\"\n"
+            "fi\n"
+            "if test \"$SPACES_DBUS_UPDATE_FAIL\" = 1; then\n"
+            "  exit 23\n"
+            "fi\n",
+            encoding="utf-8",
+        )
+        cls.dbus_update.chmod(0o755)
+        source = (
+            Path(__file__).parents[1]
+            / "native"
+            / "spaces_session_launcher.c"
+        )
+        try:
+            subprocess.run(
+                [
+                    "cc",
+                    "-std=gnu11",
+                    "-O2",
+                    str(source),
+                    (
+                        "-DDBUS_UPDATE_ACTIVATION_ENVIRONMENT="
+                        f'"{cls.dbus_update}"'
+                    ),
+                    "-Wl,--wrap=__libc_start_main",
+                    "-o",
+                    str(cls.launcher),
+                ],
+                check=True,
+                capture_output=True,
+            )
+        except (OSError, subprocess.CalledProcessError) as error:
+            raise unittest.SkipTest(f"C compiler unavailable: {error}")
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.temporary.cleanup()
+
+    @staticmethod
+    def wait_for_path(path: Path, timeout: float = 3) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if path.exists():
+                return True
+            time.sleep(0.01)
+        return path.exists()
+
+    def test_preserves_application_exit_status(self) -> None:
+        completed = subprocess.run(
+            [self.launcher, "--", "/bin/sh", "-c", "exit 37"],
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 37)
+
+    def test_updates_guest_dbus_environment_before_application(self) -> None:
+        names = Path(self.temporary.name) / "dbus-environment-names"
+        display = Path(self.temporary.name) / "dbus-environment-display"
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "DISPLAY": ":77",
+                "SPACES_DBUS_DISPLAY": str(display),
+                "SPACES_DBUS_ENV_NAMES": str(names),
+                "WAYLAND_DISPLAY": "/run/spaces/wayland-0",
+            }
+        )
+        completed = subprocess.run(
             [
-                mock.call("work", plan.staging_root),
-                mock.call(
-                    "work",
-                    plan.staging_root,
-                    plan.destination_root,
+                self.launcher,
+                "--dbus-env",
+                "DISPLAY",
+                "--dbus-env",
+                "WAYLAND_DISPLAY",
+                "--",
+                "/bin/sh",
+                "-c",
+                f"test -f {shlex.quote(str(names))}",
+            ],
+            check=False,
+            env=environment,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(completed.returncode, 0)
+        self.assertEqual(names.read_text(encoding="utf-8"), (
+            "DISPLAY\nWAYLAND_DISPLAY\n"
+        ))
+        self.assertEqual(display.read_text(encoding="utf-8"), ":77")
+        self.assertEqual(completed.stdout, "")
+        self.assertEqual(completed.stderr, "")
+
+    def test_dbus_environment_failure_does_not_block_application(self) -> None:
+        environment = os.environ.copy()
+        environment["SPACES_DBUS_UPDATE_FAIL"] = "1"
+        completed = subprocess.run(
+            [
+                self.launcher,
+                "--dbus-env",
+                "DISPLAY",
+                "--",
+                "/bin/sh",
+                "-c",
+                "exit 29",
+            ],
+            check=False,
+            env=environment,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(completed.returncode, 29)
+        self.assertEqual(completed.stdout, "")
+        self.assertEqual(
+            completed.stderr,
+            (
+                "spaces: warning: could not update guest D-Bus "
+                "activation environment\n"
+            ),
+        )
+
+    def test_hung_dbus_environment_update_is_bounded(self) -> None:
+        original = self.dbus_update.read_text(encoding="utf-8")
+        body = original.removeprefix("#!/bin/sh\n")
+        self.dbus_update.write_text(
+            "#!/bin/sh\n"
+            "if test \"$SPACES_DBUS_UPDATE_HANG\" = 1; then\n"
+            "  exec sleep 5\n"
+            "fi\n"
+            + body,
+            encoding="utf-8",
+        )
+        environment = os.environ.copy()
+        environment["SPACES_DBUS_UPDATE_HANG"] = "1"
+        started = time.monotonic()
+        try:
+            completed = subprocess.run(
+                [
+                    self.launcher,
+                    "--dbus-env",
+                    "DISPLAY",
+                    "--",
+                    "/bin/sh",
+                    "-c",
+                    "exit 31",
+                ],
+                check=False,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+        finally:
+            self.dbus_update.write_text(original, encoding="utf-8")
+
+        self.assertEqual(completed.returncode, 31)
+        self.assertLess(time.monotonic() - started, 2)
+
+    def test_agent_stops_after_daemonized_descendants_exit(self) -> None:
+        agent_pid = Path(self.temporary.name) / "lifecycle-agent-pid"
+        agent_stopped = Path(self.temporary.name) / "lifecycle-agent-stopped"
+        application_stopped = (
+            Path(self.temporary.name) / "lifecycle-application-stopped"
+        )
+        agent = Path(self.temporary.name) / "lifecycle-agent"
+        agent.write_text(
+            "#!/bin/sh\n"
+            "printf '%s' \"$$\" > \"$SPACES_AGENT_MARKER\"\n"
+            "trap 'printf stopped > \"$SPACES_AGENT_STOPPED\"; exit 0' TERM\n"
+            "while :; do sleep 0.05; done\n",
+            encoding="utf-8",
+        )
+        agent.chmod(0o755)
+        environment = os.environ.copy()
+        environment["SPACES_AGENT_MARKER"] = str(agent_pid)
+        environment["SPACES_AGENT_STOPPED"] = str(agent_stopped)
+        started = time.monotonic()
+        completed = subprocess.run(
+            [
+                self.launcher,
+                "--agent",
+                agent,
+                "--",
+                "/bin/sh",
+                "-c",
+                (
+                    f"(sleep 0.3; printf stopped > "
+                    f"{shlex.quote(str(application_stopped))}) & exit 7"
                 ),
             ],
+            check=False,
+            env=environment,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
+        try:
+            self.assertEqual(completed.returncode, 7)
+            self.assertLess(time.monotonic() - started, 0.2)
+            self.assertTrue(self.wait_for_path(agent_pid))
+            self.assertFalse(agent_stopped.exists())
+            self.assertTrue(self.wait_for_path(application_stopped))
+            self.assertTrue(self.wait_for_path(agent_stopped))
+        finally:
+            if agent_pid.exists() and not agent_stopped.exists():
+                try:
+                    os.killpg(
+                        int(agent_pid.read_text(encoding="utf-8")),
+                        signal.SIGTERM,
+                    )
+                except ProcessLookupError:
+                    pass
 
-    def test_session_signals_forward_after_unit_start(self) -> None:
-        state = session._SessionSignalState()
-        process = mock.Mock()
-        process.poll.return_value = None
-        state.process = process
-        handlers: dict[int, object] = {}
-
-        def set_handler(signum: int, handler: object) -> None:
-            handlers[signum] = handler
-
-        with mock.patch.object(
-            session.signal,
-            "signal",
-            side_effect=set_handler,
-        ):
-            with session._forward_session_signals(state):
-                handler = handlers[session.signal.SIGTERM]
-                assert callable(handler)
-                handler(session.signal.SIGTERM, None)
-
-        self.assertEqual(state.signum, session.signal.SIGTERM)
-        process.send_signal.assert_called_once_with(session.signal.SIGTERM)
-
-    def test_session_signal_before_unit_start_interrupts_setup(self) -> None:
-        state = session._SessionSignalState()
-        handlers: dict[int, object] = {}
-
-        def set_handler(signum: int, handler: object) -> None:
-            handlers[signum] = handler
-
-        with (
-            mock.patch.object(
-                session.signal,
-                "signal",
-                side_effect=set_handler,
-            ),
-            self.assertRaises(session._SessionInterrupted),
-        ):
-            with session._forward_session_signals(state):
-                handler = handlers[session.signal.SIGHUP]
-                assert callable(handler)
-                handler(session.signal.SIGHUP, None)
-
-    def test_session_destination_remains_until_unit_stops(self) -> None:
-        plan = session._SessionPlan(
-            binds=(),
-            environment={"DISPLAY": "localhost:10.0"},
-            staging_root="/run/spaces-staging/token",
-            destination_root="/tmp/.spaces-session-token",
+    def test_hides_polkit_agent_stdio(self) -> None:
+        marker = Path(self.temporary.name) / "agent-pid"
+        stopped = Path(self.temporary.name) / "agent-stopped"
+        agent = Path(self.temporary.name) / "agent"
+        agent.write_text(
+            "#!/bin/sh\n"
+            "printf '%s' \"$$\" > \"$SPACES_AGENT_MARKER\"\n"
+            "printf 'agent stdout spam\\n'\n"
+            "printf 'agent stderr spam\\n' >&2\n"
+            "trap 'printf stopped > \"$SPACES_AGENT_STOPPED\"; exit 0' TERM\n"
+            "while :; do sleep 0.05; done\n",
+            encoding="utf-8",
         )
-        account = mock.Mock(pw_name="alice")
-        process = mock.Mock()
-        process.poll.return_value = 0
-        process.wait.return_value = 0
-        temporary_context = mock.MagicMock()
-        temporary_context.__enter__.return_value = self.temporary.name
-        removed = mock.Mock()
-        with (
-            mock.patch.object(
-                session.tempfile,
-                "TemporaryDirectory",
-                return_value=temporary_context,
-            ),
-            mock.patch.object(
-                session,
-                "_prepare_session_plan",
-                return_value=plan,
-            ),
-            mock.patch.object(session, "_ensure_guest_user_manager"),
-            mock.patch.object(
-                session,
-                "_prepare_guest_session_directories",
-            ),
-            mock.patch.object(
-                session,
-                "_session_unit_command",
-                return_value=["systemd-run"],
-            ),
-            mock.patch.object(
-                session.subprocess,
-                "Popen",
-                return_value=process,
-            ),
-            mock.patch.object(
-                session,
-                "_wait_for_private_unit",
-                return_value=False,
-            ),
-            mock.patch.object(
-                session,
-                "_remove_guest_session_paths",
-                removed,
-            ),
-            mock.patch.object(session, "_stop_session_unit") as stop,
-            mock.patch.object(
-                session.signal,
-                "signal",
-                return_value=None,
-            ),
-        ):
-            self.assertEqual(
-                session.enter(
-                    account,
-                    "work",
-                    [],
-                    {
-                        "version": 1,
-                        "resources": ["appearance", "x11"],
-                        "environment": {"DISPLAY": "localhost:10.0"},
-                    },
-                ),
-                0,
-            )
-
-        stop.assert_called_once()
-        removed.assert_called_once_with(
-            "work",
-            plan.staging_root,
-            plan.destination_root,
+        agent.chmod(0o755)
+        environment = os.environ.copy()
+        environment["SPACES_AGENT_MARKER"] = str(marker)
+        environment["SPACES_AGENT_STOPPED"] = str(stopped)
+        completed = subprocess.run(
+            [
+                self.launcher,
+                "--agent",
+                agent,
+                "--",
+                "/bin/sh",
+                "-c",
+                "sleep 0.1; printf 'application output\\n'",
+            ],
+            check=False,
+            env=environment,
+            capture_output=True,
+            text=True,
         )
+        try:
+            self.assertEqual(completed.returncode, 0)
+            self.assertEqual(completed.stdout, "application output\n")
+            self.assertEqual(completed.stderr, "")
+            self.assertTrue(self.wait_for_path(stopped))
+        finally:
+            if marker.exists() and not stopped.exists():
+                try:
+                    os.killpg(
+                        int(marker.read_text(encoding="utf-8")),
+                        signal.SIGTERM,
+                    )
+                except ProcessLookupError:
+                    pass
+
+    def test_application_receives_signals_directly(self) -> None:
+        process = subprocess.Popen(
+            [
+                self.launcher,
+                "--",
+                "/bin/sh",
+                "-c",
+                "trap 'exit 23' TERM; while :; do sleep 0.05; done",
+            ]
+        )
+        time.sleep(0.1)
+        process.terminate()
+        self.assertEqual(process.wait(timeout=5), 23)
+
+    @unittest.skipUnless(shutil.which("script"), "script is unavailable")
+    def test_application_remains_in_terminal_foreground(self) -> None:
+        application = [
+            self.launcher,
+            "--",
+            "/bin/sh",
+            "-c",
+            'read line; test "$line" = ready',
+        ]
+        completed = subprocess.run(
+            [
+                "script",
+                "--quiet",
+                "--return",
+                "--command",
+                shlex.join(str(item) for item in application),
+                "/dev/null",
+            ],
+            input="ready\n",
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    @unittest.skipUnless(shutil.which("script"), "script is unavailable")
+    def test_terminal_ctrl_c_reaches_application(self) -> None:
+        application = [
+            self.launcher,
+            "--",
+            "/bin/sh",
+            "-c",
+            "trap 'exit 23' INT; while :; do sleep 0.05; done",
+        ]
+        process = subprocess.Popen(
+            [
+                "script",
+                "--quiet",
+                "--return",
+                "--command",
+                shlex.join(str(item) for item in application),
+                "/dev/null",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        assert process.stdin is not None
+        try:
+            time.sleep(0.1)
+            process.stdin.write(b"\x03")
+            process.stdin.flush()
+            self.assertEqual(process.wait(timeout=5), 23)
+        finally:
+            process.stdin.close()
+            if process.poll() is None:
+                process.terminate()
+                process.wait(timeout=5)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -66,4 +66,5 @@ install -Dm644 data/pam/spaces.system-auth \
 /usr/lib/spaces/spaces-pam-worker
 %dir /usr/lib/spaces/guest
 /usr/lib/spaces/guest/pam_spaces.so
+/usr/lib/spaces/guest/spaces-session-launcher
 %{_unitdir}/spaces@.service

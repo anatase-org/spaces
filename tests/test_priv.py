@@ -377,6 +377,7 @@ class PrivilegedTests(unittest.TestCase):
             "basic",
             [],
             host_authentication=False,
+            desktop=False,
         )
         space = self.state_root / "work"
         space.mkdir(parents=True)
@@ -451,6 +452,7 @@ class PrivilegedTests(unittest.TestCase):
             "basic",
             [],
             host_authentication=False,
+            desktop=False,
         )
         space = self.state_root / "work"
         space.mkdir(parents=True)
@@ -545,37 +547,13 @@ class PrivilegedTests(unittest.TestCase):
 
         enter.assert_called_once_with("alice@work", ["--help"])
 
-    def test_enter_parser_decodes_session_manifest(self) -> None:
-        manifest = {
-            "version": 1,
-            "resources": ["appearance", "x11"],
-            "environment": {"DISPLAY": ":0"},
-        }
-        with (
-            mock.patch.object(priv.os, "geteuid", return_value=0),
-            mock.patch.object(priv, "enter", return_value=42) as enter,
-        ):
-            self.assertEqual(
-                priv.main(
-                    [
-                        "enter",
-                        "--session",
-                        json.dumps(manifest),
-                        "alice@work",
-                        "--",
-                        "/usr/bin/kate",
-                    ]
-                ),
-                42,
+    def test_enter_parser_has_no_session_manifest_option(self) -> None:
+        with self.assertRaises(SystemExit):
+            priv.build_parser().parse_args(
+                ["enter", "--session", "{}", "alice@work"]
             )
 
-        enter.assert_called_once_with(
-            "alice@work",
-            ["/usr/bin/kate"],
-            session_manifest=manifest,
-        )
-
-    def test_enter_routes_validated_session_to_private_shell(self) -> None:
+    def test_enter_reads_root_environment_file_and_uses_launcher(self) -> None:
         info = core.create_info(
             "work",
             {"id": "custom"},
@@ -584,16 +562,6 @@ class PrivilegedTests(unittest.TestCase):
             [],
             host_authentication=False,
         )
-        supplied = {
-            "version": 1,
-            "resources": ["appearance", "x11"],
-            "environment": {"DISPLAY": ":0"},
-        }
-        validated = {
-            "version": 1,
-            "resources": ["appearance", "x11"],
-            "environment": {"DISPLAY": ":0", "TERM": "xterm"},
-        }
         account = mock.Mock(
             pw_uid=1000,
             pw_gid=1000,
@@ -607,33 +575,29 @@ class PrivilegedTests(unittest.TestCase):
             mock.patch.object(priv, "_ensure_space_started", return_value=0),
             mock.patch.object(
                 session,
-                "validate_manifest",
-                return_value=validated,
-            ) as validate,
-            mock.patch.object(
-                session,
-                "enter",
-                return_value=42,
-            ) as session_shell,
+                "desktop_environment",
+                return_value={"DISPLAY": ":0"},
+            ) as desktop_environment,
+            mock.patch.object(session, "polkit_agent", return_value="/agent"),
+            mock.patch.object(priv, "_space_directory", return_value=Path("/space")),
+            mock.patch.object(priv, "_machine_shell", return_value=42) as shell,
         ):
             self.assertEqual(
-                priv.enter(
-                    "alice@work",
-                    ["/usr/bin/kate"],
-                    session_manifest=supplied,
-                ),
+                priv.enter("alice@work", ["/usr/bin/kate"]),
                 42,
             )
 
-        validate.assert_called_once_with(supplied)
-        session_shell.assert_called_once_with(
-            account,
+        desktop_environment.assert_called_once_with("work", 1000)
+        shell.assert_called_once_with(
+            "alice",
             "work",
             ["/usr/bin/kate"],
-            validated,
+            environment={"DISPLAY": ":0"},
+            launcher=True,
+            agent="/agent",
         )
 
-    def test_invalid_session_is_rejected_before_starting_space(self) -> None:
+    def test_disabled_desktop_uses_launcher_without_environment(self) -> None:
         info = core.create_info(
             "work",
             {"id": "custom"},
@@ -641,6 +605,7 @@ class PrivilegedTests(unittest.TestCase):
             "basic",
             [],
             host_authentication=False,
+            desktop=False,
         )
         account = mock.Mock(
             pw_uid=1000,
@@ -650,48 +615,13 @@ class PrivilegedTests(unittest.TestCase):
             mock.patch.object(priv, "_caller_uid", return_value=1000),
             mock.patch.object(priv.pwd, "getpwnam", return_value=account),
             mock.patch.object(priv, "_space_info", return_value=info),
-            mock.patch.object(
-                priv.session,
-                "validate_manifest",
-                side_effect=core.SpacesError("unsafe"),
-            ),
-            mock.patch.object(priv, "_ensure_space_started") as start,
+            mock.patch.object(priv, "_ensure_space_started", return_value=0),
+            mock.patch.object(session, "desktop_environment") as environment,
+            mock.patch.object(priv, "_machine_shell", return_value=0) as shell,
         ):
-            with self.assertRaises(core.SpacesError):
-                priv.enter(
-                    "alice@work",
-                    [],
-                    session_manifest={
-                        "version": 1,
-                        "resources": ["devices"],
-                        "environment": {},
-                    },
-                )
-
-        start.assert_not_called()
-
-    def test_root_entry_rejects_session_passthrough(self) -> None:
-        account = mock.Mock(
-            pw_uid=0,
-            pw_name="root",
-        )
-        with (
-            mock.patch.object(priv, "_caller_uid", return_value=0),
-            mock.patch.object(priv.pwd, "getpwnam", return_value=account),
-            mock.patch.object(priv, "_space_info") as space_info,
-        ):
-            with self.assertRaises(core.SpacesError):
-                priv.enter(
-                    "root@work",
-                    [],
-                    session_manifest={
-                        "version": 1,
-                        "resources": ["appearance", "x11"],
-                        "environment": {"DISPLAY": ":0"},
-                    },
-                )
-
-        space_info.assert_not_called()
+            self.assertEqual(priv.enter("alice@work", []), 0)
+        environment.assert_not_called()
+        shell.assert_called_once_with("alice", "work", [])
 
     def test_machine_shell_runs_direct(self) -> None:
         completed = subprocess.CompletedProcess([], 0)
@@ -714,6 +644,55 @@ class PrivilegedTests(unittest.TestCase):
                 "work",
                 "id",
                 "-u",
+            ],
+        )
+
+    def test_machine_shell_passes_file_environment_to_pam_command(self) -> None:
+        completed = subprocess.CompletedProcess([], 0)
+        with mock.patch.object(
+            priv.subprocess, "run", return_value=completed
+        ) as run:
+            self.assertEqual(
+                priv._machine_shell(
+                    "alice",
+                    "work",
+                    ["/usr/bin/code", "--reuse-window"],
+                    environment={
+                        "WAYLAND_DISPLAY": (
+                            "/run/spaces/desktop/1000/wayland/wayland-0"
+                        ),
+                        "DISPLAY": ":0",
+                    },
+                    launcher=True,
+                    agent="/usr/libexec/polkit-agent",
+                ),
+                0,
+            )
+
+        self.assertEqual(
+            run.call_args.args[0],
+            [
+                "/usr/bin/machinectl",
+                "--quiet",
+                "--uid=alice",
+                "--setenv=DISPLAY=:0",
+                (
+                    "--setenv=WAYLAND_DISPLAY="
+                    "/run/spaces/desktop/1000/wayland/wayland-0"
+                ),
+                "--",
+                "shell",
+                "work",
+                "/run/spaces-host/bin/spaces-session-launcher",
+                "--dbus-env",
+                "DISPLAY",
+                "--dbus-env",
+                "WAYLAND_DISPLAY",
+                "--agent",
+                "/usr/libexec/polkit-agent",
+                "--",
+                "/usr/bin/code",
+                "--reuse-window",
             ],
         )
 

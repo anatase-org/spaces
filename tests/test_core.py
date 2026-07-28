@@ -34,6 +34,11 @@ class CoreTests(unittest.TestCase):
                 "/rootfs",
             ],
         )
+        self.assertIn("pkexec", ubuntu.PACKAGES)
+        self.assertIn("polkit-kde-agent-1", ubuntu.PACKAGES)
+        self.assertIn("breeze", ubuntu.PACKAGES)
+        self.assertIn("plasma-integration", ubuntu.PACKAGES)
+        self.assertNotIn("python3", ubuntu.PACKAGES)
 
     def test_ubuntu_reconciles_host_authentication_profile(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -195,6 +200,7 @@ class CoreTests(unittest.TestCase):
             host_authentication,
             selected_home,
             administrator,
+            desktop,
         ) = core.defaults_from_info(
             None,
             core.Identity(1000, 1000, Path("/home/user")),
@@ -203,6 +209,7 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(host_authentication)
         self.assertEqual(selected_home, ["Projects", "Downloads"])
         self.assertTrue(administrator)
+        self.assertTrue(desktop)
 
     def test_space_name_validation(self) -> None:
         self.assertEqual(core.validate_space_name("project-1"), "project-1")
@@ -289,6 +296,9 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(
             info["permissions"]["system"]["host_authentication"]
         )
+        self.assertTrue(
+            info["permissions"]["users"]["1000"]["permissions"]["desktop"]
+        )
 
     def test_existing_administrator_permission_is_used_as_default(self) -> None:
         identity = core.Identity(1000, 1000, Path("/home/user"))
@@ -301,7 +311,7 @@ class CoreTests(unittest.TestCase):
             administrator=False,
         )
 
-        _network, _host_auth, _home, administrator = core.defaults_from_info(
+        _network, _host_auth, _home, administrator, _desktop = core.defaults_from_info(
             info, identity
         )
 
@@ -319,7 +329,7 @@ class CoreTests(unittest.TestCase):
         del info["permissions"]["users"]["1000"]["permissions"]["administrator"]
 
         core.validate_info(info)
-        _network, _host_auth, _home, administrator = core.defaults_from_info(
+        _network, _host_auth, _home, administrator, _desktop = core.defaults_from_info(
             info, identity
         )
 
@@ -333,7 +343,7 @@ class CoreTests(unittest.TestCase):
         del info["permissions"]["system"]["host_authentication"]
 
         core.validate_info(info)
-        _network, host_auth, _home, _administrator = core.defaults_from_info(
+        _network, host_auth, _home, _administrator, _desktop = core.defaults_from_info(
             info, identity
         )
 
@@ -362,6 +372,19 @@ class CoreTests(unittest.TestCase):
         )
         info["permissions"]["users"]["1000"]["permissions"]["administrator"] = 1
 
+        with self.assertRaises(core.SpacesError):
+            core.validate_info(info)
+
+    def test_desktop_permission_defaults_true_and_requires_boolean(self) -> None:
+        identity = core.Identity(1000, 1000, Path("/home/user"))
+        info = core.create_info(
+            "work", {"id": "custom"}, identity, "basic", [], desktop=False
+        )
+        self.assertFalse(core.defaults_from_info(info, identity)[4])
+        del info["permissions"]["users"]["1000"]["permissions"]["desktop"]
+        core.validate_info(info)
+        self.assertTrue(core.defaults_from_info(info, identity)[4])
+        info["permissions"]["users"]["1000"]["permissions"]["desktop"] = 1
         with self.assertRaises(core.SpacesError):
             core.validate_info(info)
 

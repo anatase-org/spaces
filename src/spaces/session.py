@@ -1,63 +1,51 @@
-"""Host desktop-session data passed to one ``spaces enter`` invocation.
+"""Login-scoped host desktop forwarding for running spaces.
 
-This module is deliberately standard-library-only because it is imported by
-the privileged helper as well as the user-facing CLI.
+Only this module knows which host-session resources may cross into a space.
+The launch monitor supplies trusted logind records; terminal environments and
+callers never supply paths, mount destinations, or systemd properties.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import pwd
 import re
-import secrets
-import signal
 import stat
 import subprocess
 import tempfile
 import time
-from collections.abc import Mapping
-from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Iterator
+from pathlib import Path, PurePosixPath
+from typing import Protocol
 
 from . import _
 from . import core
 
 
-SESSION_VERSION = 1
 MAX_ENVIRONMENT_VALUE = 4096
-# systemd creates missing BindReadOnlyPaths destinations as root, even for a
-# transient unit with private mounts. Prepare these persistent guest-home
-# targets before the space starts so applications can write beside them.
-CONFIG_DIRECTORIES = (
-    "gtk-3.0",
-    "gtk-4.0",
-    "fontconfig",
-)
-CONFIG_FILES = ("kdeglobals",)
-SYSTEMCTL = "/usr/bin/systemctl"
 MACHINECTL = "/usr/bin/machinectl"
-SYSTEMD_RUN = "/usr/bin/systemd-run"
-RESOURCE_KINDS = frozenset(
-    {"appearance", "pipewire", "pulseaudio", "wayland", "x11"}
-)
+SYSTEMCTL = "/usr/bin/systemctl"
+RUNTIME_ROOT = Path("/run/spaces")
+DESKTOP_ROOT = PurePosixPath("/run/spaces/desktop")
+ENVIRONMENT_DIRECTORY = "env"
 LOCAL_DISPLAY_PATTERN = re.compile(
     r"^(?:(?:unix)/)?:(?P<number>[0-9]+)(?:\.[0-9]+)?$"
 )
-REMOTE_DISPLAY_PATTERN = re.compile(
-    r"^[A-Za-z0-9_.-]+:[0-9]+(?:\.[0-9]+)?$"
-)
 SOCKET_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
-WAYLAND_DISPLAY_PATTERN = SOCKET_NAME_PATTERN
+STATUS_STATES = frozenset({"active", "inactive", "pending"})
 
-# These values affect desktop-toolkit behaviour but do not identify arbitrary
-# host paths. Path-bearing variables are handled separately by the privileged
-# side.
+# Do not add DBUS_SESSION_BUS_ADDRESS, XDG_RUNTIME_DIR, or XDG_SESSION_ID here.
+# Those identify the host login and must remain guest-native values established
+# by pam_systemd. Every entry in this set is safe to copy from a selected host
+# graphical session into a PAM-backed command environment.
 DESKTOP_ENVIRONMENT = frozenset(
     {
         "COLORTERM",
         "DESKTOP_SESSION",
+        "DISPLAY",
+        "FONTCONFIG_FILE",
         "GDK_BACKEND",
         "GDK_DPI_SCALE",
         "GDK_SCALE",
@@ -83,6 +71,7 @@ DESKTOP_ENVIRONMENT = frozenset(
         "LC_TELEPHONE",
         "LC_TIME",
         "PIPEWIRE_REMOTE",
+        "PIPEWIRE_RUNTIME_DIR",
         "PULSE_SERVER",
         "QT_AUTO_SCREEN_SCALE_FACTOR",
         "QT_ENABLE_HIGHDPI_SCALING",
@@ -95,17 +84,13 @@ DESKTOP_ENVIRONMENT = frozenset(
         "QT_STYLE_OVERRIDE",
         "QT_WAYLAND_DISABLE_WINDOWDECORATION",
         "SDL_VIDEODRIVER",
-        "TERM",
-        "TERM_PROGRAM",
-        "TERM_PROGRAM_VERSION",
-        "VTE_VERSION",
         "WAYLAND_DISPLAY",
         "XAUTHORITY",
-        "XDG_CONFIG_HOME",
+        "XCURSOR_PATH",
         "XCURSOR_SIZE",
         "XCURSOR_THEME",
-        "XDG_DATA_HOME",
         "XDG_CURRENT_DESKTOP",
+        "XDG_DATA_DIRS",
         "XDG_MENU_PREFIX",
         "XDG_SESSION_CLASS",
         "XDG_SESSION_DESKTOP",
@@ -113,7 +98,64 @@ DESKTOP_ENVIRONMENT = frozenset(
         "XMODIFIERS",
     }
 )
-DISPLAY_ENVIRONMENT = frozenset({"DISPLAY", "WAYLAND_DISPLAY"})
+CONFIG_DIRECTORIES = ("gtk-3.0", "gtk-4.0", "fontconfig")
+CONFIG_FILES = ("kdeglobals",)
+POLKIT_AGENTS = (
+    "/usr/libexec/polkit-kde-authentication-agent-1",
+    "/usr/lib/polkit-kde-authentication-agent-1",
+)
+POLKIT_AGENT_GLOB = "usr/lib/*/libexec/polkit-kde-authentication-agent-1"
+
+
+class DesktopUser(Protocol):
+    uid: int
+    gid: int
+    name: str
+    host_home: Path
+    guest_home: PurePosixPath
+    desktop: bool
+
+
+@dataclass(frozen=True)
+class LoginSession:
+    """The logind properties relevant to graphical-session selection."""
+
+    session_id: str
+    active: bool
+    remote: bool
+    session_type: str
+    session_class: str
+
+
+@dataclass(frozen=True, order=True)
+class DesktopBind:
+    """A validated and identity-pinned host resource."""
+
+    destination: str
+    source: Path
+    device: int
+    inode: int
+
+
+@dataclass(frozen=True)
+class DesktopPlan:
+    session_id: str
+    binds: tuple[DesktopBind, ...]
+    environment: dict[str, str]
+    generated_root: Path | None = None
+
+
+class DesktopSetupError(Exception):
+    """A forwarding setup failed but the space may continue safely."""
+
+
+class DesktopRevocationError(Exception):
+    """A stale host resource could not be removed safely."""
+
+
+@dataclass
+class _ActiveDesktop:
+    plan: DesktopPlan
 
 
 def prepare_user_paths(
@@ -122,13 +164,15 @@ def prepare_user_paths(
     gid: int,
     user_name: str,
 ) -> None:
-    """Prepare safe guest-owned targets for appearance-data mounts."""
+    """Precreate guest-owned configuration targets used by read-only binds.
+
+    Keep this here with the forwarding constants: adding another conventional
+    home destination without preparing it first makes ``machinectl bind
+    --mkdir`` create a root-owned parent and breaks unrelated application data.
+    """
 
     directory_flags = (
-        os.O_RDONLY
-        | os.O_DIRECTORY
-        | os.O_NOFOLLOW
-        | os.O_CLOEXEC
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
     )
     home_descriptor: int | None = None
     config_descriptor: int | None = None
@@ -139,26 +183,18 @@ def prepare_user_paths(
         except FileExistsError:
             pass
         config_descriptor = os.open(
-            ".config",
-            directory_flags,
-            dir_fd=home_descriptor,
+            ".config", directory_flags, dir_fd=home_descriptor
         )
         os.close(home_descriptor)
         home_descriptor = None
         os.fchown(config_descriptor, uid, gid)
         for name in CONFIG_DIRECTORIES:
             try:
-                os.mkdir(
-                    name,
-                    mode=0o700,
-                    dir_fd=config_descriptor,
-                )
+                os.mkdir(name, mode=0o700, dir_fd=config_descriptor)
             except FileExistsError:
                 pass
             descriptor = os.open(
-                name,
-                directory_flags,
-                dir_fd=config_descriptor,
+                name, directory_flags, dir_fd=config_descriptor
             )
             try:
                 os.fchown(descriptor, uid, gid)
@@ -191,10 +227,7 @@ def prepare_user_paths(
             try:
                 if not stat.S_ISREG(os.fstat(descriptor).st_mode):
                     raise core.SpacesError(
-                        _(
-                            "Unsafe user session path for {name!r}.",
-                            name=user_name,
-                        )
+                        _("Unsafe user session path for {name!r}.", name=user_name)
                     )
                 os.fchown(descriptor, uid, gid)
                 if created:
@@ -219,238 +252,86 @@ def prepare_user_paths(
 def _safe_value(value: object) -> bool:
     return (
         isinstance(value, str)
-        and len(value) <= MAX_ENVIRONMENT_VALUE
+        and 0 < len(value) <= MAX_ENVIRONMENT_VALUE
         and "\0" not in value
         and "\n" not in value
         and "\r" not in value
     )
 
 
-def _is_socket(path: Path) -> bool:
-    try:
-        metadata = path.lstat()
-    except OSError:
-        return False
-    return stat.S_ISSOCK(metadata.st_mode)
+def _parse_environment(output: str) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for line in output.splitlines():
+        name, separator, value = line.partition("=")
+        if separator and name in DESKTOP_ENVIRONMENT | {
+            "DBUS_SESSION_BUS_ADDRESS",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_RUNTIME_DIR",
+            "XDG_SESSION_ID",
+        } and _safe_value(value):
+            result[name] = value
+    return result
 
 
-def _runtime_socket(runtime: Path, value: str) -> Path | None:
-    candidate = Path(value)
-    if candidate.is_absolute():
-        try:
-            resolved = candidate.resolve(strict=False)
-            resolved_runtime = runtime.resolve(strict=False)
-        except (OSError, RuntimeError):
-            return None
-        if not (
-            resolved == resolved_runtime
-            or resolved.is_relative_to(resolved_runtime)
-        ):
-            return None
-    elif SOCKET_NAME_PATTERN.fullmatch(value):
-        candidate = runtime / value
-    else:
+def host_manager_environment(user: DesktopUser) -> dict[str, str]:
+    """Read the host user manager without creating another login session."""
+
+    # Do not use ``--machine=<user>@.host`` here. That transport starts a
+    # systemd-stdio-bridge PAM session; logind then wakes this monitor again,
+    # turning one environment read into an unbounded reconciliation loop.
+    completed = subprocess.run(
+        [
+            SYSTEMCTL,
+            "--user",
+            "--no-ask-password",
+            "show-environment",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            "DBUS_SESSION_BUS_ADDRESS": (
+                f"unix:path=/run/user/{user.uid}/bus"
+            ),
+            "XDG_RUNTIME_DIR": f"/run/user/{user.uid}",
+        },
+        user=user.uid,
+        group=user.gid,
+    )
+    if completed.returncode != 0:
+        return {}
+    return _parse_environment(completed.stdout)
+
+
+def select_graphical_session(
+    sessions: tuple[LoginSession, ...],
+    environment: dict[str, str],
+) -> LoginSession | None:
+    """Select one unambiguous active local graphical user session."""
+
+    manager_session = environment.get("XDG_SESSION_ID")
+    if not manager_session:
         return None
-    return candidate if _is_socket(candidate) else None
+    candidates = [
+        item
+        for item in sessions
+        if item.session_id == manager_session
+        and item.active
+        and not item.remote
+        and item.session_class == "user"
+        and item.session_type in {"wayland", "x11"}
+    ]
+    return candidates[0] if len(candidates) == 1 else None
 
 
-def discover(
-    environment: Mapping[str, str] | None = None,
-) -> dict[str, Any] | None:
-    """Capture the allowlisted part of the launching terminal's session."""
-
-    source = os.environ if environment is None else environment
-    captured = {
-        name: value
-        for name in sorted(DESKTOP_ENVIRONMENT | DISPLAY_ENVIRONMENT)
-        if (value := source.get(name)) and _safe_value(value)
-    }
-    resources: set[str] = set()
-    runtime = Path(f"/run/user/{os.getuid()}")
-    has_runtime = source.get("XDG_RUNTIME_DIR") == str(runtime)
-
-    wayland = captured.get("WAYLAND_DISPLAY")
-    if (
-        wayland is not None
-        and has_runtime
-        and _runtime_socket(runtime, wayland) is not None
-    ):
-        resources.add("wayland")
-    else:
-        captured.pop("WAYLAND_DISPLAY", None)
-
-    display = captured.get("DISPLAY")
-    if display is not None:
-        local = LOCAL_DISPLAY_PATTERN.fullmatch(display)
-        if (
-            local is not None
-            and _is_socket(
-                Path(f"/tmp/.X11-unix/X{local.group('number')}")
-            )
-        ) or REMOTE_DISPLAY_PATTERN.fullmatch(display) is not None:
-            resources.add("x11")
-        else:
-            captured.pop("DISPLAY", None)
-    if "x11" not in resources:
-        captured.pop("XAUTHORITY", None)
-
-    pulse_server = captured.get("PULSE_SERVER")
-    if pulse_server is not None or (
-        has_runtime and _is_socket(runtime / "pulse" / "native")
-    ):
-        resources.add("pulseaudio")
-
-    pipewire_remote = captured.get("PIPEWIRE_REMOTE", "pipewire-0")
-    if (
-        captured.get("PIPEWIRE_REMOTE") is not None
-        or (
-            has_runtime
-            and SOCKET_NAME_PATTERN.fullmatch(pipewire_remote)
-            and _is_socket(runtime / pipewire_remote)
-        )
-    ):
-        resources.add("pipewire")
-
-    if not resources:
-        return None
-    resources.add("appearance")
-    return {
-        "version": SESSION_VERSION,
-        "resources": sorted(resources),
-        "environment": captured,
-    }
-
-
-def validate_manifest(value: object) -> dict[str, Any]:
-    """Validate the untrusted manifest received by the root helper."""
-
-    if not isinstance(value, dict) or set(value) != {
-        "version",
-        "resources",
-        "environment",
-    }:
-        raise core.SpacesError(_("Invalid session passthrough manifest."))
-    if value["version"] != SESSION_VERSION or isinstance(
-        value["version"], bool
-    ):
-        raise core.SpacesError(
-            _("Unsupported session passthrough manifest version.")
-        )
-    environment = value["environment"]
-    if not isinstance(environment, dict):
-        raise core.SpacesError(
-            _("Session passthrough environment must be an object.")
-        )
-    allowed = DESKTOP_ENVIRONMENT | DISPLAY_ENVIRONMENT
-    if not set(environment).issubset(allowed):
-        raise core.SpacesError(
-            _("Session passthrough contains an unsupported environment value.")
-        )
-    resources = value["resources"]
-    if (
-        not isinstance(resources, list)
-        or not resources
-        or any(not isinstance(item, str) for item in resources)
-        or len(resources) != len(set(resources))
-        or not set(resources).issubset(RESOURCE_KINDS)
-        or "appearance" not in resources
-    ):
-        raise core.SpacesError(
-            _("Session passthrough contains invalid resource kinds.")
-        )
-    for name, item in environment.items():
-        if not isinstance(name, str) or not _safe_value(item) or not item:
-            raise core.SpacesError(
-                _("Session passthrough contains an invalid environment value.")
-            )
-    requirements = {
-        "DISPLAY": "x11",
-        "PIPEWIRE_REMOTE": "pipewire",
-        "PULSE_SERVER": "pulseaudio",
-        "WAYLAND_DISPLAY": "wayland",
-        "XAUTHORITY": "x11",
-        "XDG_CONFIG_HOME": "appearance",
-        "XDG_DATA_HOME": "appearance",
-    }
-    if any(
-        name in environment and kind not in resources
-        for name, kind in requirements.items()
-    ):
-        raise core.SpacesError(
-            _("Session passthrough environment does not match its resources.")
-        )
-    if (
-        "wayland" in resources
-        and "WAYLAND_DISPLAY" not in environment
-    ) or ("x11" in resources and "DISPLAY" not in environment):
-        raise core.SpacesError(
-            _("Session passthrough resource has no selected endpoint.")
-        )
-    if not set(resources).intersection(
-        {"pipewire", "pulseaudio", "wayland", "x11"}
-    ):
-        raise core.SpacesError(
-            _("Session passthrough has no desktop-session endpoint.")
-        )
-    return {
-        "version": SESSION_VERSION,
-        "resources": list(resources),
-        "environment": dict(environment),
-    }
-
-
-@dataclass(frozen=True)
-class _SessionBind:
-    source: Path
-    staging: str
-    destination: str
-    device: int
-    inode: int
-
-
-@dataclass(frozen=True)
-class _SessionPlan:
-    binds: tuple[_SessionBind, ...]
-    environment: dict[str, str]
-    staging_root: str
-    destination_root: str
-
-
-@dataclass
-class _SessionSignalState:
-    process: subprocess.Popen[Any] | None = None
-    signum: int | None = None
-
-
-class _SessionInterrupted(Exception):
-    def __init__(self, signum: int) -> None:
-        super().__init__(signum)
-        self.signum = signum
-
-
-@contextmanager
-def _forward_session_signals(
-    state: _SessionSignalState,
-) -> Iterator[None]:
-    previous_handlers: dict[int, Any] = {}
-
-    def forward(signum: int, _frame: object) -> None:
-        if state.process is None:
-            if state.signum is not None:
-                return
-            state.signum = signum
-            raise _SessionInterrupted(signum)
-        state.signum = signum
-        if state.process.poll() is None:
-            state.process.send_signal(signum)
-
-    try:
-        for signum in (signal.SIGTERM, signal.SIGHUP):
-            previous_handlers[signum] = signal.signal(signum, forward)
-        yield
-    finally:
-        for signum, handler in previous_handlers.items():
-            signal.signal(signum, handler)
+def _permissions(metadata: os.stat_result, user: pwd.struct_passwd) -> int:
+    groups = set(os.getgrouplist(user.pw_name, user.pw_gid))
+    if metadata.st_uid == user.pw_uid:
+        return (metadata.st_mode >> 6) & 0o7
+    if metadata.st_gid in groups:
+        return (metadata.st_mode >> 3) & 0o7
+    return metadata.st_mode & 0o7
 
 
 def _validated_source(
@@ -458,137 +339,117 @@ def _validated_source(
     *,
     roots: tuple[Path, ...],
     kinds: tuple[int, ...],
+    user: pwd.struct_passwd,
     owner: int | None = None,
-    access_user: pwd.struct_passwd | None = None,
+    require_access: bool = True,
 ) -> tuple[Path, os.stat_result] | None:
-    try:
-        candidate = path.resolve(strict=False)
-        resolved_roots = tuple(root.resolve(strict=False) for root in roots)
-    except (OSError, RuntimeError) as error:
-        raise core.SpacesError(
-            _("Could not resolve session resource {path}.", path=path)
-        ) from error
-    if not any(
-        candidate == root or candidate.is_relative_to(root)
-        for root in resolved_roots
-    ):
-        raise core.SpacesError(
-            _("Session resource escapes its allowed directory: {path}.", path=path)
-    )
     try:
         path.lstat()
     except FileNotFoundError:
         return None
+    except OSError as error:
+        raise core.SpacesError(
+            _("Could not inspect desktop resource {path}: {error}", path=path, error=error)
+        ) from error
     try:
         resolved = path.resolve(strict=True)
+        resolved_roots = tuple(root.resolve(strict=True) for root in roots)
     except (OSError, RuntimeError) as error:
         raise core.SpacesError(
-            _("Could not resolve session resource {path}.", path=path)
+            _("Could not resolve desktop resource {path}.", path=path)
         ) from error
-    resolved_metadata = resolved.stat()
-    if stat.S_IFMT(resolved_metadata.st_mode) not in kinds:
+    if not any(
+        resolved == root or resolved.is_relative_to(root)
+        for root in resolved_roots
+    ):
         raise core.SpacesError(
-            _("Session resource has an unexpected file type: {path}.", path=path)
+            _("Desktop resource escapes its allowed directory: {path}.", path=path)
         )
-    if owner is not None and resolved_metadata.st_uid != owner:
+    metadata = resolved.stat()
+    if stat.S_IFMT(metadata.st_mode) not in kinds:
         raise core.SpacesError(
-            _(
-                "Session resource is not owned by the initiating user: "
-                "{path}.",
-                path=path,
-            )
+            _("Desktop resource has an unexpected file type: {path}.", path=path)
         )
-    if access_user is not None:
-        groups = set(
-            os.getgrouplist(access_user.pw_name, access_user.pw_gid)
+    if owner is not None and metadata.st_uid != owner:
+        raise core.SpacesError(
+            _("Desktop resource has the wrong owner: {path}.", path=path)
         )
-
-        def permissions(item: os.stat_result) -> int:
-            if item.st_uid == access_user.pw_uid:
-                return (item.st_mode >> 6) & 0o7
-            if item.st_gid in groups:
-                return (item.st_mode >> 3) & 0o7
-            return item.st_mode & 0o7
-
+    if require_access:
         required = (
             0o2
-            if stat.S_ISSOCK(resolved_metadata.st_mode)
+            if stat.S_ISSOCK(metadata.st_mode)
             else 0o5
-            if stat.S_ISDIR(resolved_metadata.st_mode)
+            if stat.S_ISDIR(metadata.st_mode)
             else 0o4
         )
-        if permissions(resolved_metadata) & required != required:
+        if _permissions(metadata, user) & required != required:
             raise core.SpacesError(
-                _(
-                    "Session resource is not accessible to the initiating "
-                    "user: {path}.",
-                    path=path,
-                )
+                _("Desktop resource is inaccessible to its user: {path}.", path=path)
             )
         for parent in resolved.parents:
-            parent_metadata = parent.stat()
-            if permissions(parent_metadata) & 0o1 == 0:
+            if _permissions(parent.stat(), user) & 0o1 == 0:
                 raise core.SpacesError(
                     _(
-                        "Session resource is not accessible to the initiating "
-                        "user: {path}.",
+                        "Desktop resource has an inaccessible parent: {path}.",
                         path=path,
                     )
                 )
-    return resolved, resolved_metadata
+            if parent in resolved_roots:
+                break
+    return resolved, metadata
 
 
-def _prepare_session_plan(
-    manifest: dict[str, Any],
-    user: pwd.struct_passwd,
-    token: str,
-    temporary: Path,
-) -> _SessionPlan:
-    environment = dict(manifest["environment"])
-    resources = set(manifest["resources"])
-    uid = user.pw_uid
-    runtime = Path(f"/run/user/{uid}")
-    home = Path(user.pw_dir)
-    staging_root = f"/run/spaces-staging/{token}"
-    destination_root = f"/tmp/.spaces-session-{token}"
-    binds: list[_SessionBind] = []
-
-    runtime_available = False
-    try:
-        runtime_metadata = runtime.stat()
-        runtime_available = (
-            runtime.is_dir()
-            and not runtime.is_symlink()
-            and runtime_metadata.st_uid == uid
-        )
-    except OSError:
-        pass
+def _plan(
+    user: DesktopUser,
+    selected: LoginSession,
+    source_environment: dict[str, str],
+    generated_root: Path,
+) -> DesktopPlan:
+    host_user = pwd.getpwuid(user.uid)
+    runtime = Path(f"/run/user/{user.uid}")
+    home = user.host_home
+    root = DESKTOP_ROOT / str(user.uid)
+    environment = {
+        name: value
+        for name, value in source_environment.items()
+        if name in DESKTOP_ENVIRONMENT and _safe_value(value)
+    }
+    for forbidden in (
+        "DBUS_SESSION_BUS_ADDRESS",
+        "FONTCONFIG_FILE",
+        "PIPEWIRE_RUNTIME_DIR",
+        "XCURSOR_PATH",
+        "XDG_DATA_DIRS",
+        "XDG_RUNTIME_DIR",
+        "XDG_SESSION_ID",
+    ):
+        environment.pop(forbidden, None)
+    binds: list[DesktopBind] = []
 
     def add(
-        label: str,
         source: Path,
-        destination: str,
+        destination: PurePosixPath | str,
         *,
         roots: tuple[Path, ...],
         kinds: tuple[int, ...],
         owner: int | None = None,
-        access_user: pwd.struct_passwd | None = user,
+        require_access: bool = True,
     ) -> bool:
         checked = _validated_source(
             source,
             roots=roots,
             kinds=kinds,
+            user=host_user,
             owner=owner,
-            access_user=access_user,
+            require_access=require_access,
         )
         if checked is None:
             return False
         resolved, metadata = checked
         binds.append(
-            _SessionBind(
+            DesktopBind(
+                destination=str(destination),
                 source=resolved,
-                staging=f"{staging_root}/{label}",
-                destination=destination,
                 device=metadata.st_dev,
                 inode=metadata.st_ino,
             )
@@ -597,235 +458,173 @@ def _prepare_session_plan(
 
     wayland = environment.pop("WAYLAND_DISPLAY", None)
     if wayland is not None:
-        wayland_source = Path(wayland)
-        if not wayland_source.is_absolute():
-            if not WAYLAND_DISPLAY_PATTERN.fullmatch(wayland):
-                raise core.SpacesError(
-                    _("Invalid Wayland session endpoint.")
-                )
-            wayland_source = runtime / wayland
-        if not runtime_available:
-            raise core.SpacesError(_("Invalid Wayland session endpoint."))
-        destination = f"{destination_root}/wayland/socket"
+        source = Path(wayland)
+        if not source.is_absolute():
+            if not SOCKET_NAME_PATTERN.fullmatch(wayland):
+                raise core.SpacesError(_("Invalid Wayland display name."))
+            source = runtime / wayland
+        destination = root / "wayland" / source.name
         if add(
-            "wayland",
-            wayland_source,
+            source,
             destination,
             roots=(runtime,),
             kinds=(stat.S_IFSOCK,),
-            owner=uid,
+            owner=user.uid,
         ):
-            environment["WAYLAND_DISPLAY"] = destination
+            environment["WAYLAND_DISPLAY"] = str(destination)
 
     display = environment.pop("DISPLAY", None)
     if display is not None:
-        local_display = LOCAL_DISPLAY_PATTERN.fullmatch(display)
-        if local_display is not None:
-            number = local_display.group("number")
-            socket_path = Path(f"/tmp/.X11-unix/X{number}")
-            if add(
-                "x11",
-                socket_path,
-                str(socket_path),
-                roots=(Path("/tmp/.X11-unix"),),
-                kinds=(stat.S_IFSOCK,),
-            ):
-                environment["DISPLAY"] = display
-        elif REMOTE_DISPLAY_PATTERN.fullmatch(display):
+        match = LOCAL_DISPLAY_PATTERN.fullmatch(display)
+        if match is None:
+            raise core.SpacesError(_("Only local X11 displays may be forwarded."))
+        source = Path(f"/tmp/.X11-unix/X{match.group('number')}")
+        if add(
+            source,
+            source,
+            roots=(Path("/tmp/.X11-unix"),),
+            kinds=(stat.S_IFSOCK,),
+        ):
             environment["DISPLAY"] = display
-        else:
-            raise core.SpacesError(_("Invalid X11 display value."))
 
-    xauthority_value = environment.pop("XAUTHORITY", None)
-    if "x11" in resources:
+    xauthority_value = source_environment.get("XAUTHORITY")
+    if "DISPLAY" in environment:
         xauthority = (
             Path(xauthority_value)
-            if xauthority_value is not None
+            if xauthority_value
             else home / ".Xauthority"
         )
         if not xauthority.is_absolute():
             raise core.SpacesError(_("XAUTHORITY must be an absolute path."))
-        xauthority_roots = (
-            (home, runtime, Path("/tmp"))
-            if runtime_available
-            else (home, Path("/tmp"))
-        )
-        xauthority_destination = f"{destination_root}/xauthority"
+        destination = root / "xauthority"
         if add(
-            "xauthority",
             xauthority,
-            xauthority_destination,
-            roots=xauthority_roots,
+            destination,
+            roots=(home, runtime),
             kinds=(stat.S_IFREG,),
-            owner=uid,
+            owner=user.uid,
         ):
-            environment["XAUTHORITY"] = xauthority_destination
+            environment["XAUTHORITY"] = str(destination)
 
-    pulse_value = environment.pop("PULSE_SERVER", None)
-    if "pulseaudio" in resources:
-        pulse_source = runtime / "pulse" / "native"
-        if pulse_value and pulse_value.startswith("unix:"):
-            pulse_source = Path(pulse_value.removeprefix("unix:"))
-            if not pulse_source.is_absolute():
-                raise core.SpacesError(
-                    _("Invalid PulseAudio server path.")
-                )
-        pulse_destination = f"{destination_root}/pulse/native"
-        if runtime_available and add(
-            "pulse",
-            pulse_source,
-            pulse_destination,
+    pulse_value = source_environment.get("PULSE_SERVER")
+    pulse_source = runtime / "pulse" / "native"
+    if pulse_value and pulse_value.startswith("unix:"):
+        pulse_source = Path(pulse_value.removeprefix("unix:"))
+    pulse_destination = root / "pulse" / "native"
+    if add(
+        pulse_source,
+        pulse_destination,
+        roots=(runtime,),
+        kinds=(stat.S_IFSOCK,),
+        owner=user.uid,
+    ):
+        environment["PULSE_SERVER"] = f"unix:{pulse_destination}"
+    else:
+        environment.pop("PULSE_SERVER", None)
+
+    pipewire_remote = source_environment.get("PIPEWIRE_REMOTE", "pipewire-0")
+    if not SOCKET_NAME_PATTERN.fullmatch(pipewire_remote):
+        raise core.SpacesError(_("Invalid PipeWire remote name."))
+    pipewire_root = root / "pipewire"
+    if add(
+        runtime / pipewire_remote,
+        pipewire_root / pipewire_remote,
+        roots=(runtime,),
+        kinds=(stat.S_IFSOCK,),
+        owner=user.uid,
+    ):
+        environment["PIPEWIRE_RUNTIME_DIR"] = str(pipewire_root)
+        environment["PIPEWIRE_REMOTE"] = pipewire_remote
+        add(
+            runtime / f"{pipewire_remote}-manager",
+            pipewire_root / f"{pipewire_remote}-manager",
             roots=(runtime,),
             kinds=(stat.S_IFSOCK,),
-            owner=uid,
-        ):
-            environment["PULSE_SERVER"] = f"unix:{pulse_destination}"
-        elif pulse_value and not pulse_value.startswith("unix:"):
-            environment["PULSE_SERVER"] = pulse_value
+            owner=user.uid,
+        )
+    else:
+        environment.pop("PIPEWIRE_REMOTE", None)
+        environment.pop("PIPEWIRE_RUNTIME_DIR", None)
 
-    pipewire_remote = environment.pop("PIPEWIRE_REMOTE", "pipewire-0")
-    if "pipewire" in resources:
-        if not WAYLAND_DISPLAY_PATTERN.fullmatch(pipewire_remote):
-            raise core.SpacesError(_("Invalid PipeWire remote name."))
-        pipewire_destination = f"{destination_root}/pipewire"
-        if runtime_available and add(
-            "pipewire",
-            runtime / pipewire_remote,
-            f"{pipewire_destination}/{pipewire_remote}",
-            roots=(runtime,),
-            kinds=(stat.S_IFSOCK,),
-            owner=uid,
-        ):
-            environment["PIPEWIRE_RUNTIME_DIR"] = pipewire_destination
-            environment["PIPEWIRE_REMOTE"] = pipewire_remote
-            manager = runtime / f"{pipewire_remote}-manager"
-            add(
-                "pipewire-manager",
-                manager,
-                f"{pipewire_destination}/{pipewire_remote}-manager",
-                roots=(runtime,),
-                kinds=(stat.S_IFSOCK,),
-                owner=uid,
-            )
-
-    guest_home = f"/home/{user.pw_name}"
-    config_value = environment.pop("XDG_CONFIG_HOME", None)
-    config = (
-        Path(config_value)
-        if config_value is not None
-        else home / ".config"
-    )
+    config_value = source_environment.get("XDG_CONFIG_HOME")
+    config = Path(config_value) if config_value else home / ".config"
     if not config.is_absolute():
         raise core.SpacesError(_("XDG_CONFIG_HOME must be an absolute path."))
     add(
-        "config-kdeglobals",
         config / "kdeglobals",
-        f"{guest_home}/.config/kdeglobals",
+        user.guest_home / ".config" / "kdeglobals",
         roots=(home,),
         kinds=(stat.S_IFREG,),
-        owner=uid,
+        owner=user.uid,
     )
-    for name in ("gtk-3.0", "gtk-4.0"):
+    for name in CONFIG_DIRECTORIES:
         add(
-            f"config-{name}",
             config / name,
-            f"{guest_home}/.config/{name}",
+            user.guest_home / ".config" / name,
             roots=(home,),
             kinds=(stat.S_IFDIR,),
-            owner=uid,
+            owner=user.uid,
         )
-    add(
-        "config-fontconfig",
-        config / "fontconfig",
-        f"{guest_home}/.config/fontconfig",
-        roots=(home,),
-        kinds=(stat.S_IFDIR,),
-        owner=uid,
-    )
 
-    data_roots: list[str] = []
-    data_home_value = environment.pop("XDG_DATA_HOME", None)
-    data_home = (
-        Path(data_home_value)
-        if data_home_value is not None
-        else home / ".local" / "share"
-    )
+    data_home_value = source_environment.get("XDG_DATA_HOME")
+    data_home = Path(data_home_value) if data_home_value else home / ".local/share"
     if not data_home.is_absolute():
         raise core.SpacesError(_("XDG_DATA_HOME must be an absolute path."))
+    data_roots: list[str] = []
     appearance_sources = (
-        ("user", data_home, (home,), uid),
-        (
-            "local",
-            Path("/usr/local/share"),
-            (Path("/usr/local/share"),),
-            None,
-        ),
+        ("user", data_home, (home,), user.uid),
+        ("local", Path("/usr/local/share"), (Path("/usr/local/share"),), None),
         ("system", Path("/usr/share"), (Path("/usr/share"),), None),
     )
-    for label, source_root, allowed_roots, owner in appearance_sources:
-        destination_data_root = f"{destination_root}/data/{label}"
+    for label, source_root, roots, owner in appearance_sources:
+        destination_root = root / "data" / label
         found = False
         for name in ("icons", "themes", "color-schemes"):
             found = (
                 add(
-                    f"data-{label}-{name}",
                     source_root / name,
-                    f"{destination_data_root}/{name}",
-                    roots=allowed_roots,
+                    destination_root / name,
+                    roots=roots,
                     kinds=(stat.S_IFDIR,),
                     owner=owner,
                 )
                 or found
             )
         if found:
-            data_roots.append(destination_data_root)
-
-    for label, source in (
-        ("legacy-icons", home / ".icons"),
-        ("legacy-themes", home / ".themes"),
+            data_roots.append(str(destination_root))
+    for label, source, kind in (
+        ("legacy-icons", home / ".icons", "icons"),
+        ("legacy-themes", home / ".themes", "themes"),
     ):
-        kind = label.removeprefix("legacy-")
-        legacy_root = f"{destination_root}/data/{label}"
+        destination_root = root / "data" / label
         if add(
-            label,
             source,
-            f"{legacy_root}/{kind}",
+            destination_root / kind,
             roots=(home,),
             kinds=(stat.S_IFDIR,),
-            owner=uid,
+            owner=user.uid,
         ):
-            data_roots.append(legacy_root)
+            data_roots.append(str(destination_root))
 
     font_destinations: list[str] = []
-    font_sources = (
-        ("user-fonts", home / ".local" / "share" / "fonts", (home,), uid),
-        ("legacy-fonts", home / ".fonts", (home,), uid),
-        (
-            "local-fonts",
-            Path("/usr/local/share/fonts"),
-            (Path("/usr/local/share"),),
-            None,
-        ),
-        (
-            "system-fonts",
-            Path("/usr/share/fonts"),
-            (Path("/usr/share"),),
-            None,
-        ),
-    )
-    for label, source, allowed_roots, owner in font_sources:
-        destination = f"{destination_root}/fonts/{label}"
+    for label, source, roots, owner in (
+        ("user", home / ".local/share/fonts", (home,), user.uid),
+        ("legacy", home / ".fonts", (home,), user.uid),
+        ("local", Path("/usr/local/share/fonts"), (Path("/usr/local/share"),), None),
+        ("system", Path("/usr/share/fonts"), (Path("/usr/share"),), None),
+    ):
+        destination = root / "fonts" / label
         if add(
-            label,
             source,
             destination,
-            roots=allowed_roots,
+            roots=roots,
             kinds=(stat.S_IFDIR,),
             owner=owner,
         ):
-            font_destinations.append(destination)
+            font_destinations.append(str(destination))
     if font_destinations:
-        font_config = temporary / "fonts.conf"
+        generated_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        font_config = generated_root / "fonts.conf"
         directories = "".join(
             f"  <dir>{destination}</dir>\n"
             for destination in font_destinations
@@ -835,371 +634,546 @@ def _prepare_session_plan(
             "<!DOCTYPE fontconfig SYSTEM \"fonts.dtd\">\n"
             "<fontconfig>\n"
             f"{directories}"
-            "  <include ignore_missing=\"yes\">"
-            "/etc/fonts/fonts.conf</include>\n"
+            "  <include ignore_missing=\"yes\">/etc/fonts/fonts.conf</include>\n"
             "</fontconfig>\n",
             encoding="utf-8",
         )
         os.chmod(font_config, 0o644)
-        add(
-            "fontconfig",
+        if add(
             font_config,
-            f"{destination_root}/fonts.conf",
-            roots=(temporary,),
+            root / "fonts.conf",
+            roots=(generated_root,),
             kinds=(stat.S_IFREG,),
-            owner=0,
-            access_user=None,
-        )
-        environment["FONTCONFIG_FILE"] = f"{destination_root}/fonts.conf"
+            require_access=False,
+        ):
+            environment["FONTCONFIG_FILE"] = str(root / "fonts.conf")
 
     if data_roots:
         environment["XDG_DATA_DIRS"] = ":".join(
             [*data_roots, "/usr/local/share", "/usr/share"]
         )
-        cursor_paths = [
-            f"{root}/icons"
-            for root in data_roots
-        ]
         environment["XCURSOR_PATH"] = ":".join(
-            [*cursor_paths, "/usr/local/share/icons", "/usr/share/icons"]
+            [
+                *(f"{item}/icons" for item in data_roots),
+                "/usr/local/share/icons",
+                "/usr/share/icons",
+            ]
         )
-
-    environment["XDG_RUNTIME_DIR"] = f"/run/user/{uid}"
-    environment["DBUS_SESSION_BUS_ADDRESS"] = (
-        f"unix:path=/run/user/{uid}/bus"
-    )
-    return _SessionPlan(
-        binds=tuple(binds),
+    environment["XDG_SESSION_TYPE"] = selected.session_type
+    environment["XDG_SESSION_CLASS"] = "user"
+    return DesktopPlan(
+        session_id=selected.session_id,
+        binds=tuple(sorted(binds)),
         environment=environment,
-        staging_root=staging_root,
-        destination_root=destination_root,
+        generated_root=generated_root if generated_root.exists() else None,
     )
 
 
-def _machine_root_command(space_name: str, command: list[str]) -> None:
-    subprocess.run(
-        [
-            MACHINECTL,
-            "--quiet",
-            "--uid=root",
-            "--",
-            "shell",
-            space_name,
-            *command,
-        ],
-        check=True,
-        stdout=subprocess.DEVNULL,
+def _environment_path(space_name: str, uid: int) -> Path:
+    core.validate_space_name(space_name)
+    if not isinstance(uid, int) or isinstance(uid, bool) or uid < 0:
+        raise core.SpacesError(_("Invalid desktop environment user ID."))
+    return (
+        core.STATE_ROOT
+        / space_name
+        / ENVIRONMENT_DIRECTORY
+        / f"{uid}.json"
     )
 
 
-def _prepare_guest_session_directories(
+def _environment_directory(space_name: str) -> Path:
+    path = _environment_path(space_name, 0).parent
+    path.mkdir(mode=0o700, exist_ok=True)
+    metadata = path.lstat()
+    expected_owner = 0 if os.geteuid() == 0 else os.getuid()
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != expected_owner
+        or metadata.st_mode & 0o077
+    ):
+        raise core.SpacesError(
+            _("Unsafe desktop environment directory: {path}.", path=path)
+        )
+    return path
+
+
+def _validate_desktop_environment(
+    environment: object,
+) -> dict[str, str]:
+    if not isinstance(environment, dict):
+        raise core.SpacesError(_("Invalid desktop environment data."))
+    if any(
+        not isinstance(name, str)
+        or name not in DESKTOP_ENVIRONMENT
+        or not _safe_value(value)
+        for name, value in environment.items()
+    ):
+        raise core.SpacesError(_("Invalid desktop environment data."))
+    return {
+        name: value
+        for name, value in sorted(environment.items())
+        if isinstance(value, str)
+    }
+
+
+def _write_record(
     space_name: str,
-    plan: _SessionPlan,
-    user: pwd.struct_passwd,
+    uid: int,
+    state: str,
+    session_id: str | None,
+    environment: dict[str, str],
 ) -> None:
-    _machine_root_command(
-        space_name,
-        [
-            "/usr/bin/install",
-            "-d",
-            "-m",
-            "0700",
-            "-o",
-            "0",
-            "-g",
-            "0",
-            plan.staging_root,
-        ],
+    if state not in STATUS_STATES:
+        raise ValueError(state)
+    if session_id is not None and not isinstance(session_id, str):
+        raise core.SpacesError(_("Invalid desktop session ID."))
+    validated = _validate_desktop_environment(environment)
+    path = _environment_path(space_name, uid)
+    directory = _environment_directory(space_name)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{uid}.",
+        dir=directory,
     )
-    _machine_root_command(
-        space_name,
-        [
-            "/usr/bin/install",
-            "-d",
-            "-m",
-            "0700",
-            "-o",
-            str(user.pw_uid),
-            "-g",
-            str(user.pw_gid),
-            plan.destination_root,
-        ],
-    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(
+                {
+                    "environment": validated,
+                    "session_id": session_id,
+                    "state": state,
+                },
+                stream,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+            os.fchmod(stream.fileno(), 0o600)
+            if os.geteuid() == 0:
+                os.fchown(stream.fileno(), 0, 0)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
-def _bind_session_resource(space_name: str, binding: _SessionBind) -> None:
-    descriptor = os.open(
-        binding.source,
-        os.O_PATH | os.O_CLOEXEC | os.O_NOFOLLOW,
-    )
+def _read_record(
+    space_name: str,
+    uid: int,
+    *,
+    missing_ok: bool = False,
+) -> tuple[str, str | None, dict[str, str]]:
+    path = _environment_path(space_name, uid)
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+    except FileNotFoundError as error:
+        if missing_ok:
+            return "inactive", None, {}
+        raise core.SpacesError(
+            _("Desktop environment data is unavailable.")
+        ) from error
+    except OSError as error:
+        raise core.SpacesError(
+            _("Could not open desktop environment data: {error}", error=error)
+        ) from error
     try:
         metadata = os.fstat(descriptor)
+        expected_owner = 0 if os.geteuid() == 0 else os.getuid()
         if (
-            metadata.st_dev != binding.device
-            or metadata.st_ino != binding.inode
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != expected_owner
+            or metadata.st_mode & 0o077
         ):
             raise core.SpacesError(
-                _("Session resource changed while it was being mounted.")
+                _("Unsafe desktop environment file: {path}.", path=path)
             )
+        with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
+            descriptor = -1
+            value = json.load(stream)
+        if not isinstance(value, dict) or set(value) != {
+            "environment",
+            "session_id",
+            "state",
+        }:
+            raise core.SpacesError(_("Invalid desktop environment data."))
+        state = value["state"]
+        session_id = value["session_id"]
+        if state not in STATUS_STATES or (
+            session_id is not None and not isinstance(session_id, str)
+        ):
+            raise core.SpacesError(_("Invalid desktop environment data."))
+        environment = _validate_desktop_environment(value["environment"])
+        return state, session_id, environment
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise core.SpacesError(
+            _("Could not read desktop environment data: {error}", error=error)
+        ) from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def set_status(
+    space_name: str,
+    uid: int,
+    state: str,
+    *,
+    session_id: str | None = None,
+) -> None:
+    _previous_state, previous_session, environment = _read_record(
+        space_name,
+        uid,
+        missing_ok=True,
+    )
+    if state == "inactive":
+        environment = {}
+        previous_session = None
+    _write_record(
+        space_name,
+        uid,
+        state,
+        session_id if session_id is not None else previous_session,
+        environment,
+    )
+
+
+def initialize_status(space_name: str, users: tuple[DesktopUser, ...]) -> None:
+    for user in users:
+        # Replace any record left by a service crash before this generation
+        # becomes visible to ``spaces enter``.
+        _write_record(
+            space_name,
+            user.uid,
+            "pending" if user.desktop and user.uid != 0 else "inactive",
+            None,
+            {},
+        )
+
+
+def _status_record(space_name: str, uid: int) -> tuple[str, str | None]:
+    state, session_id, _environment = _read_record(
+        space_name,
+        uid,
+        missing_ok=True,
+    )
+    return state, session_id
+
+
+def _read_status(space_name: str, uid: int) -> str:
+    return _status_record(space_name, uid)[0]
+
+
+def desktop_environment(
+    space_name: str,
+    uid: int,
+    *,
+    timeout: float = 30,
+) -> dict[str, str]:
+    """Wait through reconciliation and read its root-only GUI environment."""
+
+    deadline = time.monotonic() + timeout
+    while True:
+        state, _session_id, environment = _read_record(
+            space_name,
+            uid,
+            missing_ok=True,
+        )
+        if state == "inactive":
+            return {}
+        if state == "active":
+            return environment
+        if time.monotonic() >= deadline:
+            raise core.SpacesError(
+                _("Timed out waiting for desktop forwarding to settle.")
+            )
+        time.sleep(0.05)
+
+
+def polkit_agent(rootfs: Path) -> str | None:
+    """Find a recognized executable guest polkit agent."""
+
+    candidates = [rootfs / item.removeprefix("/") for item in POLKIT_AGENTS]
+    candidates.extend(sorted(rootfs.glob(POLKIT_AGENT_GLOB)))
+    resolved_root = rootfs.resolve(strict=True)
+    expected_owner = 0 if os.geteuid() == 0 else os.getuid()
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve(strict=True)
+            metadata = resolved.stat()
+        except (OSError, RuntimeError):
+            continue
+        if (
+            resolved.is_relative_to(resolved_root)
+            and stat.S_ISREG(metadata.st_mode)
+            and metadata.st_uid == expected_owner
+            and metadata.st_mode & 0o111
+        ):
+            return "/" + str(resolved.relative_to(resolved_root))
+    return None
+
+
+class DesktopController:
+    """Reconcile login-scoped desktop resources for one running space."""
+
+    def __init__(self, space_name: str, users: tuple[DesktopUser, ...]) -> None:
+        self.space_name = space_name
+        self.users = {user.uid: user for user in users}
+        self.active: dict[int, _ActiveDesktop] = {}
+        self.destination_users: dict[str, set[int]] = {}
+        self.destination_sources: dict[str, tuple[int, int]] = {}
+
+    def reconcile(
+        self,
+        user: DesktopUser,
+        sessions: tuple[LoginSession, ...],
+    ) -> None:
+        if not user.desktop or user.uid == 0:
+            if user.uid in self.active:
+                self.deactivate(user)
+            return
+        environment = host_manager_environment(user)
+        selected = select_graphical_session(sessions, environment)
+        current = self.active.get(user.uid)
+        if selected is None:
+            self.deactivate(user)
+            return
+        if current is not None and current.plan.session_id == selected.session_id:
+            return
+
+        set_status(self.space_name, user.uid, "pending")
+        generation = hashlib.sha256(
+            selected.session_id.encode("utf-8")
+        ).hexdigest()[:16]
+        generated = (
+            RUNTIME_ROOT
+            / self.space_name
+            / "desktop"
+            / str(user.uid)
+            / "generated"
+            / generation
+        )
+        previous = current
+        try:
+            plan = _plan(user, selected, environment, generated)
+        except Exception as error:
+            self._remove_generated(
+                DesktopPlan(selected.session_id, (), {}, generated)
+            )
+            set_status(
+                self.space_name,
+                user.uid,
+                "active" if previous is not None else "inactive",
+                session_id=(
+                    previous.plan.session_id if previous is not None else None
+                ),
+            )
+            raise DesktopSetupError(str(error)) from error
+        if previous is not None:
+            self._deactivate(user, previous, remove_generated=False)
+        try:
+            activated = self._activate(user, plan)
+        except DesktopRevocationError:
+            set_status(self.space_name, user.uid, "inactive")
+            raise
+        except Exception as error:
+            self._remove_generated(plan)
+            if previous is not None:
+                try:
+                    self.active[user.uid] = self._activate(user, previous.plan)
+                except Exception:
+                    set_status(self.space_name, user.uid, "inactive")
+                    raise
+            else:
+                set_status(self.space_name, user.uid, "inactive")
+            raise DesktopSetupError(str(error)) from error
+        self.active[user.uid] = activated
+        if previous is not None:
+            self._remove_generated(previous.plan)
+
+    def deactivate(self, user: DesktopUser) -> None:
+        current = self.active.get(user.uid)
+        if current is None:
+            set_status(self.space_name, user.uid, "inactive")
+            return
+        set_status(self.space_name, user.uid, "pending")
+        self._deactivate(user, current)
+        set_status(self.space_name, user.uid, "inactive")
+
+    def close(self) -> None:
+        for user in self.users.values():
+            if user.uid in self.active:
+                self.deactivate(user)
+            elif user.desktop and user.uid != 0:
+                set_status(self.space_name, user.uid, "inactive")
+
+    def abandon(self) -> None:
+        """Forget state after the machine has already removed its namespaces."""
+
+        self.active.clear()
+        self.destination_users.clear()
+        self.destination_sources.clear()
+        for user in self.users.values():
+            if user.desktop and user.uid != 0:
+                set_status(self.space_name, user.uid, "inactive")
+
+    def _activate(
+        self, user: DesktopUser, plan: DesktopPlan
+    ) -> _ActiveDesktop:
+        self._prepare_guest_root(user)
+        mounted: list[DesktopBind] = []
+        try:
+            for binding in plan.binds:
+                self._mount(user.uid, binding)
+                mounted.append(binding)
+            _write_record(
+                self.space_name,
+                user.uid,
+                "active",
+                plan.session_id,
+                plan.environment,
+            )
+        except Exception:
+            cleanup_errors: list[Exception] = []
+            for binding in reversed(mounted):
+                try:
+                    self._unmount(user.uid, binding)
+                except Exception as cleanup_error:
+                    cleanup_errors.append(cleanup_error)
+            if cleanup_errors:
+                cleanup_error = cleanup_errors[0]
+                raise DesktopRevocationError(
+                    _(
+                        "Could not revoke a partially configured desktop "
+                        "generation: {error}",
+                        error=cleanup_error,
+                    )
+                ) from cleanup_error
+            raise
+        return _ActiveDesktop(plan=plan)
+
+    def _deactivate(
+        self,
+        user: DesktopUser,
+        current: _ActiveDesktop,
+        *,
+        remove_generated: bool = True,
+    ) -> None:
+        try:
+            for binding in reversed(current.plan.binds):
+                self._unmount(user.uid, binding)
+        except Exception as error:
+            raise DesktopRevocationError(
+                _(
+                    "Could not safely revoke desktop forwarding for {user}: "
+                    "{error}",
+                    user=user.name,
+                    error=error,
+                )
+            ) from error
+        self.active.pop(user.uid, None)
+        if remove_generated:
+            self._remove_generated(current.plan)
+
+    @staticmethod
+    def _remove_generated(plan: DesktopPlan) -> None:
+        root = plan.generated_root
+        if root is None:
+            return
+        try:
+            (root / "fonts.conf").unlink(missing_ok=True)
+            root.rmdir()
+            root.parent.rmdir()
+        except OSError:
+            pass
+
+    def _prepare_guest_root(self, user: DesktopUser) -> None:
+        self._machine_root(
+            [
+                "/usr/bin/install",
+                "-d",
+                "-m",
+                "0700",
+                "-o",
+                str(user.uid),
+                "-g",
+                str(user.gid),
+                str(DESKTOP_ROOT / str(user.uid)),
+            ]
+        )
+
+    def _mount(self, uid: int, binding: DesktopBind) -> None:
+        identity = (binding.device, binding.inode)
+        users = self.destination_users.get(binding.destination)
+        if users is not None:
+            if self.destination_sources[binding.destination] != identity:
+                raise core.SpacesError(
+                    _(
+                        "Desktop destination {path} is already bound to a "
+                        "different source.",
+                        path=binding.destination,
+                    )
+                )
+            users.add(uid)
+            return
+        descriptor = os.open(
+            binding.source, os.O_PATH | os.O_CLOEXEC | os.O_NOFOLLOW
+        )
+        try:
+            metadata = os.fstat(descriptor)
+            if (metadata.st_dev, metadata.st_ino) != identity:
+                raise core.SpacesError(
+                    _("Desktop resource changed while it was being mounted.")
+                )
+            subprocess.run(
+                [
+                    MACHINECTL,
+                    "--quiet",
+                    "--no-ask-password",
+                    "--mkdir",
+                    "--read-only",
+                    "bind",
+                    self.space_name,
+                    f"/proc/{os.getpid()}/fd/{descriptor}",
+                    binding.destination,
+                ],
+                check=True,
+            )
+        finally:
+            os.close(descriptor)
+        self.destination_users[binding.destination] = {uid}
+        self.destination_sources[binding.destination] = identity
+
+    def _unmount(self, uid: int, binding: DesktopBind) -> None:
+        users = self.destination_users.get(binding.destination)
+        if users is None or uid not in users:
+            return
+        if len(users) > 1:
+            users.remove(uid)
+            return
+        # Lazy detachment is intentional: GUI clients frequently keep socket
+        # descriptors open while the login disappears. Existing users may
+        # finish, but no process can open the revoked host path afterward.
+        self._machine_root(
+            ["/usr/bin/umount", "--lazy", "--", binding.destination]
+        )
+        self.destination_users.pop(binding.destination, None)
+        self.destination_sources.pop(binding.destination, None)
+
+    def _machine_root(self, command: list[str]) -> None:
         subprocess.run(
             [
                 MACHINECTL,
                 "--quiet",
-                "--no-ask-password",
-                "--mkdir",
-                "--read-only",
-                "bind",
-                space_name,
-                f"/proc/{os.getpid()}/fd/{descriptor}",
-                binding.staging,
+                "--uid=root",
+                "--",
+                "shell",
+                self.space_name,
+                *command,
             ],
             check=True,
+            stdout=subprocess.DEVNULL,
         )
-    finally:
-        os.close(descriptor)
-
-
-def _unmount_session_resource(space_name: str, path: str) -> None:
-    _machine_root_command(
-        space_name,
-        [
-            "/usr/bin/umount",
-            "--lazy",
-            "--",
-            path,
-        ],
-    )
-
-
-def _remove_guest_session_paths(
-    space_name: str,
-    *paths: str,
-) -> None:
-    _machine_root_command(
-        space_name,
-        [
-            "/bin/rm",
-            "-rf",
-            "--",
-            *paths,
-        ],
-    )
-
-
-def _space_directory(name: str) -> Path:
-    core.validate_space_name(name)
-    space = core.STATE_ROOT / name
-    if space.is_symlink() or not space.is_dir():
-        raise core.SpacesError(
-            _("Space {name!r} does not exist.", name=name)
-        )
-    return space
-
-
-def _guest_login_shell(space_name: str, user_name: str) -> str:
-    passwd_path = _space_directory(space_name) / "rootfs" / "etc" / "passwd"
-    if passwd_path.is_symlink() or not passwd_path.is_file():
-        raise core.SpacesError(_("Unsafe guest passwd database."))
-    for line in passwd_path.read_text(encoding="utf-8").splitlines():
-        fields = line.split(":")
-        if len(fields) == 7 and fields[0] == user_name:
-            shell = fields[6]
-            if shell.startswith("/") and "\0" not in shell:
-                return shell
-            break
-    return "/bin/sh"
-
-
-def _session_unit_command(
-    space_name: str,
-    user: pwd.struct_passwd,
-    plan: _SessionPlan,
-    unit_name: str,
-    command: list[str],
-) -> list[str]:
-    actual_command = command or [
-        _guest_login_shell(space_name, user.pw_name),
-        "-l",
-    ]
-    result = [
-        SYSTEMD_RUN,
-        f"--machine={space_name}",
-        f"--unit={unit_name}",
-        "--quiet",
-        "--wait",
-        "--collect",
-        "--service-type=exec",
-        "--no-ask-password",
-        "--expand-environment=no",
-        f"--uid={user.pw_name}",
-        f"--working-directory=/home/{user.pw_name}",
-        "--pty",
-        "--pipe",
-        "--property=PrivateMounts=yes",
-        "--property=ExitType=cgroup",
-        "--property=KillMode=control-group",
-    ]
-    for binding in plan.binds:
-        result.append(
-            "--property=BindReadOnlyPaths="
-            f"{binding.staging}:{binding.destination}"
-        )
-    for name, value in sorted(plan.environment.items()):
-        result.append(f"--setenv={name}={value}")
-    return [*result, "--", *actual_command]
-
-
-def _wait_for_private_unit(
-    process: subprocess.Popen[Any],
-    space_name: str,
-    unit_name: str,
-) -> bool:
-    deadline = time.monotonic() + 30
-    while process.poll() is None and time.monotonic() < deadline:
-        state = subprocess.run(
-            [
-                SYSTEMCTL,
-                f"--machine={space_name}",
-                "--no-ask-password",
-                "show",
-                "--property=ActiveState",
-                "--value",
-                unit_name,
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if state.returncode == 0 and state.stdout.strip() == "active":
-            return True
-        time.sleep(0.05)
-    return False
-
-
-def _stop_session_unit(space_name: str, unit_name: str) -> None:
-    subprocess.run(
-        [
-            SYSTEMCTL,
-            f"--machine={space_name}",
-            "--no-ask-password",
-            "stop",
-            unit_name,
-        ],
-        check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-
-
-def _ensure_guest_user_manager(
-    space_name: str,
-    user: pwd.struct_passwd,
-) -> None:
-    subprocess.run(
-        [
-            SYSTEMCTL,
-            f"--machine={space_name}",
-            "--no-ask-password",
-            "start",
-            f"user@{user.pw_uid}.service",
-        ],
-        check=True,
-    )
-
-
-def enter(
-    user: pwd.struct_passwd,
-    space_name: str,
-    command: list[str],
-    manifest: dict[str, Any],
-) -> int:
-    """Run one command with the validated host session attached."""
-
-    token = secrets.token_hex(12)
-    unit_name = f"spaces-enter-{token}.service"
-    mounted: list[_SessionBind] = []
-    signal_state = _SessionSignalState()
-    try:
-        with (
-            _forward_session_signals(signal_state),
-            tempfile.TemporaryDirectory(
-                prefix="spaces-session-",
-                dir="/run",
-            ) as name,
-        ):
-            plan = _prepare_session_plan(
-                manifest,
-                user,
-                token,
-                Path(name),
-            )
-            try:
-                _ensure_guest_user_manager(space_name, user)
-                _prepare_guest_session_directories(space_name, plan, user)
-                for binding in plan.binds:
-                    mounted.append(binding)
-                    _bind_session_resource(space_name, binding)
-                previous_mask = signal.pthread_sigmask(
-                    signal.SIG_BLOCK,
-                    {signal.SIGINT, signal.SIGTERM, signal.SIGHUP},
-                )
-                try:
-                    process = subprocess.Popen(
-                        _session_unit_command(
-                            space_name,
-                            user,
-                            plan,
-                            unit_name,
-                            command,
-                        )
-                    )
-                    signal_state.process = process
-                finally:
-                    signal.pthread_sigmask(
-                        signal.SIG_SETMASK,
-                        previous_mask,
-                    )
-                if _wait_for_private_unit(
-                    process,
-                    space_name,
-                    unit_name,
-                ):
-                    while mounted:
-                        binding = mounted[-1]
-                        _unmount_session_resource(
-                            space_name,
-                            binding.staging,
-                        )
-                        mounted.pop()
-                    _remove_guest_session_paths(
-                        space_name,
-                        plan.staging_root,
-                    )
-                returncode = process.wait()
-                if signal_state.signum is not None:
-                    return 128 + signal_state.signum
-                return returncode
-            finally:
-                process = signal_state.process
-                if process is not None:
-                    _stop_session_unit(space_name, unit_name)
-                    if process.poll() is None:
-                        process.wait()
-                for binding in reversed(mounted):
-                    try:
-                        _unmount_session_resource(
-                            space_name,
-                            binding.staging,
-                        )
-                    except (OSError, subprocess.CalledProcessError):
-                        pass
-                try:
-                    _remove_guest_session_paths(
-                        space_name,
-                        plan.staging_root,
-                        plan.destination_root,
-                    )
-                except (OSError, subprocess.CalledProcessError):
-                    pass
-    except _SessionInterrupted as interruption:
-        return 128 + interruption.signum

@@ -62,6 +62,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                     "system",
                     "host-authentication",
                     "user",
+                    "desktop",
                     "administrator",
                     "distribution",
                 ],
@@ -107,7 +108,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
-                "System permissions (1/5)",
+                "System permissions (1/6)",
             )
             self.assertEqual(
                 sum(not step.has_class("hidden") for step in app.query(".step")),
@@ -117,13 +118,13 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
-                "Host authentication permissions (2/5)",
+                "Host authentication permissions (2/6)",
             )
             await pilot.press("enter")
             await pilot.pause()
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
-                "User permissions (3/5)",
+                "User permissions (3/6)",
             )
             folders = app.query_one("#home-folders", FolderSelectionList)
             self.assertEqual(
@@ -160,7 +161,25 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
-                "Administrator permissions (4/5)",
+                "Desktop permissions (4/6)",
+            )
+            desktop = app.query_one("#desktop", RadioSet)
+            self.assertEqual(desktop.pressed_button.id, "desktop-true")
+            self.assertEqual(
+                [
+                    button.label.plain
+                    for button in desktop.query(CleanRadioButton)
+                ],
+                [
+                    "Do not enable desktop (GUI) apps for user user",
+                    "Enable desktop (GUI) apps to work for user user",
+                ],
+            )
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertEqual(
+                str(app.query_one("#step-title").render()),
+                "Administrator permissions (5/6)",
             )
             administrator = app.query_one("#administrator", RadioSet)
             self.assertEqual(
@@ -184,7 +203,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
-                "Distribution settings (5/5)",
+                "Distribution settings (6/6)",
             )
             distribution = app.query_one("#distribution-option", RadioSet)
             self.assertEqual(distribution._selected, distribution.pressed_index)
@@ -203,7 +222,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
-                "Administrator permissions (4/5)",
+                "Administrator permissions (5/6)",
             )
             self.assertEqual(len(app.query(Header)), 0)
             self.assertEqual(len(app.query(Footer)), 0)
@@ -240,21 +259,27 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(
                 app._result(),
-                {"home": ["Projects"], "administrator": False},
+                {
+                    "home": ["Projects"],
+                    "administrator": False,
+                    "desktop": True,
+                },
             )
             await pilot.press("enter")
             await pilot.pause()
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
-                "Administrator permissions (2/2)",
+                "Desktop permissions (2/3)",
             )
+            await pilot.press("enter")
+            await pilot.pause()
             await pilot.click("#administrator-true")
             await pilot.pause()
             self.assertTrue(app._result()["administrator"])
             self.assertEqual(len(app.query("#network")), 0)
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
-                "Administrator permissions (2/2)",
+                "Administrator permissions (3/3)",
             )
             self.assertEqual(
                 app.query_one("#next", Button).label.plain,
@@ -317,6 +342,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                     "system",
                     "host-authentication",
                     "user",
+                    "desktop",
                     "administrator",
                 ],
             )
@@ -327,7 +353,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
-                "Space already exists (1/5)",
+                "Space already exists (1/6)",
             )
             self.assertTrue(app.query_one("#select", Button).disabled)
             self.assertTrue(app.query_one("#next", Button).has_focus)
@@ -335,7 +361,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
-                "System permissions (2/5)",
+                "System permissions (2/6)",
             )
             self.assertFalse(app.query_one("#select", Button).disabled)
 

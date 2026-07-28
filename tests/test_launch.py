@@ -4,6 +4,7 @@ import json
 import os
 import pwd
 import shutil
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -45,6 +46,12 @@ class LaunchTests(unittest.TestCase):
             core, "STATE_ROOT", self.state_root
         )
         self.state_root_patch.start()
+        self.session_runtime_patch = mock.patch.object(
+            launch_module.session,
+            "RUNTIME_ROOT",
+            Path(self.temporary.name) / "runtime",
+        )
+        self.session_runtime_patch.start()
         host_user = pwd.struct_passwd(
             (
                 "user",
@@ -80,6 +87,7 @@ class LaunchTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.worker_patch.stop()
+        self.session_runtime_patch.stop()
         self.monitor_patch.stop()
         self.passwd_patch.stop()
         self.state_root_patch.stop()
@@ -91,6 +99,7 @@ class LaunchTests(unittest.TestCase):
         name: str = "work",
         home: list[str] | None = None,
         host_authentication: bool = False,
+        desktop: bool = False,
     ) -> None:
         info = core.create_info(
             name,
@@ -99,6 +108,7 @@ class LaunchTests(unittest.TestCase):
             network,
             home or [],
             host_authentication=host_authentication,
+            desktop=desktop,
         )
         (self.space / "info.json").write_text(
             json.dumps(info),
@@ -244,6 +254,7 @@ class LaunchTests(unittest.TestCase):
             "basic",
             [],
             host_authentication=True,
+            desktop=False,
         )
         del info["permissions"]["system"]["host_authentication"]
         (self.space / "info.json").write_text(
@@ -253,7 +264,6 @@ class LaunchTests(unittest.TestCase):
         runtime.bind_arguments = (
             "--bind-ro=/run/spaces/work/authentication/auth.sock:"
             "/run/spaces-host/auth.sock",
-            "--bind-ro=/usr/lib/spaces/guest:/run/spaces-host/bin",
         )
         driver = mock.Mock(administrator_group="sudo")
         driver.reconcile_host_authentication.return_value = True
@@ -267,6 +277,7 @@ class LaunchTests(unittest.TestCase):
                 "prepare_runtime",
                 return_value=runtime,
             ) as prepare,
+            mock.patch.object(launch_module.auth, "validate_native_runtime"),
             mock.patch.object(
                 launch_module,
                 "get_driver",
@@ -293,6 +304,10 @@ class LaunchTests(unittest.TestCase):
         authentication.start.assert_called_once_with()
         authentication.stop.assert_called_once_with()
         command = popen.call_args.args[0]
+        self.assertIn(
+            "--bind-ro=/usr/lib/spaces/guest:/run/spaces-host/bin",
+            command,
+        )
         for bind in runtime.bind_arguments:
             self.assertIn(bind, command)
 
@@ -317,6 +332,26 @@ class LaunchTests(unittest.TestCase):
                 "spaces-host" in argument
                 for argument in popen.call_args.args[0]
             )
+        )
+
+    def test_desktop_permission_mounts_guest_native_launcher(self) -> None:
+        self._write_info(host_authentication=False, desktop=True)
+        process = mock.Mock()
+        process.wait.return_value = 0
+        with (
+            mock.patch.object(
+                launch_module.auth, "validate_native_runtime"
+            ) as validate,
+            mock.patch.object(
+                launch_module.subprocess, "Popen", return_value=process
+            ) as popen,
+            mock.patch.object(launch_module.signal, "signal"),
+        ):
+            self.assertEqual(launch_module.launch("work"), 0)
+        validate.assert_called_once_with(self.rootfs)
+        self.assertIn(
+            "--bind-ro=/usr/lib/spaces/guest:/run/spaces-host/bin",
+            popen.call_args.args[0],
         )
 
     def test_enabled_unknown_policy_is_rejected(self) -> None:
@@ -722,6 +757,7 @@ class UserFixupTests(unittest.TestCase):
             guest_home=launch_module.PurePosixPath(f"/home/{name}"),
             permitted_home=permitted,
             administrator=administrator,
+            desktop=False,
         )
 
     def _write_accounts(
@@ -945,6 +981,7 @@ class UserFixupTests(unittest.TestCase):
             space_home=self.space_home / "root",
             guest_home=launch_module.PurePosixPath("/root"),
             permitted_home=(),
+            desktop=False,
         )
         launch_module._reconcile_accounts(self.rootfs, (root,))
 
@@ -1069,7 +1106,9 @@ class UserFixupTests(unittest.TestCase):
 
 
 class LoginAndMountWorkerTests(unittest.TestCase):
-    def _user(self, uid: int) -> launch_module.SpaceUser:
+    def _user(
+        self, uid: int, *, desktop: bool = False
+    ) -> launch_module.SpaceUser:
         return launch_module.SpaceUser(
             uid=uid,
             gid=uid,
@@ -1078,6 +1117,7 @@ class LoginAndMountWorkerTests(unittest.TestCase):
             space_home=Path(f"/space/home/user{uid}"),
             guest_home=launch_module.PurePosixPath(f"/home/user{uid}"),
             permitted_home=(),
+            desktop=desktop,
         )
 
     def test_eligible_states_include_lingering(self) -> None:
@@ -1100,6 +1140,213 @@ class LoginAndMountWorkerTests(unittest.TestCase):
         monitor.state.return_value = "future-state"
         with self.assertRaises(core.SpacesError):
             launch_module._eligible_uids(monitor, (self._user(1000),))
+
+    def test_login_monitor_flushes_expired_timeout(self) -> None:
+        monitor = object.__new__(launch_module._LoginMonitor)
+        monitor._monitor = mock.Mock()
+        monitor._read_fd = 8
+        monitor._library = mock.Mock()
+        monitor._library.sd_login_monitor_get_fd.return_value = 9
+        monitor._poll = mock.Mock()
+        monitor._poll.poll.return_value = []
+
+        with (
+            mock.patch.object(
+                launch_module._LoginMonitor,
+                "_timeout_ms",
+                return_value=0,
+            ),
+            mock.patch.object(
+                launch_module._LoginMonitor,
+                "_flush",
+            ) as flush,
+        ):
+            self.assertTrue(monitor.wait())
+
+        flush.assert_called_once_with()
+
+    def test_registration_waits_for_guest_system_bus(self) -> None:
+        worker = launch_module._MountWorker(
+            "work",
+            (),
+            mock.Mock(),
+            (),
+            (),
+            frozenset(),
+        )
+        worker._process = mock.Mock()
+        worker._process.poll.return_value = None
+        machine_unavailable = SimpleNamespace(returncode=1)
+        machine_available = SimpleNamespace(returncode=0)
+        shell_unavailable = SimpleNamespace(returncode=1)
+        shell_available = SimpleNamespace(returncode=0)
+
+        with (
+            mock.patch.object(
+                launch_module.subprocess,
+                "run",
+                side_effect=[
+                    machine_unavailable,
+                    machine_available,
+                    shell_unavailable,
+                    machine_available,
+                    shell_available,
+                ],
+            ) as run,
+            mock.patch.object(worker._stopping, "wait") as wait,
+        ):
+            self.assertTrue(worker._wait_until_registered())
+
+        self.assertEqual(
+            run.call_args_list,
+            [
+                mock.call(
+                    [
+                        launch_module.MACHINECTL,
+                        "--quiet",
+                        "--no-ask-password",
+                        "show",
+                        "--property=Leader",
+                        "--value",
+                        "work",
+                    ],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                ),
+                mock.call(
+                    [
+                        launch_module.MACHINECTL,
+                        "--quiet",
+                        "--no-ask-password",
+                        "show",
+                        "--property=Leader",
+                        "--value",
+                        "work",
+                    ],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                ),
+                mock.call(
+                    [
+                        launch_module.MACHINECTL,
+                        "--quiet",
+                        "--no-ask-password",
+                        "--uid=root",
+                        "--",
+                        "shell",
+                        "work",
+                        "/usr/bin/true",
+                    ],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                ),
+                mock.call(
+                    [
+                        launch_module.MACHINECTL,
+                        "--quiet",
+                        "--no-ask-password",
+                        "show",
+                        "--property=Leader",
+                        "--value",
+                        "work",
+                    ],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                ),
+                mock.call(
+                    [
+                        launch_module.MACHINECTL,
+                        "--quiet",
+                        "--no-ask-password",
+                        "--uid=root",
+                        "--",
+                        "shell",
+                        "work",
+                        "/usr/bin/true",
+                    ],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                ),
+            ],
+        )
+        self.assertEqual(wait.call_count, 2)
+
+    def test_unchanged_graphical_snapshot_skips_desktop_reconciliation(
+        self,
+    ) -> None:
+        user = self._user(1000, desktop=True)
+        graphical = launch_module.session.LoginSession(
+            "2", True, False, "wayland", "user"
+        )
+        monitor = mock.Mock()
+        monitor.state.return_value = "active"
+        monitor.sessions.side_effect = [
+            (
+                graphical,
+                launch_module.session.LoginSession(
+                    "100", True, False, "tty", "user"
+                ),
+            ),
+            (
+                graphical,
+                launch_module.session.LoginSession(
+                    "101", True, False, "tty", "user"
+                ),
+            ),
+        ]
+        worker = launch_module._MountWorker(
+            "work",
+            (user,),
+            monitor,
+            (),
+            (),
+            frozenset({user.uid}),
+        )
+        worker._registered = True
+        worker._process = mock.Mock()
+        worker._desktop.reconcile = mock.Mock()
+
+        worker._reconcile()
+        worker._reconcile()
+
+        worker._desktop.reconcile.assert_called_once_with(
+            user, (graphical,)
+        )
+
+    def test_worker_rate_limits_monitor_reconciliation(self) -> None:
+        user = self._user(1000)
+        monitor = mock.Mock()
+        monitor.state.return_value = "active"
+        monitor.wait.side_effect = [True, False]
+        worker = launch_module._MountWorker(
+            "work",
+            (user,),
+            monitor,
+            (),
+            (),
+            frozenset({user.uid}),
+        )
+        worker._registered = True
+        process = mock.Mock()
+        process.poll.return_value = None
+        worker.attach(process)
+        worker._desktop.reconcile = mock.Mock()
+
+        with mock.patch.object(
+            worker._stopping, "wait", return_value=False
+        ) as rate_wait:
+            worker._run()
+
+        self.assertGreaterEqual(
+            rate_wait.call_args.args[0],
+            launch_module.LOGIN_RECONCILE_INTERVAL_SECONDS - 0.01,
+        )
+        worker._desktop.reconcile.assert_called_once_with(user, ())
 
     def test_lingering_keeps_mount_until_user_is_closing(self) -> None:
         user = self._user(1000)

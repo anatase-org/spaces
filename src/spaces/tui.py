@@ -307,6 +307,7 @@ class PermissionForm(
         distribution_options: list[tuple[str, str]],
         distribution_value: str | None,
         administrator: bool = True,
+        desktop: bool = True,
         administrator_group: str = "wheel",
         submit_label: str = _("Create"),
         override: bool = False,
@@ -317,6 +318,7 @@ class PermissionForm(
         self.initial_host_authentication = host_authentication
         self.initial_home = set(selected_home)
         self.initial_administrator = administrator
+        self.initial_desktop = desktop
         self.administrator_group = administrator_group
         selected_folders = [
             folder
@@ -341,7 +343,7 @@ class PermissionForm(
                 if include_system
                 else []
             )
-            + ["user", "administrator"]
+            + ["user", "desktop", "administrator"]
             + (["distribution"] if distribution_options else [])
         )
         self.step_index = 0
@@ -415,6 +417,31 @@ class PermissionForm(
                     ],
                     id="home-folders",
                 )
+            with Vertical(id="desktop-step", classes="step"):
+                yield Static(
+                    _(
+                        "Choose whether the host graphical login is available "
+                        "inside the space."
+                    ),
+                    classes="description",
+                )
+                with RadioSet(id="desktop"):
+                    yield CleanRadioButton(
+                        _(
+                            "Do not enable desktop (GUI) apps for {user} user",
+                            user=self.home.name,
+                        ),
+                        value=not self.initial_desktop,
+                        id="desktop-false",
+                    )
+                    yield CleanRadioButton(
+                        _(
+                            "Enable desktop (GUI) apps to work for {user} user",
+                            user=self.home.name,
+                        ),
+                        value=self.initial_desktop,
+                        id="desktop-true",
+                    )
             with Vertical(id="administrator-step", classes="step"):
                 yield Static(
                     _(
@@ -491,6 +518,7 @@ class PermissionForm(
             "system": _("System permissions"),
             "host-authentication": _("Host authentication permissions"),
             "user": _("User permissions"),
+            "desktop": _("Desktop permissions"),
             "administrator": _("Administrator permissions"),
             "distribution": _("Distribution settings"),
         }
@@ -520,6 +548,7 @@ class PermissionForm(
             "system": "#network",
             "host-authentication": "#host-authentication",
             "user": "#home-folders",
+            "desktop": "#desktop",
             "administrator": "#administrator",
             "distribution": "#distribution-option",
         }
@@ -547,6 +576,7 @@ class PermissionForm(
             targets = {
                 "system": "#network",
                 "host-authentication": "#host-authentication",
+                "desktop": "#desktop",
                 "administrator": "#administrator",
                 "distribution": "#distribution-option",
             }
@@ -584,6 +614,11 @@ class PermissionForm(
             "administrator": self._radio_value(
                 self.query_one("#administrator", RadioSet),
                 "administrator-",
+            )
+            == "true",
+            "desktop": self._radio_value(
+                self.query_one("#desktop", RadioSet),
+                "desktop-",
             )
             == "true",
         }

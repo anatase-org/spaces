@@ -182,6 +182,11 @@ def _validate_user_record(value: object, uid_key: str) -> dict[str, Any]:
         raise SpacesError(
             _("User {uid} administrator permission must be a boolean.", uid=uid_key)
         )
+    desktop = permissions.get("desktop", True)
+    if not isinstance(desktop, bool):
+        raise SpacesError(
+            _("User {uid} desktop permission must be a boolean.", uid=uid_key)
+        )
     return record
 
 
@@ -321,13 +326,14 @@ def load_info(path: Path) -> dict[str, Any] | None:
 
 def defaults_from_info(
     info: Mapping[str, Any] | None, identity: Identity
-) -> tuple[str, bool, list[str], bool]:
+) -> tuple[str, bool, list[str], bool, bool]:
     network = "basic"
     host_authentication = True
     selected_home = list(DEFAULT_HOME_FOLDERS)
     administrator = True
+    desktop = True
     if not info:
-        return network, host_authentication, selected_home, administrator
+        return network, host_authentication, selected_home, administrator, desktop
 
     permissions = info.get("permissions", {})
     system_permissions = permissions.get("system", {})
@@ -353,7 +359,10 @@ def defaults_from_info(
     existing_administrator = user_permissions.get("administrator")
     if isinstance(existing_administrator, bool):
         administrator = existing_administrator
-    return network, host_authentication, selected_home, administrator
+    existing_desktop = user_permissions.get("desktop")
+    if isinstance(existing_desktop, bool):
+        desktop = existing_desktop
+    return network, host_authentication, selected_home, administrator, desktop
 
 
 def create_info(
@@ -364,6 +373,7 @@ def create_info(
     home: list[str],
     administrator: bool = True,
     host_authentication: bool = True,
+    desktop: bool = True,
 ) -> dict[str, Any]:
     value = {
         "schema_version": SCHEMA_VERSION,
@@ -380,6 +390,7 @@ def create_info(
                     "permissions": {
                         "home": sorted(home, key=str.casefold),
                         "administrator": administrator,
+                        "desktop": desktop,
                     },
                 }
             },

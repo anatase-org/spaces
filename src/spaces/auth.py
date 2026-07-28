@@ -29,7 +29,7 @@ PAM_WORKER = Path("/usr/lib/spaces/spaces-pam-worker")
 GUEST_RUNTIME = "/run/spaces-host"
 GUEST_SOCKET = f"{GUEST_RUNTIME}/auth.sock"
 GUEST_NATIVE = f"{GUEST_RUNTIME}/bin"
-GUEST_BINARIES = ("pam_spaces.so",)
+GUEST_BINARIES = ("pam_spaces.so", "spaces-session-launcher")
 ELF_MACHINES = {
     "x86_64": 62,
     "aarch64": 183,
@@ -63,10 +63,11 @@ class AuthenticationRuntime:
 
     @property
     def bind_arguments(self) -> tuple[str, ...]:
-        return (
-            f"--bind-ro={self.socket_path}:{GUEST_SOCKET}",
-            f"--bind-ro={NATIVE_ROOT}:{GUEST_NATIVE}",
-        )
+        return (f"--bind-ro={self.socket_path}:{GUEST_SOCKET}",)
+
+
+def native_bind_argument() -> str:
+    return f"--bind-ro={NATIVE_ROOT}:{GUEST_NATIVE}"
 
 
 def _elf_header(path: Path) -> bytes:
@@ -157,6 +158,22 @@ def prepare_runtime(
         directory=directory,
         socket_path=directory / "auth.sock",
     )
+
+
+def validate_native_runtime(rootfs: Path) -> None:
+    """Validate the shared guest-native bundle before nspawn mounts it."""
+
+    machine = platform.machine()
+    if machine not in ELF_MACHINES:
+        raise core.SpacesError(
+            _("Guest-native helpers are unsupported on {machine}.", machine=machine)
+        )
+    if not NATIVE_ROOT.is_dir():
+        raise core.SpacesError(
+            _("Guest-native helper bundle is missing at {path}.", path=NATIVE_ROOT)
+        )
+    validate_native_bundle(machine)
+    validate_guest_architecture(rootfs, machine)
 
 
 def _recv_exact(connection: socket.socket, size: int) -> bytes:

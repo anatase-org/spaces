@@ -139,11 +139,18 @@ class PackagingTests(unittest.TestCase):
         for name in (
             "pam_spaces.so",
             "spaces-pam-worker",
+            "spaces-session-launcher",
         ):
             self.assertIn(name, makefile)
         self.assertNotIn("spaces-polkit", makefile)
         self.assertNotIn("polkit-agent-1", spec)
-        self.assertNotIn("spaces-session", makefile)
+        self.assertIn(
+            "/usr/lib/spaces/guest/spaces-session-launcher",
+            spec,
+        )
+        self.assertTrue(
+            (ROOT / "native" / "spaces_session_launcher.c").exists()
+        )
         self.assertFalse(
             (ROOT / "native" / "spaces_session.c").exists()
         )

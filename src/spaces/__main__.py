@@ -12,7 +12,6 @@ from typing import Any
 
 from . import _
 from . import core
-from . import session
 from .distro import DistributionError, get_driver
 from .logging import configure_logging, log, run_streamed
 from .tui import ask_custom_name, run_permission_wizard
@@ -258,6 +257,7 @@ def _create(distro_id: str) -> int:
         host_authentication,
         selected_home,
         administrator,
+        desktop,
     ) = core.defaults_from_info(
         existing_info, identity
     )
@@ -274,6 +274,7 @@ def _create(distro_id: str) -> int:
         host_authentication=host_authentication,
         selected_home=selected_home,
         administrator=administrator,
+        desktop=desktop,
         administrator_group=driver.administrator_group,
         include_system=True,
         distribution_title=driver.configuration_title,
@@ -298,6 +299,7 @@ def _create(distro_id: str) -> int:
         home=result["home"],
         administrator=result.get("administrator", True),
         host_authentication=result.get("host_authentication", True),
+        desktop=result.get("desktop", True),
     )
     configure_logging(rich=True)
     log(
@@ -355,6 +357,7 @@ def _configure(name: str, *, user: str | None) -> int:
         host_authentication,
         selected_home,
         administrator,
+        desktop,
     ) = core.defaults_from_info(info, identity)
     driver = get_driver(info["distribution"]["id"])
     administrator_group = (
@@ -367,6 +370,7 @@ def _configure(name: str, *, user: str | None) -> int:
         host_authentication=host_authentication,
         selected_home=selected_home,
         administrator=administrator,
+        desktop=desktop,
         administrator_group=administrator_group,
         include_system=not user_only,
         distribution_title="",
@@ -385,6 +389,7 @@ def _configure(name: str, *, user: str | None) -> int:
             "permissions": {
                 "home": sorted(result["home"], key=str.casefold),
                 "administrator": result.get("administrator", True),
+                "desktop": result.get("desktop", True),
             },
         }
     }
@@ -455,17 +460,6 @@ def _enter(
         assert user_name is not None
         operation = "enter"
         enter_arguments = [f"{user_name}@{space}"]
-        if identity.uid != 0:
-            session_manifest = session.discover()
-            if session_manifest is not None:
-                enter_arguments[0:0] = [
-                    "--session",
-                    json.dumps(
-                        session_manifest,
-                        separators=(",", ":"),
-                        sort_keys=True,
-                    ),
-                ]
     else:
         operation = "enter-as-user"
         enter_arguments = [enter_user, space]

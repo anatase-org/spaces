@@ -29,8 +29,11 @@ class AuthenticationPolicyTests(unittest.TestCase):
             (
                 "--bind-ro=/run/spaces/work/authentication/auth.sock:"
                 "/run/spaces-host/auth.sock",
-                "--bind-ro=/usr/lib/spaces/guest:/run/spaces-host/bin",
             ),
+        )
+        self.assertEqual(
+            auth.native_bind_argument(),
+            "--bind-ro=/usr/lib/spaces/guest:/run/spaces-host/bin",
         )
 
     def test_prepare_runtime_creates_only_socket_runtime(self) -> None:

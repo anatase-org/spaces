@@ -43,6 +43,7 @@ PING_EXECUTABLES = ("/usr/bin/ping", "/bin/ping")
 CAPABILITY_XATTR = "security.capability"
 ELIGIBLE_USER_STATES = frozenset({"active", "online", "lingering"})
 INELIGIBLE_USER_STATES = frozenset({"closing", "offline"})
+LOGIN_RECONCILE_INTERVAL_SECONDS = 1.0
 SYMLINKS = [
     # Ostree system weirdness
     ("/var/home", "/home"),
@@ -102,6 +103,7 @@ class SpaceUser:
     guest_home: PurePosixPath
     permitted_home: tuple[str, ...]
     administrator: bool = True
+    desktop: bool = True
 
 
 @dataclass(frozen=True, order=True)
@@ -351,6 +353,7 @@ def _resolve_users(info: dict[str, Any], home: Path) -> tuple[SpaceUser, ...]:
                 guest_home=guest_home,
                 permitted_home=tuple(record["permissions"]["home"]),
                 administrator=record["permissions"].get("administrator", True),
+                desktop=record["permissions"].get("desktop", True),
             )
         )
     return tuple(users)
@@ -870,7 +873,7 @@ class _LoginMonitor:
         try:
             self._raise_for_result(
                 self._library.sd_login_monitor_new(
-                    b"uid", ctypes.byref(self._monitor)
+                    None, ctypes.byref(self._monitor)
                 ),
                 _("Could not create the systemd login monitor."),
             )
@@ -918,6 +921,29 @@ class _LoginMonitor:
             ctypes.POINTER(ctypes.c_void_p),
         ]
         self._library.sd_uid_get_state.restype = ctypes.c_int
+        self._library.sd_uid_get_sessions.argtypes = [
+            ctypes.c_uint,
+            ctypes.c_int,
+            ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)),
+        ]
+        self._library.sd_uid_get_sessions.restype = ctypes.c_int
+        for name in (
+            "sd_session_is_active",
+            "sd_session_is_remote",
+        ):
+            function = getattr(self._library, name)
+            function.argtypes = [ctypes.c_char_p]
+            function.restype = ctypes.c_int
+        for name in (
+            "sd_session_get_type",
+            "sd_session_get_class",
+        ):
+            function = getattr(self._library, name)
+            function.argtypes = [
+                ctypes.c_char_p,
+                ctypes.POINTER(ctypes.c_void_p),
+            ]
+            function.restype = ctypes.c_int
         self._libc.free.argtypes = [ctypes.c_void_p]
         self._libc.free.restype = None
 
@@ -937,7 +963,78 @@ class _LoginMonitor:
         finally:
             self._libc.free(value)
 
+    def _session_string(self, function_name: str, session_id: bytes) -> str:
+        value = ctypes.c_void_p()
+        function = getattr(self._library, function_name)
+        self._raise_for_result(
+            function(session_id, ctypes.byref(value)),
+            _("Could not query systemd login session properties."),
+        )
+        try:
+            return ctypes.string_at(value).decode("utf-8")
+        finally:
+            self._libc.free(value)
+
+    def sessions(self, uid: int) -> tuple[session.LoginSession, ...]:
+        values = ctypes.POINTER(ctypes.c_void_p)()
+        count = self._library.sd_uid_get_sessions(
+            uid, 0, ctypes.byref(values)
+        )
+        self._raise_for_result(
+            count,
+            _("Could not enumerate login sessions for UID {uid}.", uid=uid),
+        )
+        sessions: list[session.LoginSession] = []
+        try:
+            for index in range(count):
+                pointer = values[index]
+                session_id = ctypes.string_at(pointer)
+                active = self._library.sd_session_is_active(session_id)
+                remote = self._library.sd_session_is_remote(session_id)
+                if active < 0 or remote < 0:
+                    continue
+                try:
+                    session_type = self._session_string(
+                        "sd_session_get_type", session_id
+                    )
+                    session_class = self._session_string(
+                        "sd_session_get_class", session_id
+                    )
+                except core.SpacesError:
+                    # Sessions can disappear between enumeration and property
+                    # reads. A vanished record is not a monitor failure.
+                    continue
+                sessions.append(
+                    session.LoginSession(
+                        session_id=session_id.decode("utf-8"),
+                        active=bool(active),
+                        remote=bool(remote),
+                        session_type=session_type,
+                        session_class=session_class,
+                    )
+                )
+        finally:
+            for index in range(max(count, 0)):
+                self._libc.free(values[index])
+            if values:
+                self._libc.free(values)
+        return tuple(sessions)
+
     def wait(self) -> bool:
+        timeout_ms = self._timeout_ms()
+        monitor_fd = self._library.sd_login_monitor_get_fd(self._monitor)
+        for descriptor, _events in self._poll.poll(timeout_ms):
+            if descriptor == self._read_fd:
+                return False
+            if descriptor == monitor_fd:
+                self._flush()
+                return True
+        # sd-login timeouts are notifications too. Flush them so an expired
+        # absolute timeout cannot make the worker spin on zero-length polls.
+        self._flush()
+        return True
+
+    def _timeout_ms(self) -> int | None:
         timeout_usec = ctypes.c_uint64()
         self._raise_for_result(
             self._library.sd_login_monitor_get_timeout(
@@ -952,17 +1049,13 @@ class _LoginMonitor:
             timeout_ms = max(
                 0, (timeout_usec.value - now_usec + 999) // 1000
             )
-        monitor_fd = self._library.sd_login_monitor_get_fd(self._monitor)
-        for descriptor, _events in self._poll.poll(timeout_ms):
-            if descriptor == self._read_fd:
-                return False
-            if descriptor == monitor_fd:
-                self._raise_for_result(
-                    self._library.sd_login_monitor_flush(self._monitor),
-                    _("Could not flush the login monitor."),
-                )
-                return True
-        return True
+        return timeout_ms
+
+    def _flush(self) -> None:
+        self._raise_for_result(
+            self._library.sd_login_monitor_flush(self._monitor),
+            _("Could not flush the login monitor."),
+        )
 
     def stop(self) -> None:
         if self._write_fd < 0:
@@ -1004,6 +1097,55 @@ def _eligible_uids(
     return frozenset(eligible)
 
 
+@dataclass(frozen=True)
+class _LoginSnapshot:
+    eligible_uids: frozenset[int]
+    graphical_sessions: tuple[
+        tuple[int, tuple[session.LoginSession, ...]], ...
+    ]
+
+    def sessions(self, uid: int) -> tuple[session.LoginSession, ...]:
+        for item_uid, records in self.graphical_sessions:
+            if item_uid == uid:
+                return records
+        return ()
+
+
+def _login_snapshot(
+    monitor: _LoginMonitor,
+    users: tuple[SpaceUser, ...],
+) -> _LoginSnapshot:
+    eligible_uids = _eligible_uids(monitor, users)
+    graphical_sessions: list[
+        tuple[int, tuple[session.LoginSession, ...]]
+    ] = []
+    for user in users:
+        if (
+            not user.desktop
+            or user.uid == 0
+            or user.uid not in eligible_uids
+        ):
+            continue
+        records = tuple(
+            sorted(
+                (
+                    item
+                    for item in monitor.sessions(user.uid)
+                    if item.active
+                    and not item.remote
+                    and item.session_class == "user"
+                    and item.session_type in {"wayland", "x11"}
+                ),
+                key=lambda item: item.session_id,
+            )
+        )
+        graphical_sessions.append((user.uid, records))
+    return _LoginSnapshot(
+        eligible_uids=eligible_uids,
+        graphical_sessions=tuple(graphical_sessions),
+    )
+
+
 class _MountWorker:
     """Reconcile planned mounts as configured users change login state."""
 
@@ -1026,6 +1168,9 @@ class _MountWorker:
         self._attached = threading.Event()
         self._stopping = threading.Event()
         self._registered = False
+        self._login_snapshot: _LoginSnapshot | None = None
+        self._last_reconcile_at: float | None = None
+        self._desktop = session.DesktopController(space_name, users)
         self._thread = threading.Thread(
             target=self._run,
             name=f"spaces-{space_name}-mounts",
@@ -1051,20 +1196,50 @@ class _MountWorker:
             self._attached.wait()
             if self._stopping.is_set() or self._process is None:
                 return
+            if not self._wait_until_registered():
+                return
             if self._eligible_uids:
-                if not self._wait_until_registered():
-                    return
                 self._log_initial_mounts()
             self._reconcile()
+            self._last_reconcile_at = time.monotonic()
             while not self._stopping.is_set() and self._monitor.wait():
                 if self._stopping.is_set():
                     break
+                if not self._wait_for_reconcile_slot():
+                    break
                 self._reconcile()
+                self._last_reconcile_at = time.monotonic()
         except Exception as error:
             logger.error(_("User mount monitor failed: {error}", error=error))
             process = self._process
             if process is not None and process.poll() is None:
                 process.send_signal(signal.SIGTERM)
+        finally:
+            try:
+                process = self._process
+                if process is None or process.poll() is not None:
+                    self._desktop.abandon()
+                else:
+                    self._desktop.close()
+            except Exception as error:
+                logger.error(
+                    _("Desktop forwarding cleanup failed: {error}", error=error)
+                )
+                process = self._process
+                if process is not None and process.poll() is None:
+                    process.send_signal(signal.SIGTERM)
+
+    def _wait_for_reconcile_slot(self) -> bool:
+        previous = self._last_reconcile_at
+        if previous is None:
+            return not self._stopping.is_set()
+        remaining = max(
+            0.0,
+            previous
+            + LOGIN_RECONCILE_INTERVAL_SECONDS
+            - time.monotonic(),
+        )
+        return not self._stopping.wait(remaining)
 
     def _wait_until_registered(self) -> bool:
         if self._registered:
@@ -1072,7 +1247,7 @@ class _MountWorker:
         process = self._process
         assert process is not None
         while not self._stopping.is_set() and process.poll() is None:
-            completed = subprocess.run(
+            machine = subprocess.run(
                 [
                     MACHINECTL,
                     "--quiet",
@@ -1086,14 +1261,39 @@ class _MountWorker:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            if completed.returncode == 0:
+            if machine.returncode != 0:
+                self._stopping.wait(0.05)
+                continue
+            guest_shell = subprocess.run(
+                [
+                    MACHINECTL,
+                    "--quiet",
+                    "--no-ask-password",
+                    "--uid=root",
+                    "--",
+                    "shell",
+                    self._space_name,
+                    "/usr/bin/true",
+                ],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            # Registration precedes the guest system bus during early boot.
+            # Desktop setup uses machinectl shell, so starting it before both
+            # probes succeed leaves forwarding inactive until another login
+            # event happens to trigger reconciliation.
+            if guest_shell.returncode == 0:
                 self._registered = True
                 return True
             self._stopping.wait(0.05)
         return False
 
     def _reconcile(self) -> None:
-        eligible_uids = _eligible_uids(self._monitor, self._users)
+        snapshot = _login_snapshot(self._monitor, self._users)
+        if snapshot == self._login_snapshot:
+            return
+        eligible_uids = snapshot.eligible_uids
         desired = set(
             _plan_mounts(
                 self._available_mounts,
@@ -1111,6 +1311,8 @@ class _MountWorker:
         if not additions and not removals:
             self._log_user_transitions(logged_in, logged_out, (), ())
             self._eligible_uids = eligible_uids
+            self._reconcile_desktops(snapshot)
+            self._login_snapshot = snapshot
             return
         if not self._wait_until_registered():
             return
@@ -1138,6 +1340,25 @@ class _MountWorker:
             added.append(mount)
         self._log_user_transitions(logged_in, logged_out, added, removed)
         self._eligible_uids = eligible_uids
+        self._reconcile_desktops(snapshot)
+        self._login_snapshot = snapshot
+
+    def _reconcile_desktops(self, snapshot: _LoginSnapshot) -> None:
+        for user in self._users:
+            try:
+                self._desktop.reconcile(
+                    user,
+                    snapshot.sessions(user.uid),
+                )
+            except session.DesktopSetupError as error:
+                logger.warning(
+                    _(
+                        "Could not enable desktop forwarding for {user}: "
+                        "{error}",
+                        user=user.name,
+                        error=error,
+                    )
+                )
 
     def _log_initial_mounts(self) -> None:
         for user in self._users:
@@ -1302,6 +1523,7 @@ def launch(space_name: str) -> int:
     )
     _reconcile_accounts(rootfs, users, administrator_group)
     _ensure_user_homes(rootfs, users)
+    session.initialize_status(space_name, users)
     authentication_supported = (
         driver.reconcile_host_authentication(
             rootfs,
@@ -1325,6 +1547,12 @@ def launch(space_name: str) -> int:
     authentication: auth.AuthenticationService | None = None
     authentication_binds: tuple[str, ...] = ()
     try:
+        native_required = host_authentication or any(
+            user.desktop and user.uid != 0 for user in users
+        )
+        if native_required:
+            auth.validate_native_runtime(rootfs)
+            authentication_binds = (auth.native_bind_argument(),)
         if host_authentication:
             authentication_runtime = auth.prepare_runtime(
                 space_name,
@@ -1339,9 +1567,7 @@ def launch(space_name: str) -> int:
                 },
             )
             authentication.start()
-            authentication_binds = (
-                authentication_runtime.bind_arguments
-            )
+            authentication_binds += authentication_runtime.bind_arguments
         monitor = _LoginMonitor()
         initial_eligible_uids = _eligible_uids(monitor, users)
         initial_mounts = _plan_mounts(

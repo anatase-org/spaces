@@ -16,6 +16,9 @@ PACKAGES = (
     "openssh-client",
     "nano",
     "sudo",
+    # auth
+    "pkexec",
+    "polkit-kde-agent-1",
     "polkitd",
     # these are required for plasma applications to look correct
     "breeze",

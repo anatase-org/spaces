@@ -363,6 +363,7 @@ class CliTests(unittest.TestCase):
                 "permissions": {
                     "home": ["Documents"],
                     "administrator": False,
+                    "desktop": True,
                 },
             },
         )
@@ -536,7 +537,6 @@ class CliTests(unittest.TestCase):
                 "_invoke_raw_helper",
                 return_value=0,
             ) as invoke,
-            mock.patch.object(cli.session, "discover", return_value=None),
         ):
             self.assertEqual(
                 cli.main(
@@ -578,7 +578,6 @@ class CliTests(unittest.TestCase):
             mock.patch.object(
                 cli, "_invoke_raw_helper", return_value=0
             ) as invoke,
-            mock.patch.object(cli.session, "discover", return_value=None),
         ):
             self.assertEqual(cli.main(["enter", "work"]), 0)
 
@@ -587,16 +586,8 @@ class CliTests(unittest.TestCase):
             ["alice@work"],
         )
 
-    def test_enter_passes_discovered_session_to_same_user_helper(self) -> None:
+    def test_enter_never_sends_terminal_session_data_to_helper(self) -> None:
         identity = core.Identity(1000, 1000, Path("/home/alice"))
-        manifest = {
-            "version": 1,
-            "resources": ["appearance", "x11"],
-            "environment": {
-                "DISPLAY": ":0",
-                "XDG_CURRENT_DESKTOP": "KDE",
-            },
-        }
         with (
             mock.patch.object(
                 core, "initiating_identity", return_value=identity
@@ -606,11 +597,6 @@ class CliTests(unittest.TestCase):
                 "getpwuid",
                 return_value=mock.Mock(pw_name="alice"),
             ),
-            mock.patch.object(
-                cli.session,
-                "discover",
-                return_value=manifest,
-            ) as discover,
             mock.patch.object(
                 cli,
                 "_invoke_raw_helper",
@@ -622,12 +608,9 @@ class CliTests(unittest.TestCase):
                 0,
             )
 
-        discover.assert_called_once_with()
         arguments = invoke.call_args.args[1]
-        self.assertEqual(arguments[0], "--session")
-        self.assertEqual(json.loads(arguments[1]), manifest)
         self.assertEqual(
-            arguments[2:],
+            arguments,
             ["alice@work", "--", "/usr/bin/kate"],
         )
 
@@ -661,7 +644,6 @@ class CliTests(unittest.TestCase):
                 mock.patch.object(
                     cli, "_invoke_raw_helper", return_value=0
                 ) as invoke,
-                mock.patch.object(cli.session, "discover", return_value=None),
             ):
                 self.assertEqual(cli.main(["enter", "work"]), 0)
 
@@ -682,7 +664,6 @@ class CliTests(unittest.TestCase):
                 mock.patch.object(
                     cli, "_invoke_raw_helper", return_value=0
                 ) as invoke,
-                mock.patch.object(cli.session, "discover") as discover,
             ):
                 self.assertEqual(
                     cli.main(
@@ -698,7 +679,6 @@ class CliTests(unittest.TestCase):
                 )
 
             initiating_identity.assert_not_called()
-            discover.assert_not_called()
             invoke.assert_called_once_with(
                 "enter-as-user",
                 [
