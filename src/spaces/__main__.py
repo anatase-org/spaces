@@ -59,7 +59,23 @@ def build_parser() -> argparse.ArgumentParser:
     enter_parser = subparsers.add_parser(
         "enter",
         help=_("enter a space or run a command in it"),
-        usage=_("spaces enter SPACE [--] [COMMAND ...]"),
+        usage=_(
+            "spaces enter [--root | --user USER] SPACE [--] [COMMAND ...]"
+        ),
+    )
+    enter_user = enter_parser.add_mutually_exclusive_group()
+    enter_user.add_argument(
+        "--root",
+        dest="enter_user",
+        action="store_const",
+        const="root",
+        help=_("enter as root (requires administrator authentication)"),
+    )
+    enter_user.add_argument(
+        "--user",
+        dest="enter_user",
+        metavar=_("USER"),
+        help=_("enter as USER (requires administrator authentication)"),
     )
     enter_parser.add_argument("space")
     enter_parser.add_argument(
@@ -293,15 +309,22 @@ def _cp(arguments: list[str]) -> int:
     return _invoke_helper("cp", {"arguments": fixed_arguments})
 
 
-def _enter(space: str, command: list[str]) -> int:
+def _enter(
+    space: str,
+    command: list[str],
+    *,
+    enter_user: str | None = None,
+) -> int:
     core.validate_space_name(space)
-    identity = core.initiating_identity()
-    try:
-        user = pwd.getpwuid(identity.uid)
-    except KeyError as error:
-        raise core.SpacesError(
-            _("No passwd entry exists for UID {uid}.", uid=identity.uid)
-        ) from error
+    user_name: str | None = None
+    if enter_user is None:
+        identity = core.initiating_identity()
+        try:
+            user_name = pwd.getpwuid(identity.uid).pw_name
+        except KeyError as error:
+            raise core.SpacesError(
+                _("No passwd entry exists for UID {uid}.", uid=identity.uid)
+            ) from error
 
     try:
         available = subprocess.run(
@@ -320,15 +343,45 @@ def _enter(space: str, command: list[str]) -> int:
         if returncode != 0:
             return returncode
 
-    enter_arguments = [f"{user.pw_name}@{space}"]
+    if enter_user is None:
+        assert user_name is not None
+        operation = "enter"
+        enter_arguments = [f"{user_name}@{space}"]
+    else:
+        operation = "enter-as-user"
+        enter_arguments = [enter_user, space]
     if command:
         enter_arguments.extend(["--", *command])
-    return _invoke_raw_helper("enter", enter_arguments)
+    return _invoke_raw_helper(operation, enter_arguments)
+
+
+def _normalize_enter_options(arguments: list[str]) -> list[str]:
+    if (
+        len(arguments) < 3
+        or arguments[0] != "enter"
+        or arguments[1].startswith("-")
+    ):
+        return arguments
+
+    space = arguments[1]
+    option = arguments[2]
+    if option == "--root" or option.startswith("--user="):
+        return ["enter", option, space, *arguments[3:]]
+    if option == "--user" and len(arguments) >= 4:
+        return [
+            "enter",
+            option,
+            arguments[3],
+            space,
+            *arguments[4:],
+        ]
+    return arguments
 
 
 def main(argv: list[str] | None = None) -> int:
     try:
         raw_arguments = list(sys.argv[1:] if argv is None else argv)
+        raw_arguments = _normalize_enter_options(raw_arguments)
         if raw_arguments[:1] == ["cp"]:
             if raw_arguments[1:] in (["-h"], ["--help"]):
                 build_parser().parse_args(raw_arguments)
@@ -342,7 +395,11 @@ def main(argv: list[str] | None = None) -> int:
         elif arguments.command == "delete":
             return _delete(arguments.name, noconfirm=arguments.noconfirm)
         elif arguments.command == "enter":
-            return _enter(arguments.space, arguments.command_arguments)
+            return _enter(
+                arguments.space,
+                arguments.command_arguments,
+                enter_user=arguments.enter_user,
+            )
         raise core.SpacesError(
             _("Unknown command: {command!r}.", command=arguments.command)
         )

@@ -486,6 +486,83 @@ class PrivilegedTests(unittest.TestCase):
 
         enter.assert_called_once_with("alice@work", ["--help"])
 
+    def test_enter_as_user_uses_privileged_target_without_host_lookup(
+        self,
+    ) -> None:
+        space = self.state_root / "ubuntu"
+        space.mkdir(parents=True)
+        priv._write_info(space, self.info)
+        completed = subprocess.CompletedProcess([], 42)
+        with (
+            mock.patch.object(priv.pwd, "getpwnam") as getpwnam,
+            mock.patch.object(
+                priv.subprocess,
+                "run",
+                return_value=completed,
+            ) as run,
+        ):
+            self.assertEqual(
+                priv.enter_as_user(
+                    "builder",
+                    "ubuntu",
+                    ["id", "-u"],
+                ),
+                42,
+            )
+
+        getpwnam.assert_not_called()
+        run.assert_called_once_with(
+            [
+                "/usr/bin/machinectl",
+                "--quiet",
+                "--uid=builder",
+                "--",
+                "shell",
+                "ubuntu",
+                "id",
+                "-u",
+            ],
+            check=False,
+        )
+
+    def test_enter_as_user_rejects_unsafe_user_name(self) -> None:
+        for user_name in ("", ".", "..", "../root", "bad:name", "bad\nname"):
+            with (
+                self.subTest(user_name=user_name),
+                mock.patch.object(priv.subprocess, "run") as run,
+                self.assertRaises(core.SpacesError),
+            ):
+                priv.enter_as_user(user_name, "ubuntu", [])
+            run.assert_not_called()
+
+    def test_enter_as_user_parser_removes_argument_separator(self) -> None:
+        with (
+            mock.patch.object(priv.os, "geteuid", return_value=0),
+            mock.patch.object(
+                priv,
+                "enter_as_user",
+                return_value=42,
+            ) as enter_as_user,
+        ):
+            self.assertEqual(
+                priv.main(
+                    [
+                        "enter-as-user",
+                        "root",
+                        "work",
+                        "--",
+                        "--help",
+                    ]
+                ),
+                42,
+            )
+
+        enter_as_user.assert_called_once_with(
+            "root",
+            "work",
+            ["--help"],
+        )
+
     def test_launch_return_code_is_propagated(self) -> None:
         with (
             mock.patch.object(priv.os, "geteuid", return_value=0),

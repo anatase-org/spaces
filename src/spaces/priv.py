@@ -176,6 +176,26 @@ def start(name: str) -> int:
     return completed.returncode
 
 
+def _machine_shell(
+    user_name: str,
+    space_name: str,
+    command: list[str],
+) -> int:
+    completed = subprocess.run(
+        [
+            MACHINECTL,
+            "--quiet",
+            f"--uid={user_name}",
+            "--",
+            "shell",
+            space_name,
+            *command,
+        ],
+        check=False,
+    )
+    return completed.returncode
+
+
 def enter(target: str, command: list[str]) -> int:
     user_name, separator, space_name = target.rpartition("@")
     if not separator or not user_name or not space_name:
@@ -208,19 +228,24 @@ def enter(target: str, command: list[str]) -> int:
             )
         )
 
-    completed = subprocess.run(
-        [
-            MACHINECTL,
-            "--quiet",
-            f"--uid={user.pw_name}",
-            "--",
-            "shell",
-            space_name,
-            *command,
-        ],
-        check=False,
-    )
-    return completed.returncode
+    return _machine_shell(user.pw_name, space_name, command)
+
+
+def enter_as_user(
+    user_name: str,
+    space_name: str,
+    command: list[str],
+) -> int:
+    if (
+        not user_name
+        or user_name in {".", ".."}
+        or any(character in user_name for character in "/:\0\n\r")
+    ):
+        raise core.SpacesError(
+            _("Invalid target user name: {user!r}.", user=user_name)
+        )
+    _space_info(space_name)
+    return _machine_shell(user_name, space_name, command)
 
 
 def create(info: dict[str, Any]) -> None:
@@ -354,6 +379,13 @@ def build_parser() -> argparse.ArgumentParser:
         "command_arguments",
         nargs=argparse.REMAINDER,
     )
+    enter_as_user_parser = subparsers.add_parser("enter-as-user")
+    enter_as_user_parser.add_argument("user")
+    enter_as_user_parser.add_argument("space")
+    enter_as_user_parser.add_argument(
+        "command_arguments",
+        nargs=argparse.REMAINDER,
+    )
     return parser
 
 
@@ -369,6 +401,12 @@ def main(argv: list[str] | None = None) -> int:
             return start(arguments.space)
         if arguments.command == "enter":
             return enter(arguments.target, arguments.command_arguments)
+        if arguments.command == "enter-as-user":
+            return enter_as_user(
+                arguments.user,
+                arguments.space,
+                arguments.command_arguments,
+            )
 
         payload = json.loads(arguments.payload)
         if arguments.command == "create":

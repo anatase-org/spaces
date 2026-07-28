@@ -390,6 +390,87 @@ class CliTests(unittest.TestCase):
 
         invoke.assert_called_once_with("start", ["work"])
 
+    def test_enter_root_and_user_root_use_privileged_helper(self) -> None:
+        available = subprocess.CompletedProcess([], 0)
+        for arguments in (
+            ["--root", "work"],
+            ["--user=root", "work"],
+            ["work", "--root"],
+            ["work", "--user", "root"],
+        ):
+            with (
+                self.subTest(arguments=arguments),
+                mock.patch.object(
+                    cli.subprocess,
+                    "run",
+                    return_value=available,
+                ),
+                mock.patch.object(
+                    core, "initiating_identity"
+                ) as initiating_identity,
+                mock.patch.object(
+                    cli, "_invoke_raw_helper", return_value=0
+                ) as invoke,
+            ):
+                self.assertEqual(
+                    cli.main(
+                        [
+                            "enter",
+                            *arguments,
+                            "--",
+                            "id",
+                            "-u",
+                        ]
+                    ),
+                    0,
+                )
+
+            initiating_identity.assert_not_called()
+            invoke.assert_called_once_with(
+                "enter-as-user",
+                ["root", "work", "--", "id", "-u"],
+            )
+
+    def test_enter_as_named_user_preserves_command_arguments(self) -> None:
+        available = subprocess.CompletedProcess([], 0)
+        with (
+            mock.patch.object(
+                cli.subprocess,
+                "run",
+                return_value=available,
+            ),
+            mock.patch.object(
+                cli, "_invoke_raw_helper", return_value=0
+            ) as invoke,
+        ):
+            self.assertEqual(
+                cli.main(
+                    [
+                        "enter",
+                        "--user",
+                        "builder",
+                        "work",
+                        "--",
+                        "printf",
+                        "%s",
+                        "$HOME",
+                    ]
+                ),
+                0,
+            )
+
+        invoke.assert_called_once_with(
+            "enter-as-user",
+            [
+                "builder",
+                "work",
+                "--",
+                "printf",
+                "%s",
+                "$HOME",
+            ],
+        )
+
     def test_existing_space_prepends_override_step(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary) / "state"
