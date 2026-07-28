@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import tempfile
 import unittest
@@ -535,6 +536,7 @@ class CliTests(unittest.TestCase):
                 "_invoke_raw_helper",
                 return_value=0,
             ) as invoke,
+            mock.patch.object(cli.session, "discover", return_value=None),
         ):
             self.assertEqual(
                 cli.main(
@@ -576,12 +578,57 @@ class CliTests(unittest.TestCase):
             mock.patch.object(
                 cli, "_invoke_raw_helper", return_value=0
             ) as invoke,
+            mock.patch.object(cli.session, "discover", return_value=None),
         ):
             self.assertEqual(cli.main(["enter", "work"]), 0)
 
         invoke.assert_called_once_with(
             "enter",
             ["alice@work"],
+        )
+
+    def test_enter_passes_discovered_session_to_same_user_helper(self) -> None:
+        identity = core.Identity(1000, 1000, Path("/home/alice"))
+        manifest = {
+            "version": 1,
+            "resources": ["appearance", "x11"],
+            "environment": {
+                "DISPLAY": ":0",
+                "XDG_CURRENT_DESKTOP": "KDE",
+            },
+        }
+        with (
+            mock.patch.object(
+                core, "initiating_identity", return_value=identity
+            ),
+            mock.patch.object(
+                cli.pwd,
+                "getpwuid",
+                return_value=mock.Mock(pw_name="alice"),
+            ),
+            mock.patch.object(
+                cli.session,
+                "discover",
+                return_value=manifest,
+            ) as discover,
+            mock.patch.object(
+                cli,
+                "_invoke_raw_helper",
+                return_value=0,
+            ) as invoke,
+        ):
+            self.assertEqual(
+                cli.main(["enter", "work", "--", "/usr/bin/kate"]),
+                0,
+            )
+
+        discover.assert_called_once_with()
+        arguments = invoke.call_args.args[1]
+        self.assertEqual(arguments[0], "--session")
+        self.assertEqual(json.loads(arguments[1]), manifest)
+        self.assertEqual(
+            arguments[2:],
+            ["alice@work", "--", "/usr/bin/kate"],
         )
 
     def test_disabled_enter_uses_the_same_direct_entry_path(self) -> None:
@@ -600,8 +647,6 @@ class CliTests(unittest.TestCase):
             )
             info_path = state / "work" / "info.json"
             info_path.parent.mkdir(parents=True)
-            import json
-
             info_path.write_text(json.dumps(info), encoding="utf-8")
             with (
                 mock.patch.object(core, "STATE_ROOT", state),
@@ -616,6 +661,7 @@ class CliTests(unittest.TestCase):
                 mock.patch.object(
                     cli, "_invoke_raw_helper", return_value=0
                 ) as invoke,
+                mock.patch.object(cli.session, "discover", return_value=None),
             ):
                 self.assertEqual(cli.main(["enter", "work"]), 0)
 
@@ -636,6 +682,7 @@ class CliTests(unittest.TestCase):
                 mock.patch.object(
                     cli, "_invoke_raw_helper", return_value=0
                 ) as invoke,
+                mock.patch.object(cli.session, "discover") as discover,
             ):
                 self.assertEqual(
                     cli.main(
@@ -651,6 +698,7 @@ class CliTests(unittest.TestCase):
                 )
 
             initiating_identity.assert_not_called()
+            discover.assert_not_called()
             invoke.assert_called_once_with(
                 "enter-as-user",
                 [

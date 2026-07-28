@@ -12,6 +12,7 @@ from typing import Any
 
 from . import _
 from . import core
+from . import session
 from .distro import DistributionError, get_driver
 from .logging import configure_logging, log, run_streamed
 from .tui import ask_custom_name, run_permission_wizard
@@ -454,6 +455,17 @@ def _enter(
         assert user_name is not None
         operation = "enter"
         enter_arguments = [f"{user_name}@{space}"]
+        if identity.uid != 0:
+            session_manifest = session.discover()
+            if session_manifest is not None:
+                enter_arguments[0:0] = [
+                    "--session",
+                    json.dumps(
+                        session_manifest,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                ]
     else:
         operation = "enter-as-user"
         enter_arguments = [enter_user, space]

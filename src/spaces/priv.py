@@ -21,6 +21,7 @@ from typing import Any, Iterator
 
 from . import _
 from . import core
+from . import session
 from .distro import DistributionError, get_driver
 from .launch import launch
 
@@ -205,6 +206,8 @@ def _machine_shell(
 def enter(
     target: str,
     command: list[str],
+    *,
+    session_manifest: dict[str, Any] | None = None,
 ) -> int:
     user_name, separator, space_name = target.rpartition("@")
     if not separator or not user_name or not space_name:
@@ -226,6 +229,10 @@ def enter(
                 "Enter target user must match the initiating user."
             )
         )
+    if caller_uid == 0 and session_manifest is not None:
+        raise core.SpacesError(
+            _("Session passthrough is unavailable for root entry.")
+        )
 
     info = _space_info(space_name)
     if str(caller_uid) not in info["permissions"]["users"]:
@@ -237,9 +244,21 @@ def enter(
             )
         )
 
+    validated_session = (
+        session.validate_manifest(session_manifest)
+        if session_manifest is not None
+        else None
+    )
     returncode = _ensure_space_started(space_name)
     if returncode != 0:
         return returncode
+    if validated_session is not None:
+        return session.enter(
+            user,
+            space_name,
+            command,
+            validated_session,
+        )
     return _machine_shell(user.pw_name, space_name, command)
 
 
@@ -396,6 +415,11 @@ def build_parser() -> argparse.ArgumentParser:
     launch_parser = subparsers.add_parser("launch")
     launch_parser.add_argument("space")
     enter_parser = subparsers.add_parser("enter")
+    enter_parser.add_argument(
+        "--session",
+        dest="session_manifest",
+        metavar="JSON",
+    )
     enter_parser.add_argument("target")
     enter_parser.add_argument(
         "command_arguments",
@@ -420,9 +444,20 @@ def main(argv: list[str] | None = None) -> int:
         if arguments.command == "launch":
             return launch(arguments.space)
         if arguments.command == "enter":
+            session_manifest = (
+                json.loads(arguments.session_manifest)
+                if arguments.session_manifest is not None
+                else None
+            )
+            if session_manifest is None:
+                return enter(
+                    arguments.target,
+                    arguments.command_arguments,
+                )
             return enter(
                 arguments.target,
                 arguments.command_arguments,
+                session_manifest=session_manifest,
             )
         if arguments.command == "enter-as-user":
             return enter_as_user(

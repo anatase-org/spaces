@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from spaces import core, priv
+from spaces import core, priv, session
 from spaces.distro import ubuntu
 
 
@@ -569,6 +569,154 @@ class PrivilegedTests(unittest.TestCase):
             )
 
         enter.assert_called_once_with("alice@work", ["--help"])
+
+    def test_enter_parser_decodes_session_manifest(self) -> None:
+        manifest = {
+            "version": 1,
+            "resources": ["appearance", "x11"],
+            "environment": {"DISPLAY": ":0"},
+        }
+        with (
+            mock.patch.object(priv.os, "geteuid", return_value=0),
+            mock.patch.object(priv, "enter", return_value=42) as enter,
+        ):
+            self.assertEqual(
+                priv.main(
+                    [
+                        "enter",
+                        "--session",
+                        json.dumps(manifest),
+                        "alice@work",
+                        "--",
+                        "/usr/bin/kate",
+                    ]
+                ),
+                42,
+            )
+
+        enter.assert_called_once_with(
+            "alice@work",
+            ["/usr/bin/kate"],
+            session_manifest=manifest,
+        )
+
+    def test_enter_routes_validated_session_to_private_shell(self) -> None:
+        info = core.create_info(
+            "work",
+            {"id": "custom"},
+            core.Identity(1000, 1000, Path("/home/alice")),
+            "basic",
+            [],
+            host_authentication=False,
+        )
+        supplied = {
+            "version": 1,
+            "resources": ["appearance", "x11"],
+            "environment": {"DISPLAY": ":0"},
+        }
+        validated = {
+            "version": 1,
+            "resources": ["appearance", "x11"],
+            "environment": {"DISPLAY": ":0", "TERM": "xterm"},
+        }
+        account = mock.Mock(
+            pw_uid=1000,
+            pw_gid=1000,
+            pw_name="alice",
+            pw_dir="/home/alice",
+        )
+        with (
+            mock.patch.object(priv, "_caller_uid", return_value=1000),
+            mock.patch.object(priv.pwd, "getpwnam", return_value=account),
+            mock.patch.object(priv, "_space_info", return_value=info),
+            mock.patch.object(priv, "_ensure_space_started", return_value=0),
+            mock.patch.object(
+                session,
+                "validate_manifest",
+                return_value=validated,
+            ) as validate,
+            mock.patch.object(
+                session,
+                "enter",
+                return_value=42,
+            ) as session_shell,
+        ):
+            self.assertEqual(
+                priv.enter(
+                    "alice@work",
+                    ["/usr/bin/kate"],
+                    session_manifest=supplied,
+                ),
+                42,
+            )
+
+        validate.assert_called_once_with(supplied)
+        session_shell.assert_called_once_with(
+            account,
+            "work",
+            ["/usr/bin/kate"],
+            validated,
+        )
+
+    def test_invalid_session_is_rejected_before_starting_space(self) -> None:
+        info = core.create_info(
+            "work",
+            {"id": "custom"},
+            core.Identity(1000, 1000, Path("/home/alice")),
+            "basic",
+            [],
+            host_authentication=False,
+        )
+        account = mock.Mock(
+            pw_uid=1000,
+            pw_name="alice",
+        )
+        with (
+            mock.patch.object(priv, "_caller_uid", return_value=1000),
+            mock.patch.object(priv.pwd, "getpwnam", return_value=account),
+            mock.patch.object(priv, "_space_info", return_value=info),
+            mock.patch.object(
+                priv.session,
+                "validate_manifest",
+                side_effect=core.SpacesError("unsafe"),
+            ),
+            mock.patch.object(priv, "_ensure_space_started") as start,
+        ):
+            with self.assertRaises(core.SpacesError):
+                priv.enter(
+                    "alice@work",
+                    [],
+                    session_manifest={
+                        "version": 1,
+                        "resources": ["devices"],
+                        "environment": {},
+                    },
+                )
+
+        start.assert_not_called()
+
+    def test_root_entry_rejects_session_passthrough(self) -> None:
+        account = mock.Mock(
+            pw_uid=0,
+            pw_name="root",
+        )
+        with (
+            mock.patch.object(priv, "_caller_uid", return_value=0),
+            mock.patch.object(priv.pwd, "getpwnam", return_value=account),
+            mock.patch.object(priv, "_space_info") as space_info,
+        ):
+            with self.assertRaises(core.SpacesError):
+                priv.enter(
+                    "root@work",
+                    [],
+                    session_manifest={
+                        "version": 1,
+                        "resources": ["appearance", "x11"],
+                        "environment": {"DISPLAY": ":0"},
+                    },
+                )
+
+        space_info.assert_not_called()
 
     def test_machine_shell_runs_direct(self) -> None:
         completed = subprocess.CompletedProcess([], 0)
