@@ -305,10 +305,6 @@ def create(info: dict[str, Any]) -> None:
 def configure(patch: dict[str, Any]) -> None:
     core.validate_configure_patch(patch)
     update = patch["permissions"]["user"]
-    if update["uid"] != _caller_uid():
-        raise core.SpacesError(
-            _("Configure payload must target the initiating user's permissions.")
-        )
 
     space = core.STATE_ROOT / patch["name"]
     with _state_lock():

@@ -179,6 +179,103 @@ class CliTests(unittest.TestCase):
             patch["permissions"]["user"]["permissions"]["administrator"]
         )
 
+    def test_configure_named_user_targets_host_account(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            initiating_home = Path(temporary) / "home" / "dev"
+            initiating_home.mkdir(parents=True)
+            target_home = Path(temporary) / "home" / "alice"
+            target_home.mkdir()
+            (target_home / "Documents").mkdir()
+            identity = core.Identity(1000, 1000, initiating_home)
+            info = core.create_info(
+                "ubuntu",
+                {"id": "ubuntu", "version": "resolute"},
+                identity,
+                "basic",
+                ["Projects"],
+            )
+            info_path = state / "ubuntu" / "info.json"
+            info_path.parent.mkdir(parents=True)
+            import json
+
+            info_path.write_text(json.dumps(info), encoding="utf-8")
+            account = mock.Mock(
+                pw_uid=1001,
+                pw_gid=1002,
+                pw_dir=str(target_home),
+            )
+            with (
+                mock.patch.object(core, "STATE_ROOT", state),
+                mock.patch.object(core, "initiating_identity", return_value=identity),
+                mock.patch.object(cli.pwd, "getpwnam", return_value=account) as lookup,
+                mock.patch.object(
+                    cli,
+                    "run_permission_wizard",
+                    return_value={
+                        "home": ["Documents"],
+                        "administrator": False,
+                    },
+                ) as wizard,
+                mock.patch.object(cli, "_invoke_helper", return_value=0) as invoke,
+            ):
+                self.assertEqual(
+                    cli.main(
+                        ["configure", "ubuntu", "--user", "alice"]
+                    ),
+                    0,
+                )
+
+        lookup.assert_called_once_with("alice")
+        self.assertEqual(wizard.call_args.kwargs["home"], target_home)
+        self.assertFalse(wizard.call_args.kwargs["include_system"])
+        patch = invoke.call_args.args[1]
+        self.assertNotIn("system", patch["permissions"])
+        self.assertEqual(
+            patch["permissions"]["user"],
+            {
+                "uid": 1001,
+                "gid": 1002,
+                "permissions": {
+                    "home": ["Documents"],
+                    "administrator": False,
+                },
+            },
+        )
+
+    def test_configure_rejects_unknown_named_user(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            home = Path(temporary) / "home"
+            home.mkdir()
+            identity = core.Identity(1000, 1000, home)
+            info = core.create_info(
+                "work",
+                {"id": "custom"},
+                identity,
+                "basic",
+                [],
+            )
+            info_path = state / "work" / "info.json"
+            info_path.parent.mkdir(parents=True)
+            import json
+
+            info_path.write_text(json.dumps(info), encoding="utf-8")
+            with (
+                mock.patch.object(core, "STATE_ROOT", state),
+                mock.patch.object(core, "initiating_identity", return_value=identity),
+                mock.patch.object(cli.pwd, "getpwnam", side_effect=KeyError),
+                mock.patch.object(cli, "_invoke_helper") as invoke,
+            ):
+                self.assertEqual(
+                    cli.main(
+                        ["configure", "work", "--user", "missing"]
+                    ),
+                    1,
+                )
+
+        invoke.assert_not_called()
+
     def test_delete_requires_enter_before_invoking_helper(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary) / "state"

@@ -28,8 +28,13 @@ def build_parser() -> argparse.ArgumentParser:
     configure_parser.add_argument("name")
     configure_parser.add_argument(
         "--user",
-        action="store_true",
-        help=_("configure only the current user's permissions"),
+        nargs="?",
+        const="",
+        metavar=_("USER"),
+        help=_(
+            "configure only USER's permissions "
+            "(default: current user)"
+        ),
     )
 
     delete_parser = subparsers.add_parser(
@@ -236,9 +241,27 @@ def _create(distro_id: str) -> int:
     return return_code
 
 
-def _configure(name: str, *, user_only: bool) -> int:
+def _configure(name: str, *, user: str | None) -> int:
     core.validate_space_name(name)
     identity = core.initiating_identity()
+    user_only = user is not None
+    if user:
+        try:
+            account = pwd.getpwnam(user)
+        except KeyError as error:
+            raise core.SpacesError(
+                _("Host user {user!r} does not exist.", user=user)
+            ) from error
+        home = Path(account.pw_dir)
+        if not home.is_absolute():
+            raise core.SpacesError(
+                _("Host user {user!r} has a non-absolute home path.", user=user)
+            )
+        identity = core.Identity(
+            uid=account.pw_uid,
+            gid=account.pw_gid,
+            home=home,
+        )
     target = core.STATE_ROOT / name
     info = core.load_info(target / "info.json")
     if info is None:
@@ -388,7 +411,7 @@ def main(argv: list[str] | None = None) -> int:
         if arguments.command == "create":
             return _create(arguments.type)
         elif arguments.command == "configure":
-            return _configure(arguments.name, user_only=arguments.user)
+            return _configure(arguments.name, user=arguments.user)
         elif arguments.command == "delete":
             return _delete(arguments.name, noconfirm=arguments.noconfirm)
         elif arguments.command == "enter":

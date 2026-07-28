@@ -248,6 +248,41 @@ class PrivilegedTests(unittest.TestCase):
         )
         self.assertEqual(updated["permissions"]["system"]["network"], "basic")
 
+    def test_configure_can_target_another_user(self) -> None:
+        with mock.patch.object(ubuntu.subprocess, "run"):
+            priv.create(self.info)
+
+        priv.configure(
+            {
+                "schema_version": 1,
+                "name": "ubuntu",
+                "permissions": {
+                    "user": {
+                        "uid": 1001,
+                        "gid": 1002,
+                        "permissions": {
+                            "home": ["Documents"],
+                            "administrator": False,
+                        },
+                    }
+                },
+            }
+        )
+
+        updated = json.loads(
+            (self.state_root / "ubuntu" / "info.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            updated["permissions"]["users"]["1001"],
+            {
+                "gid": 1002,
+                "permissions": {
+                    "home": ["Documents"],
+                    "administrator": False,
+                },
+            },
+        )
+
     def test_delete_removes_entire_space(self) -> None:
         space = self.state_root / "work"
         (space / "rootfs").mkdir(parents=True)
