@@ -198,6 +198,8 @@ static int update_dbus_environment(char *const *names, size_t count)
     return 0;
 }
 
+static void report_status(int descriptor, int status);
+
 static pid_t start_agent(const char *agent)
 {
     int error_pipe[2];
@@ -225,14 +227,14 @@ static pid_t start_agent(const char *agent)
             || dup2(null_fd, STDOUT_FILENO) < 0
             || dup2(null_fd, STDERR_FILENO) < 0) {
             child_errno = errno;
-            (void)write(error_pipe[1], &child_errno, sizeof(child_errno));
+            report_status(error_pipe[1], child_errno);
             _exit(127);
         }
         if (null_fd > STDERR_FILENO)
             close(null_fd);
         execl(agent, agent, (char *)NULL);
         child_errno = errno;
-        (void)write(error_pipe[1], &child_errno, sizeof(child_errno));
+        report_status(error_pipe[1], child_errno);
         _exit(127);
     }
     (void)setpgid(child, child);
