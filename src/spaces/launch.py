@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
+import errno
 import logging
 import os
 import pwd
 import select
 import shutil
 import signal
+import stat
 import subprocess
 import tempfile
 import threading
@@ -34,6 +36,10 @@ SYSTEMCTL = "/usr/bin/systemctl"
 SYSTEMD_ESCAPE = "/usr/bin/systemd-escape"
 SYSTEMD_UMOUNT = "/usr/bin/systemd-umount"
 API_VFS_WRITABLE = "SYSTEMD_NSPAWN_API_VFS_WRITABLE"
+PING_GROUP_RANGE = Path("/proc/sys/net/ipv4/ping_group_range")
+UNPRIVILEGED_PING_GROUP_RANGE = (0, 2_147_483_647)
+PING_EXECUTABLES = ("/usr/bin/ping", "/bin/ping")
+CAPABILITY_XATTR = "security.capability"
 ELIGIBLE_USER_STATES = frozenset({"active", "online", "lingering"})
 INELIGIBLE_USER_STATES = frozenset({"closing", "offline"})
 SYMLINKS = [
@@ -106,6 +112,97 @@ class HomeMount:
     uid: int
 
 
+def _drop_ping_capability(rootfs: Path) -> None:
+    """Let ping use ICMP sockets when every group is permitted to use them."""
+
+    try:
+        ping_group_range = tuple(
+            int(value) for value in PING_GROUP_RANGE.read_text().split()
+        )
+    except (OSError, ValueError):
+        return
+    if ping_group_range != UNPRIVILEGED_PING_GROUP_RANGE:
+        return
+
+    resolved_rootfs = rootfs.resolve(strict=True)
+    handled_files: set[tuple[int, int]] = set()
+    for executable in PING_EXECUTABLES:
+        candidate = rootfs / Path(executable).relative_to("/")
+        try:
+            resolved = candidate.resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        if not resolved.is_relative_to(resolved_rootfs):
+            logger.error(
+                _(
+                    "Could not remove ping capability from {path}: "
+                    "the path resolves outside the rootfs.",
+                    path=candidate,
+                )
+            )
+            continue
+
+        try:
+            descriptor = os.open(
+                resolved,
+                os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+            )
+        except OSError as error:
+            logger.error(
+                _(
+                    "Could not open ping executable {path}: {error}",
+                    path=candidate,
+                    error=error,
+                )
+            )
+            continue
+
+        try:
+            opened_path = Path(f"/proc/self/fd/{descriptor}").resolve(
+                strict=True
+            )
+            file_stat = os.fstat(descriptor)
+            if (
+                not opened_path.is_relative_to(resolved_rootfs)
+                or not stat.S_ISREG(file_stat.st_mode)
+            ):
+                logger.error(
+                    _(
+                        "Could not remove ping capability from {path}: "
+                        "the opened path is not a regular rootfs file.",
+                        path=candidate,
+                    )
+                )
+                continue
+
+            identity = (file_stat.st_dev, file_stat.st_ino)
+            if identity in handled_files:
+                continue
+            handled_files.add(identity)
+            try:
+                os.removexattr(descriptor, CAPABILITY_XATTR)
+            except OSError as error:
+                if error.errno != errno.ENODATA:
+                    logger.error(
+                        _(
+                            "Could not remove ping capability from "
+                            "{path}: {error}",
+                            path=candidate,
+                            error=error,
+                        )
+                    )
+        except (OSError, RuntimeError) as error:
+            logger.error(
+                _(
+                    "Could not inspect ping executable {path}: {error}",
+                    path=candidate,
+                    error=error,
+                )
+            )
+        finally:
+            os.close(descriptor)
+
+
 def _apply_rootfs_fixups(rootfs: Path) -> None:
     """Apply persistent compatibility fixups to a space rootfs."""
 
@@ -158,6 +255,8 @@ def _apply_rootfs_fixups(rootfs: Path) -> None:
                     error=error,
                 )
             )
+
+    _drop_ping_capability(rootfs)
 
 
 def _load_space(space_name: str) -> tuple[Path, Path, dict[str, Any]]:

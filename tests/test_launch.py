@@ -508,6 +508,113 @@ class LaunchTests(unittest.TestCase):
         self.assertEqual(os.readlink(var_home), "/home")
         self.assertIn("relative/path", logs.output[0])
 
+    def test_rootfs_fixups_drop_ping_capability_when_sockets_are_enabled(
+        self,
+    ) -> None:
+        ping_group_range = Path(self.temporary.name) / "ping_group_range"
+        ping_group_range.write_text("0 2147483647\n", encoding="utf-8")
+        ping = self.rootfs / "usr" / "bin" / "ping"
+        ping.parent.mkdir(parents=True)
+        ping.write_bytes(b"ping")
+
+        def remove_capability(
+            descriptor: int,
+            attribute: str,
+        ) -> None:
+            self.assertEqual(
+                Path(f"/proc/self/fd/{descriptor}").resolve(),
+                ping,
+            )
+            self.assertEqual(attribute, "security.capability")
+
+        with (
+            mock.patch.object(
+                launch_module,
+                "PING_GROUP_RANGE",
+                ping_group_range,
+            ),
+            mock.patch.object(
+                launch_module.os,
+                "removexattr",
+                side_effect=remove_capability,
+            ) as removexattr,
+        ):
+            launch_module._apply_rootfs_fixups(self.rootfs)
+
+        removexattr.assert_called_once()
+
+    def test_rootfs_fixups_keep_ping_capability_for_restricted_sockets(
+        self,
+    ) -> None:
+        ping_group_range = Path(self.temporary.name) / "ping_group_range"
+        ping_group_range.write_text("1 0\n", encoding="utf-8")
+        ping = self.rootfs / "usr" / "bin" / "ping"
+        ping.parent.mkdir(parents=True)
+        ping.write_bytes(b"ping")
+
+        with (
+            mock.patch.object(
+                launch_module,
+                "PING_GROUP_RANGE",
+                ping_group_range,
+            ),
+            mock.patch.object(
+                launch_module.os,
+                "removexattr",
+            ) as removexattr,
+        ):
+            launch_module._apply_rootfs_fixups(self.rootfs)
+
+        removexattr.assert_not_called()
+
+    def test_rootfs_fixups_keep_ping_capability_for_missing_sysctl(
+        self,
+    ) -> None:
+        ping = self.rootfs / "usr" / "bin" / "ping"
+        ping.parent.mkdir(parents=True)
+        ping.write_bytes(b"ping")
+
+        with (
+            mock.patch.object(
+                launch_module,
+                "PING_GROUP_RANGE",
+                Path(self.temporary.name) / "missing",
+            ),
+            mock.patch.object(
+                launch_module.os,
+                "removexattr",
+            ) as removexattr,
+        ):
+            launch_module._apply_rootfs_fixups(self.rootfs)
+
+        removexattr.assert_not_called()
+
+    def test_rootfs_fixups_reject_ping_outside_rootfs(self) -> None:
+        ping_group_range = Path(self.temporary.name) / "ping_group_range"
+        ping_group_range.write_text("0 2147483647\n", encoding="utf-8")
+        outside = Path(self.temporary.name) / "outside-ping"
+        outside.write_bytes(b"ping")
+        ping = self.rootfs / "usr" / "bin" / "ping"
+        ping.parent.mkdir(parents=True)
+        ping.symlink_to(outside)
+
+        with (
+            mock.patch.object(
+                launch_module,
+                "PING_GROUP_RANGE",
+                ping_group_range,
+            ),
+            mock.patch.object(
+                launch_module.os,
+                "removexattr",
+            ) as removexattr,
+            self.assertLogs(launch_module.logger, level="ERROR") as logs,
+        ):
+            launch_module._apply_rootfs_fixups(self.rootfs)
+
+        removexattr.assert_not_called()
+        self.assertIn("outside the rootfs", logs.output[0])
+
     def test_invalid_name_is_rejected_before_state_access(self) -> None:
         with (
             mock.patch.object(launch_module.subprocess, "Popen") as run,
