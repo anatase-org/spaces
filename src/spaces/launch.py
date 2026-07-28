@@ -1167,6 +1167,7 @@ def _command(
         "--keep-unit",
         "--settings=no",
         "--notify-ready=yes",
+        "--resolv-conf=bind-host",
         f"--drop-capability={','.join(dropped_caps)}",
         f"--capability={','.join(kept_caps)}",
     ]

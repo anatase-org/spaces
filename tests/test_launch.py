@@ -159,6 +159,7 @@ class LaunchTests(unittest.TestCase):
             "--keep-unit",
             "--settings=no",
             "--notify-ready=yes",
+            "--resolv-conf=bind-host",
         ]
 
         for network, added_caps in network_caps.items():
