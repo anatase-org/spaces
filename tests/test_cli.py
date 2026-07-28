@@ -535,11 +535,6 @@ class CliTests(unittest.TestCase):
                 "_invoke_raw_helper",
                 return_value=0,
             ) as invoke,
-            mock.patch.object(cli.os, "getpid", return_value=123),
-            mock.patch.object(
-                cli.auth, "process_start_time", return_value=456
-            ),
-            mock.patch.object(cli.auth, "client_session", return_value="c1"),
         ):
             self.assertEqual(
                 cli.main(
@@ -559,9 +554,6 @@ class CliTests(unittest.TestCase):
         invoke.assert_called_once_with(
             "enter",
             [
-                "--subject-pid=123",
-                "--subject-start-time=456",
-                "--subject-session=c1",
                 "alice@work",
                 "--",
                 "sh",
@@ -584,25 +576,15 @@ class CliTests(unittest.TestCase):
             mock.patch.object(
                 cli, "_invoke_raw_helper", return_value=0
             ) as invoke,
-            mock.patch.object(cli.os, "getpid", return_value=123),
-            mock.patch.object(
-                cli.auth, "process_start_time", return_value=456
-            ),
-            mock.patch.object(cli.auth, "client_session", return_value="c1"),
         ):
             self.assertEqual(cli.main(["enter", "work"]), 0)
 
         invoke.assert_called_once_with(
             "enter",
-            [
-                "--subject-pid=123",
-                "--subject-start-time=456",
-                "--subject-session=c1",
-                "alice@work",
-            ],
+            ["alice@work"],
         )
 
-    def test_disabled_enter_omits_host_session_routing(self) -> None:
+    def test_disabled_enter_uses_the_same_direct_entry_path(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary) / "state"
             home = Path(temporary) / "home"
@@ -632,15 +614,11 @@ class CliTests(unittest.TestCase):
                     return_value=mock.Mock(pw_name="alice"),
                 ),
                 mock.patch.object(
-                    cli.auth, "session_for_pid"
-                ) as session_for_pid,
-                mock.patch.object(
                     cli, "_invoke_raw_helper", return_value=0
                 ) as invoke,
             ):
                 self.assertEqual(cli.main(["enter", "work"]), 0)
 
-        session_for_pid.assert_not_called()
         invoke.assert_called_once_with("enter", ["alice@work"])
 
     def test_enter_root_and_user_root_use_privileged_helper(self) -> None:
@@ -658,13 +636,6 @@ class CliTests(unittest.TestCase):
                 mock.patch.object(
                     cli, "_invoke_raw_helper", return_value=0
                 ) as invoke,
-                mock.patch.object(cli.os, "getpid", return_value=123),
-                mock.patch.object(
-                    cli.auth, "process_start_time", return_value=456
-                ),
-                mock.patch.object(
-                    cli.auth, "session_for_pid", return_value="c1"
-                ),
             ):
                 self.assertEqual(
                     cli.main(
@@ -696,11 +667,6 @@ class CliTests(unittest.TestCase):
             mock.patch.object(
                 cli, "_invoke_raw_helper", return_value=0
             ) as invoke,
-            mock.patch.object(cli.os, "getpid", return_value=123),
-            mock.patch.object(
-                cli.auth, "process_start_time", return_value=456
-            ),
-            mock.patch.object(cli.auth, "client_session", return_value="c1"),
         ):
             self.assertEqual(
                 cli.main(
@@ -721,9 +687,6 @@ class CliTests(unittest.TestCase):
         invoke.assert_called_once_with(
             "enter-as-user",
             [
-                "--subject-pid=123",
-                "--subject-start-time=456",
-                "--subject-session=c1",
                 "builder",
                 "work",
                 "--",

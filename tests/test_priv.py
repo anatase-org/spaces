@@ -570,43 +570,13 @@ class PrivilegedTests(unittest.TestCase):
 
         enter.assert_called_once_with("alice@work", ["--help"])
 
-    def test_enter_parser_passes_verified_subject_metadata(self) -> None:
-        with (
-            mock.patch.object(priv.os, "geteuid", return_value=0),
-            mock.patch.object(priv, "enter", return_value=0) as enter,
-        ):
-            self.assertEqual(
-                priv.main(
-                    [
-                        "enter",
-                        "--subject-pid=12",
-                        "--subject-start-time=34",
-                        "--subject-session=c1",
-                        "alice@work",
-                    ]
-                ),
-                0,
-            )
-
-        enter.assert_called_once_with(
-            "alice@work",
-            [],
-            subject_pid=12,
-            subject_start_time=34,
-            subject_session="c1",
-        )
-
-    def test_machine_shell_injects_only_opaque_session_and_runs_direct(
-        self,
-    ) -> None:
+    def test_machine_shell_runs_direct(self) -> None:
         completed = subprocess.CompletedProcess([], 0)
         with mock.patch.object(
             priv.subprocess, "run", return_value=completed
         ) as run:
             self.assertEqual(
-                priv._machine_shell(
-                    "alice", "work", ["id", "-u"], "opaque-token"
-                ),
+                priv._machine_shell("alice", "work", ["id", "-u"]),
                 0,
             )
 
@@ -616,45 +586,12 @@ class PrivilegedTests(unittest.TestCase):
                 "/usr/bin/machinectl",
                 "--quiet",
                 "--uid=alice",
-                "--setenv=SPACES_AUTH_SESSION=opaque-token",
                 "--",
                 "shell",
                 "work",
                 "id",
                 "-u",
             ],
-        )
-
-    def test_verified_subject_must_be_live_unprivileged_ancestor(
-        self,
-    ) -> None:
-        account = mock.Mock(pw_gid=1000)
-        with (
-            mock.patch.object(priv, "_caller_uid", return_value=1000),
-            mock.patch.object(
-                priv.Path,
-                "stat",
-                return_value=mock.Mock(st_uid=1000),
-            ),
-            mock.patch.object(priv.os, "getpid", return_value=300),
-            mock.patch.object(
-                priv.auth,
-                "process_parent",
-                side_effect=lambda pid: {300: 200, 200: 123}[pid],
-            ),
-            mock.patch.object(
-                priv.auth, "process_start_time", return_value=456
-            ),
-            mock.patch.object(
-                priv.auth, "process_session_matches", return_value=True
-            ),
-            mock.patch.object(priv.pwd, "getpwuid", return_value=account),
-        ):
-            subject = priv._verified_subject(123, 456, "c1")
-
-        self.assertEqual(
-            subject,
-            priv.auth.LeaseSubject(123, 456, 1000, 1000, "c1"),
         )
 
     def test_enter_as_user_uses_privileged_target_without_host_lookup(

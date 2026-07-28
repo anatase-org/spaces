@@ -9,7 +9,6 @@
 #include <sys/un.h>
 
 #define SPACES_SOCKET "/run/spaces-host/auth.sock"
-#define SPACES_POLKIT_SERVICE "polkit-1"
 
 static int connect_broker(void) {
     int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
@@ -25,98 +24,6 @@ static int connect_broker(void) {
         return -1;
     }
     return fd;
-}
-
-static int safe_service(const char *value) {
-    if (value == NULL || *value == '\0' || strlen(value) > 128) return 0;
-    for (const unsigned char *p = (const unsigned char *)value; *p; ++p) {
-        if (
-            !((*p >= 'a' && *p <= 'z') ||
-              (*p >= 'A' && *p <= 'Z') ||
-              (*p >= '0' && *p <= '9') ||
-              *p == '-' || *p == '_' || *p == '.')
-        ) return 0;
-    }
-    return 1;
-}
-
-static int safe_token(const char *value) {
-    if (value == NULL || strlen(value) != SPACES_TOKEN_HEX_SIZE) return 0;
-    for (const unsigned char *p = (const unsigned char *)value; *p; ++p) {
-        if (!((*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'f')))
-            return 0;
-    }
-    return 1;
-}
-
-static int safe_session(const char *value) {
-    if (value == NULL || *value == '\0' || strlen(value) > 128) return 0;
-    for (const unsigned char *p = (const unsigned char *)value; *p; ++p) {
-        if (
-            !((*p >= 'a' && *p <= 'z') ||
-              (*p >= 'A' && *p <= 'Z') ||
-              (*p >= '0' && *p <= '9') ||
-              *p == '_' || *p == '-')
-        ) return 0;
-    }
-    return 1;
-}
-
-static int polkit_agent_pidfd(void) {
-#ifdef SO_PEERPIDFD
-    int descriptor = -1;
-    socklen_t size = sizeof(descriptor);
-    if (
-        getsockopt(
-            STDIN_FILENO,
-            SOL_SOCKET,
-            SO_PEERPIDFD,
-            &descriptor,
-            &size
-        ) == 0 &&
-        descriptor >= 0
-    )
-        return descriptor;
-#endif
-    return -1;
-}
-
-static void notify_session(pam_handle_t *pamh, uint8_t message_type) {
-    const char *token = pam_getenv(pamh, "SPACES_AUTH_SESSION");
-    const char *session_id = pam_getenv(pamh, "XDG_SESSION_ID");
-    const char *user = NULL;
-    struct passwd *account;
-    char request[512];
-    int request_size;
-    int fd;
-
-    if (token == NULL) token = getenv("SPACES_AUTH_SESSION");
-    if (
-        !safe_token(token) ||
-        !safe_session(session_id) ||
-        pam_get_user(pamh, &user, NULL) != PAM_SUCCESS ||
-        user == NULL
-    ) return;
-    account = getpwnam(user);
-    if (account == NULL) return;
-    request_size = snprintf(
-        request,
-        sizeof(request),
-        "{\"token\":\"%s\",\"uid\":%lu,\"session_id\":\"%s\"}",
-        token,
-        (unsigned long)account->pw_uid,
-        session_id
-    );
-    if (request_size < 0 || (size_t)request_size >= sizeof(request)) return;
-    fd = connect_broker();
-    if (fd < 0) return;
-    (void)spaces_send_frame(
-        fd,
-        message_type,
-        request,
-        (uint32_t)request_size
-    );
-    close(fd);
 }
 
 static int relay_message(
@@ -189,71 +96,30 @@ PAM_EXTERN int pam_sm_authenticate(
     (void)flags;
     (void)argc;
     (void)argv;
-    const char *token = pam_getenv(pamh, "SPACES_AUTH_SESSION");
     const char *user = NULL;
-    const void *service_item = NULL;
-    const char *service;
-    int token_required;
-    if (token == NULL)
-        token = getenv("SPACES_AUTH_SESSION");
-    if (
-        pam_get_user(pamh, &user, NULL) != PAM_SUCCESS || user == NULL ||
-        pam_get_item(pamh, PAM_SERVICE, &service_item) != PAM_SUCCESS ||
-        !safe_service((const char *)service_item)
-    ) return PAM_AUTHINFO_UNAVAIL;
-    service = service_item;
-    token_required = strcmp(service, SPACES_POLKIT_SERVICE) != 0;
-    if (token_required && !safe_token(token))
+    if (pam_get_user(pamh, &user, NULL) != PAM_SUCCESS || user == NULL)
         return PAM_AUTHINFO_UNAVAIL;
     struct passwd *account = getpwnam(user);
     if (account == NULL) return PAM_USER_UNKNOWN;
 
-    char request[512];
-    int request_size;
-    if (safe_token(token)) {
-        request_size = snprintf(
-            request,
-            sizeof(request),
-            "{\"token\":\"%s\",\"uid\":%lu,\"service\":\"%s\"}",
-            token,
-            (unsigned long)account->pw_uid,
-            service
-        );
-    } else {
-        request_size = snprintf(
-            request,
-            sizeof(request),
-            "{\"uid\":%lu,\"service\":\"%s\"}",
-            (unsigned long)account->pw_uid,
-            service
-        );
-    }
+    char request[64];
+    int request_size = snprintf(
+        request,
+        sizeof(request),
+        "{\"uid\":%lu}",
+        (unsigned long)account->pw_uid
+    );
     if (request_size < 0 || (size_t)request_size >= sizeof(request)) {
         return PAM_SYSTEM_ERR;
     }
     int fd = connect_broker();
     if (fd < 0) return PAM_AUTHINFO_UNAVAIL;
-    int agent_pidfd = -1;
-    if (!safe_token(token) && !token_required)
-        agent_pidfd = polkit_agent_pidfd();
-    int send_result;
-    if (agent_pidfd >= 0) {
-        send_result = spaces_send_frame_with_descriptor(
-            fd,
-            SPACES_AUTHENTICATE,
-            request,
-            (uint32_t)request_size,
-            agent_pidfd
-        );
-        close(agent_pidfd);
-    } else {
-        send_result = spaces_send_frame(
-            fd,
-            SPACES_AUTHENTICATE,
-            request,
-            (uint32_t)request_size
-        );
-    }
+    int send_result = spaces_send_frame(
+        fd,
+        SPACES_AUTHENTICATE,
+        request,
+        (uint32_t)request_size
+    );
     if (send_result < 0) {
         close(fd);
         return PAM_AUTHINFO_UNAVAIL;
@@ -322,8 +188,7 @@ PAM_EXTERN int pam_sm_open_session(
     int argc,
     const char **argv
 ) {
-    (void)flags; (void)argc; (void)argv;
-    notify_session(pamh, SPACES_SESSION_OPEN);
+    (void)pamh; (void)flags; (void)argc; (void)argv;
     return PAM_SUCCESS;
 }
 
@@ -333,8 +198,7 @@ PAM_EXTERN int pam_sm_close_session(
     int argc,
     const char **argv
 ) {
-    (void)flags; (void)argc; (void)argv;
-    notify_session(pamh, SPACES_SESSION_CLOSE);
+    (void)pamh; (void)flags; (void)argc; (void)argv;
     return PAM_SUCCESS;
 }
 

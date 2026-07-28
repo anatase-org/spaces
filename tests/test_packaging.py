@@ -22,22 +22,8 @@ class PackagingTests(unittest.TestCase):
         self.assertFalse(
             (ROOT / "src" / "spaces" / "distro" / "ubuntu.toml").exists()
         )
-        authentication = ROOT / "src" / "spaces" / "auth"
-        self.assertFalse((ROOT / "src" / "spaces" / "auth.py").exists())
-        self.assertEqual(
-            {
-                path.name
-                for path in authentication.glob("*.py")
-            },
-            {
-                "__init__.py",
-                "protocol.py",
-                "runtime.py",
-                "service.py",
-                "session.py",
-                "worker.py",
-            },
-        )
+        self.assertTrue((ROOT / "src" / "spaces" / "auth.py").is_file())
+        self.assertFalse((ROOT / "src" / "spaces" / "auth").exists())
         core_source = (ROOT / "src" / "spaces" / "core.py").read_text(
             encoding="utf-8"
         )
@@ -187,7 +173,7 @@ class PackagingTests(unittest.TestCase):
         pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         self.assertIn('"data/pam/spaces.ubuntu"', pyproject)
 
-    def test_pam_session_notifications_use_session_callbacks(self) -> None:
+    def test_pam_module_has_no_session_registration(self) -> None:
         source = (ROOT / "native" / "pam_spaces.c").read_text(
             encoding="utf-8"
         )
@@ -205,13 +191,10 @@ class PackagingTests(unittest.TestCase):
 
         self.assertNotIn("notify_session", setcred)
         self.assertNotIn("notify_session", account)
-        self.assertIn(
-            "notify_session(pamh, SPACES_SESSION_OPEN)", opening
-        )
+        self.assertNotIn("notify_session", opening)
         self.assertNotIn("launch_polkit_agent", source)
-        self.assertIn(
-            "notify_session(pamh, SPACES_SESSION_CLOSE)", closing
-        )
+        self.assertNotIn("notify_session", closing)
+        self.assertNotIn("SPACES_AUTH_SESSION", source)
 
     def test_pkgbuild_is_not_in_source_manifest(self) -> None:
         manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8")

@@ -20,7 +20,6 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from . import _
-from . import auth
 from . import core
 from .distro import DistributionError, get_driver
 from .launch import launch
@@ -187,17 +186,12 @@ def _machine_shell(
     user_name: str,
     space_name: str,
     command: list[str],
-    lease_token: str | None = None,
 ) -> int:
-    environment: list[str] = []
-    if lease_token is not None:
-        environment = [f"--setenv={auth.SESSION_ENV}={lease_token}"]
     completed = subprocess.run(
         [
             MACHINECTL,
             "--quiet",
             f"--uid={user_name}",
-            *environment,
             "--",
             "shell",
             space_name,
@@ -208,85 +202,9 @@ def _machine_shell(
     return completed.returncode
 
 
-def _verified_subject(
-    pid: int | None,
-    start_time: int | None,
-    session_id: str | None,
-) -> auth.LeaseSubject | None:
-    if pid is None and start_time is None and session_id is None:
-        return None
-    if pid is None or start_time is None or not session_id:
-        raise core.SpacesError(_("Incomplete host authentication subject."))
-    caller_uid = _caller_uid()
-    try:
-        metadata = Path(f"/proc/{pid}").stat()
-    except OSError as error:
-        raise core.SpacesError(
-            _("Could not inspect initiating process {pid}.", pid=pid)
-        ) from error
-    if metadata.st_uid != caller_uid:
-        raise core.SpacesError(_("Initiating process UID does not match caller."))
-    if auth.process_start_time(pid) != start_time:
-        raise core.SpacesError(_("Initiating process start time changed."))
-    ancestor = os.getpid()
-    seen: set[int] = set()
-    while ancestor > 1 and ancestor not in seen and ancestor != pid:
-        seen.add(ancestor)
-        ancestor = auth.process_parent(ancestor)
-    if ancestor != pid:
-        raise core.SpacesError(_("Initiating process is not a helper ancestor."))
-    if not auth.process_session_matches(pid, session_id, caller_uid):
-        raise core.SpacesError(_("Initiating process session does not match."))
-    try:
-        account = pwd.getpwuid(caller_uid)
-    except KeyError as error:
-        raise core.SpacesError(_("Initiating host user no longer exists.")) from error
-    return auth.LeaseSubject(
-        pid=pid,
-        start_time=start_time,
-        uid=caller_uid,
-        gid=account.pw_gid,
-        session_id=session_id,
-    )
-
-
-def _authentication_lease(
-    info: dict[str, Any],
-    space_name: str,
-    subject: auth.LeaseSubject | None,
-) -> auth.LeaseConnection | None:
-    enabled = info["permissions"]["system"].get("host_authentication", True)
-    if not enabled:
-        return None
-    if subject is None:
-        raise core.SpacesError(
-            _("Host authentication requires an initiating login session.")
-        )
-    socket_path = (
-        auth.RUNTIME_ROOT
-        / space_name
-        / "authentication"
-        / "auth.sock"
-    )
-    try:
-        return auth.LeaseConnection(socket_path, subject)
-    except OSError as error:
-        raise core.SpacesError(
-            _(
-                "Could not connect to the space authentication service: "
-                "{error}",
-                error=error,
-            )
-        ) from error
-
-
 def enter(
     target: str,
     command: list[str],
-    *,
-    subject_pid: int | None = None,
-    subject_start_time: int | None = None,
-    subject_session: str | None = None,
 ) -> int:
     user_name, separator, space_name = target.rpartition("@")
     if not separator or not user_name or not space_name:
@@ -319,37 +237,16 @@ def enter(
             )
         )
 
-    subject = None
-    if info["permissions"]["system"].get("host_authentication", True):
-        subject = _verified_subject(
-            subject_pid,
-            subject_start_time,
-            subject_session,
-        )
     returncode = _ensure_space_started(space_name)
     if returncode != 0:
         return returncode
-    lease = _authentication_lease(info, space_name, subject)
-    try:
-        return _machine_shell(
-            user.pw_name,
-            space_name,
-            command,
-            lease.token if lease is not None else None,
-        )
-    finally:
-        if lease is not None:
-            lease.close()
+    return _machine_shell(user.pw_name, space_name, command)
 
 
 def enter_as_user(
     user_name: str,
     space_name: str,
     command: list[str],
-    *,
-    subject_pid: int | None = None,
-    subject_start_time: int | None = None,
-    subject_session: str | None = None,
 ) -> int:
     if (
         not user_name
@@ -360,38 +257,15 @@ def enter_as_user(
             _("Invalid target user name: {user!r}.", user=user_name)
     )
     info = _space_info(space_name)
-    subject = None
-    if (
-        user_name != "root"
-        and info["permissions"]["system"].get("host_authentication", True)
-    ):
+    if user_name != "root":
         if str(_caller_uid()) not in info["permissions"]["users"]:
             raise core.SpacesError(
                 _("Initiating user is not configured for this space.")
             )
-        subject = _verified_subject(
-            subject_pid,
-            subject_start_time,
-            subject_session,
-        )
     returncode = _ensure_space_started(space_name)
     if returncode != 0:
         return returncode
-    lease = (
-        None
-        if user_name == "root"
-        else _authentication_lease(info, space_name, subject)
-    )
-    try:
-        return _machine_shell(
-            user_name,
-            space_name,
-            command,
-            lease.token if lease is not None else None,
-        )
-    finally:
-        if lease is not None:
-            lease.close()
+    return _machine_shell(user_name, space_name, command)
 
 
 def create(info: dict[str, Any]) -> None:
@@ -522,18 +396,12 @@ def build_parser() -> argparse.ArgumentParser:
     launch_parser = subparsers.add_parser("launch")
     launch_parser.add_argument("space")
     enter_parser = subparsers.add_parser("enter")
-    enter_parser.add_argument("--subject-pid", type=int)
-    enter_parser.add_argument("--subject-start-time", type=int)
-    enter_parser.add_argument("--subject-session")
     enter_parser.add_argument("target")
     enter_parser.add_argument(
         "command_arguments",
         nargs=argparse.REMAINDER,
     )
     enter_as_user_parser = subparsers.add_parser("enter-as-user")
-    enter_as_user_parser.add_argument("--subject-pid", type=int)
-    enter_as_user_parser.add_argument("--subject-start-time", type=int)
-    enter_as_user_parser.add_argument("--subject-session")
     enter_as_user_parser.add_argument("user")
     enter_as_user_parser.add_argument("space")
     enter_as_user_parser.add_argument(
@@ -552,31 +420,15 @@ def main(argv: list[str] | None = None) -> int:
         if arguments.command == "launch":
             return launch(arguments.space)
         if arguments.command == "enter":
-            subject_arguments = {}
-            if arguments.subject_pid is not None:
-                subject_arguments = {
-                    "subject_pid": arguments.subject_pid,
-                    "subject_start_time": arguments.subject_start_time,
-                    "subject_session": arguments.subject_session,
-                }
             return enter(
                 arguments.target,
                 arguments.command_arguments,
-                **subject_arguments,
             )
         if arguments.command == "enter-as-user":
-            subject_arguments = {}
-            if arguments.subject_pid is not None:
-                subject_arguments = {
-                    "subject_pid": arguments.subject_pid,
-                    "subject_start_time": arguments.subject_start_time,
-                    "subject_session": arguments.subject_session,
-                }
             return enter_as_user(
                 arguments.user,
                 arguments.space,
                 arguments.command_arguments,
-                **subject_arguments,
             )
 
         payload = json.loads(arguments.payload)

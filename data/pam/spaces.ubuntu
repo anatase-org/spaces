@@ -6,6 +6,3 @@ Auth:
 	[success=end open_err=ignore default=die]	/run/spaces-host/bin/pam_spaces.so
 Auth-Initial:
 	[success=end open_err=ignore default=die]	/run/spaces-host/bin/pam_spaces.so
-Session-Type: Additional
-Session:
-	optional	/run/spaces-host/bin/pam_spaces.so

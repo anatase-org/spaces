@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any
 
 from . import _
-from . import auth
 from . import core
 from .distro import DistributionError, get_driver
 from .logging import configure_logging, log, run_streamed
@@ -458,19 +457,6 @@ def _enter(
     else:
         operation = "enter-as-user"
         enter_arguments = [enter_user, space]
-    info = core.load_info(core.STATE_ROOT / space / "info.json")
-    host_authentication = (
-        info is None
-        or info["permissions"]["system"].get("host_authentication", True)
-    )
-    if host_authentication and enter_user != "root":
-        subject_pid = os.getpid()
-        subject_arguments = [
-            f"--subject-pid={subject_pid}",
-            f"--subject-start-time={auth.process_start_time(subject_pid)}",
-            f"--subject-session={auth.client_session(subject_pid)}",
-        ]
-        enter_arguments[0:0] = subject_arguments
     if command:
         enter_arguments.extend(["--", *command])
     return _invoke_raw_helper(operation, enter_arguments)

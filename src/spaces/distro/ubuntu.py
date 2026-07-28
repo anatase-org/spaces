@@ -176,8 +176,12 @@ class UbuntuDistribution(Distribution):
                 return True
             if destination.is_symlink() or not destination.is_file():
                 raise DistributionError(
-                    _("Unsafe Spaces PAM profile: {path}.", path=destination)
+                    _(
+                        "Unsafe Spaces PAM profile: {path}.",
+                        path=destination,
+                    )
                 )
+
         try:
             profile = HOST_AUTHENTICATION_PROFILE.read_bytes()
         except OSError as error:

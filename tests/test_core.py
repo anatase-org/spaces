@@ -42,7 +42,7 @@ class CoreTests(unittest.TestCase):
             profile_directory = rootfs / "usr" / "share" / "pam-configs"
             profile_directory.mkdir(parents=True)
             source = root / "spaces.ubuntu"
-            source.write_text("Name: Spaces\n", encoding="utf-8")
+            source.write_text("Name: Spaces auth\n", encoding="utf-8")
             command = [
                 "chroot",
                 str(rootfs),
@@ -69,7 +69,7 @@ class CoreTests(unittest.TestCase):
                 destination = profile_directory / "spaces"
                 self.assertEqual(
                     destination.read_text(encoding="utf-8"),
-                    "Name: Spaces\n",
+                    "Name: Spaces auth\n",
                 )
                 self.assertEqual(
                     destination.stat().st_mode & 0o777,
