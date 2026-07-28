@@ -167,13 +167,19 @@ def _space_info(name: str) -> dict[str, Any]:
     return info
 
 
-def start(name: str) -> int:
-    _space_directory(name)
-    completed = subprocess.run(
+def _ensure_space_started(name: str) -> int:
+    available = subprocess.run(
+        [MACHINECTL, "--quiet", "show", name],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    ).returncode == 0
+    if available:
+        return 0
+    return subprocess.run(
         [SYSTEMCTL, "start", f"spaces@{name}.service"],
         check=False,
-    )
-    return completed.returncode
+    ).returncode
 
 
 def _machine_shell(
@@ -228,6 +234,9 @@ def enter(target: str, command: list[str]) -> int:
             )
         )
 
+    returncode = _ensure_space_started(space_name)
+    if returncode != 0:
+        return returncode
     return _machine_shell(user.pw_name, space_name, command)
 
 
@@ -245,6 +254,9 @@ def enter_as_user(
             _("Invalid target user name: {user!r}.", user=user_name)
         )
     _space_info(space_name)
+    returncode = _ensure_space_started(space_name)
+    if returncode != 0:
+        return returncode
     return _machine_shell(user_name, space_name, command)
 
 
@@ -371,8 +383,6 @@ def build_parser() -> argparse.ArgumentParser:
         command_parser.add_argument("payload")
     launch_parser = subparsers.add_parser("launch")
     launch_parser.add_argument("space")
-    start_parser = subparsers.add_parser("start")
-    start_parser.add_argument("space")
     enter_parser = subparsers.add_parser("enter")
     enter_parser.add_argument("target")
     enter_parser.add_argument(
@@ -397,8 +407,6 @@ def main(argv: list[str] | None = None) -> int:
         arguments = build_parser().parse_args(argv)
         if arguments.command == "launch":
             return launch(arguments.space)
-        if arguments.command == "start":
-            return start(arguments.space)
         if arguments.command == "enter":
             return enter(arguments.target, arguments.command_arguments)
         if arguments.command == "enter-as-user":

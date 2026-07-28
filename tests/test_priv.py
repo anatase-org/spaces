@@ -308,41 +308,7 @@ class PrivilegedTests(unittest.TestCase):
             check=False,
         )
 
-    def test_start_validates_space_and_starts_service(self) -> None:
-        (self.state_root / "work").mkdir(parents=True)
-        completed = subprocess.CompletedProcess([], 42)
-        with mock.patch.object(
-            priv.subprocess, "run", return_value=completed
-        ) as run:
-            self.assertEqual(priv.start("work"), 42)
-
-        run.assert_called_once_with(
-            [
-                "/usr/bin/systemctl",
-                "start",
-                "spaces@work.service",
-            ],
-            check=False,
-        )
-
-    def test_start_rejects_missing_or_symlinked_space(self) -> None:
-        outside = Path(self.temporary.name) / "outside"
-        outside.mkdir()
-        self.state_root.mkdir()
-        (self.state_root / "linked").symlink_to(
-            outside,
-            target_is_directory=True,
-        )
-        for name in ("missing", "linked"):
-            with (
-                self.subTest(name=name),
-                mock.patch.object(priv.subprocess, "run") as run,
-                self.assertRaises(core.SpacesError),
-            ):
-                priv.start(name)
-            run.assert_not_called()
-
-    def test_enter_validates_user_and_runs_machinectl(self) -> None:
+    def test_enter_validates_user_then_starts_and_runs_machinectl(self) -> None:
         info = core.create_info(
             "work",
             {"id": "custom"},
@@ -353,7 +319,9 @@ class PrivilegedTests(unittest.TestCase):
         space = self.state_root / "work"
         space.mkdir(parents=True)
         priv._write_info(space, info)
-        completed = subprocess.CompletedProcess([], 42)
+        unavailable = subprocess.CompletedProcess([], 1)
+        started = subprocess.CompletedProcess([], 0)
+        entered = subprocess.CompletedProcess([], 42)
         with (
             mock.patch.dict(os.environ, {"PKEXEC_UID": "1000"}, clear=True),
             mock.patch.object(
@@ -365,7 +333,9 @@ class PrivilegedTests(unittest.TestCase):
                 ),
             ) as getpwnam,
             mock.patch.object(
-                priv.subprocess, "run", return_value=completed
+                priv.subprocess,
+                "run",
+                side_effect=[unavailable, started, entered],
             ) as run,
         ):
             self.assertEqual(
@@ -377,19 +347,38 @@ class PrivilegedTests(unittest.TestCase):
             )
 
         getpwnam.assert_called_once_with("alice@example")
-        run.assert_called_once_with(
+        self.assertEqual(
+            run.call_args_list,
             [
-                "/usr/bin/machinectl",
-                "--quiet",
-                "--uid=alice@example",
-                "--",
-                "shell",
-                "work",
-                "--help",
-                "literal value",
-                "$HOME",
+                mock.call(
+                    ["/usr/bin/machinectl", "--quiet", "show", "work"],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                ),
+                mock.call(
+                    [
+                        "/usr/bin/systemctl",
+                        "start",
+                        "spaces@work.service",
+                    ],
+                    check=False,
+                ),
+                mock.call(
+                    [
+                        "/usr/bin/machinectl",
+                        "--quiet",
+                        "--uid=alice@example",
+                        "--",
+                        "shell",
+                        "work",
+                        "--help",
+                        "literal value",
+                        "$HOME",
+                    ],
+                    check=False,
+                ),
             ],
-            check=False,
         )
 
     def test_enter_without_command_uses_machinectl_default_shell(self) -> None:
@@ -413,12 +402,18 @@ class PrivilegedTests(unittest.TestCase):
             mock.patch.object(
                 priv.subprocess,
                 "run",
-                return_value=subprocess.CompletedProcess([], 0),
+                side_effect=[
+                    subprocess.CompletedProcess([], 0),
+                    subprocess.CompletedProcess([], 0),
+                ],
             ) as run,
         ):
             self.assertEqual(priv.enter("alice@work", []), 0)
 
-        self.assertEqual(run.call_args.args[0][-2:], ["shell", "work"])
+        self.assertEqual(
+            run.call_args_list[1].args[0][-2:],
+            ["shell", "work"],
+        )
 
     def test_enter_rejects_another_or_unconfigured_user(self) -> None:
         space = self.state_root / "ubuntu"
@@ -492,13 +487,15 @@ class PrivilegedTests(unittest.TestCase):
         space = self.state_root / "ubuntu"
         space.mkdir(parents=True)
         priv._write_info(space, self.info)
-        completed = subprocess.CompletedProcess([], 42)
+        unavailable = subprocess.CompletedProcess([], 1)
+        started = subprocess.CompletedProcess([], 0)
+        entered = subprocess.CompletedProcess([], 42)
         with (
             mock.patch.object(priv.pwd, "getpwnam") as getpwnam,
             mock.patch.object(
                 priv.subprocess,
                 "run",
-                return_value=completed,
+                side_effect=[unavailable, started, entered],
             ) as run,
         ):
             self.assertEqual(
@@ -508,21 +505,40 @@ class PrivilegedTests(unittest.TestCase):
                     ["id", "-u"],
                 ),
                 42,
-            )
+        )
 
         getpwnam.assert_not_called()
-        run.assert_called_once_with(
+        self.assertEqual(
+            run.call_args_list,
             [
-                "/usr/bin/machinectl",
-                "--quiet",
-                "--uid=builder",
-                "--",
-                "shell",
-                "ubuntu",
-                "id",
-                "-u",
+                mock.call(
+                    ["/usr/bin/machinectl", "--quiet", "show", "ubuntu"],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                ),
+                mock.call(
+                    [
+                        "/usr/bin/systemctl",
+                        "start",
+                        "spaces@ubuntu.service",
+                    ],
+                    check=False,
+                ),
+                mock.call(
+                    [
+                        "/usr/bin/machinectl",
+                        "--quiet",
+                        "--uid=builder",
+                        "--",
+                        "shell",
+                        "ubuntu",
+                        "id",
+                        "-u",
+                    ],
+                    check=False,
+                ),
             ],
-            check=False,
         )
 
     def test_enter_as_user_rejects_unsafe_user_name(self) -> None:

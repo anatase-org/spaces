@@ -326,23 +326,6 @@ def _enter(
                 _("No passwd entry exists for UID {uid}.", uid=identity.uid)
             ) from error
 
-    try:
-        available = subprocess.run(
-            ["/usr/bin/machinectl", "--quiet", "show", space],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        ).returncode == 0
-    except OSError as error:
-        raise core.SpacesError(
-            _("Could not query space availability: {error}", error=error)
-        ) from error
-
-    if not available:
-        returncode = _invoke_raw_helper("start", [space])
-        if returncode != 0:
-            return returncode
-
     if enter_user is None:
         assert user_name is not None
         operation = "enter"

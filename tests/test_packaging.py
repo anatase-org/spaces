@@ -74,7 +74,6 @@ class PackagingTests(unittest.TestCase):
             "org.anatase.spaces.configure": ("configure", "auth_admin"),
             "org.anatase.spaces.delete": ("delete", "auth_admin"),
             "org.anatase.spaces.cp": ("cp", "auth_admin"),
-            "org.anatase.spaces.start": ("start", "yes"),
             "org.anatase.spaces.enter": ("enter", "yes"),
             "org.anatase.spaces.enter-as-user": (
                 "enter-as-user",

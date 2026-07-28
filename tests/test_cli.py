@@ -284,9 +284,8 @@ class CliTests(unittest.TestCase):
             },
         )
 
-    def test_enter_starts_unavailable_space_then_forwards_command(self) -> None:
+    def test_enter_delegates_startup_and_forwards_command(self) -> None:
         identity = core.Identity(1000, 1000, Path("/home/alice"))
-        unavailable = subprocess.CompletedProcess([], 1)
         with (
             mock.patch.object(
                 core, "initiating_identity", return_value=identity
@@ -297,12 +296,12 @@ class CliTests(unittest.TestCase):
                 return_value=mock.Mock(pw_name="alice"),
             ),
             mock.patch.object(
-                cli.subprocess, "run", return_value=unavailable
+                cli.subprocess, "run"
             ) as run,
             mock.patch.object(
                 cli,
                 "_invoke_raw_helper",
-                side_effect=[0, 0],
+                return_value=0,
             ) as invoke,
         ):
             self.assertEqual(
@@ -319,34 +318,20 @@ class CliTests(unittest.TestCase):
                 0,
             )
 
-        run.assert_called_once_with(
-            ["/usr/bin/machinectl", "--quiet", "show", "work"],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        self.assertEqual(
-            invoke.call_args_list,
+        run.assert_not_called()
+        invoke.assert_called_once_with(
+            "enter",
             [
-                mock.call("start", ["work"]),
-                mock.call(
-                    "enter",
-                    [
-                        "alice@work",
-                        "--",
-                        "sh",
-                        "-c",
-                        "printf '%s' \"$HOME\"",
-                    ],
-                ),
+                "alice@work",
+                "--",
+                "sh",
+                "-c",
+                "printf '%s' \"$HOME\"",
             ],
         )
 
-    def test_enter_available_space_skips_start_and_defaults_to_shell(
-        self,
-    ) -> None:
+    def test_enter_without_command_defaults_to_shell(self) -> None:
         identity = core.Identity(1000, 1000, Path("/home/alice"))
-        available = subprocess.CompletedProcess([], 0)
         with (
             mock.patch.object(
                 core, "initiating_identity", return_value=identity
@@ -355,9 +340,6 @@ class CliTests(unittest.TestCase):
                 cli.pwd,
                 "getpwuid",
                 return_value=mock.Mock(pw_name="alice"),
-            ),
-            mock.patch.object(
-                cli.subprocess, "run", return_value=available
             ),
             mock.patch.object(
                 cli, "_invoke_raw_helper", return_value=0
@@ -367,31 +349,7 @@ class CliTests(unittest.TestCase):
 
         invoke.assert_called_once_with("enter", ["alice@work"])
 
-    def test_enter_does_not_continue_after_start_failure(self) -> None:
-        identity = core.Identity(1000, 1000, Path("/home/alice"))
-        unavailable = subprocess.CompletedProcess([], 1)
-        with (
-            mock.patch.object(
-                core, "initiating_identity", return_value=identity
-            ),
-            mock.patch.object(
-                cli.pwd,
-                "getpwuid",
-                return_value=mock.Mock(pw_name="alice"),
-            ),
-            mock.patch.object(
-                cli.subprocess, "run", return_value=unavailable
-            ),
-            mock.patch.object(
-                cli, "_invoke_raw_helper", return_value=42
-            ) as invoke,
-        ):
-            self.assertEqual(cli.main(["enter", "work"]), 42)
-
-        invoke.assert_called_once_with("start", ["work"])
-
     def test_enter_root_and_user_root_use_privileged_helper(self) -> None:
-        available = subprocess.CompletedProcess([], 0)
         for arguments in (
             ["--root", "work"],
             ["--user=root", "work"],
@@ -400,11 +358,6 @@ class CliTests(unittest.TestCase):
         ):
             with (
                 self.subTest(arguments=arguments),
-                mock.patch.object(
-                    cli.subprocess,
-                    "run",
-                    return_value=available,
-                ),
                 mock.patch.object(
                     core, "initiating_identity"
                 ) as initiating_identity,
@@ -432,13 +385,7 @@ class CliTests(unittest.TestCase):
             )
 
     def test_enter_as_named_user_preserves_command_arguments(self) -> None:
-        available = subprocess.CompletedProcess([], 0)
         with (
-            mock.patch.object(
-                cli.subprocess,
-                "run",
-                return_value=available,
-            ),
             mock.patch.object(
                 cli, "_invoke_raw_helper", return_value=0
             ) as invoke,
