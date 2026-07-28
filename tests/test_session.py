@@ -154,6 +154,52 @@ class SessionManifestTests(unittest.TestCase):
         )
 
 
+class SessionUserPathTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.home = self.root / "home"
+        self.home.mkdir()
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def test_prepares_user_owned_session_mountpoints(self) -> None:
+        uid = os.getuid()
+        gid = os.getgid()
+
+        session.prepare_user_paths(self.home, uid, gid, "alice")
+
+        config = self.home / ".config"
+        paths = [
+            config,
+            *(config / name for name in session.CONFIG_DIRECTORIES),
+            *(config / name for name in session.CONFIG_FILES),
+        ]
+        for path in paths:
+            with self.subTest(path=path):
+                metadata = path.stat()
+                self.assertEqual(metadata.st_uid, uid)
+                self.assertEqual(metadata.st_gid, gid)
+        self.assertTrue((config / "kdeglobals").is_file())
+
+    def test_rejects_unsafe_session_mountpoint(self) -> None:
+        outside = self.root / "outside"
+        outside.mkdir()
+        (self.home / ".config").symlink_to(
+            outside,
+            target_is_directory=True,
+        )
+
+        with self.assertRaises(core.SpacesError):
+            session.prepare_user_paths(
+                self.home,
+                os.getuid(),
+                os.getgid(),
+                "alice",
+            )
+
+
 class SessionPrivilegedTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()

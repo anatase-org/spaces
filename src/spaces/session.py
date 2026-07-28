@@ -27,6 +27,15 @@ from . import core
 
 SESSION_VERSION = 1
 MAX_ENVIRONMENT_VALUE = 4096
+# systemd creates missing BindReadOnlyPaths destinations as root, even for a
+# transient unit with private mounts. Prepare these persistent guest-home
+# targets before the space starts so applications can write beside them.
+CONFIG_DIRECTORIES = (
+    "gtk-3.0",
+    "gtk-4.0",
+    "fontconfig",
+)
+CONFIG_FILES = ("kdeglobals",)
 SYSTEMCTL = "/usr/bin/systemctl"
 MACHINECTL = "/usr/bin/machinectl"
 SYSTEMD_RUN = "/usr/bin/systemd-run"
@@ -105,6 +114,106 @@ DESKTOP_ENVIRONMENT = frozenset(
     }
 )
 DISPLAY_ENVIRONMENT = frozenset({"DISPLAY", "WAYLAND_DISPLAY"})
+
+
+def prepare_user_paths(
+    home: Path,
+    uid: int,
+    gid: int,
+    user_name: str,
+) -> None:
+    """Prepare safe guest-owned targets for appearance-data mounts."""
+
+    directory_flags = (
+        os.O_RDONLY
+        | os.O_DIRECTORY
+        | os.O_NOFOLLOW
+        | os.O_CLOEXEC
+    )
+    home_descriptor: int | None = None
+    config_descriptor: int | None = None
+    try:
+        home_descriptor = os.open(home, directory_flags)
+        try:
+            os.mkdir(".config", mode=0o700, dir_fd=home_descriptor)
+        except FileExistsError:
+            pass
+        config_descriptor = os.open(
+            ".config",
+            directory_flags,
+            dir_fd=home_descriptor,
+        )
+        os.close(home_descriptor)
+        home_descriptor = None
+        os.fchown(config_descriptor, uid, gid)
+        for name in CONFIG_DIRECTORIES:
+            try:
+                os.mkdir(
+                    name,
+                    mode=0o700,
+                    dir_fd=config_descriptor,
+                )
+            except FileExistsError:
+                pass
+            descriptor = os.open(
+                name,
+                directory_flags,
+                dir_fd=config_descriptor,
+            )
+            try:
+                os.fchown(descriptor, uid, gid)
+            finally:
+                os.close(descriptor)
+
+        for name in CONFIG_FILES:
+            created = False
+            try:
+                descriptor = os.open(
+                    name,
+                    os.O_RDONLY
+                    | os.O_CREAT
+                    | os.O_EXCL
+                    | os.O_NOFOLLOW
+                    | os.O_CLOEXEC,
+                    0o600,
+                    dir_fd=config_descriptor,
+                )
+                created = True
+            except FileExistsError:
+                descriptor = os.open(
+                    name,
+                    os.O_RDONLY
+                    | os.O_NONBLOCK
+                    | os.O_NOFOLLOW
+                    | os.O_CLOEXEC,
+                    dir_fd=config_descriptor,
+                )
+            try:
+                if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                    raise core.SpacesError(
+                        _(
+                            "Unsafe user session path for {name!r}.",
+                            name=user_name,
+                        )
+                    )
+                os.fchown(descriptor, uid, gid)
+                if created:
+                    os.fchmod(descriptor, 0o600)
+            finally:
+                os.close(descriptor)
+    except OSError as error:
+        raise core.SpacesError(
+            _(
+                "Could not prepare session paths for {name!r}: {error}",
+                name=user_name,
+                error=error,
+            )
+        ) from error
+    finally:
+        if config_descriptor is not None:
+            os.close(config_descriptor)
+        if home_descriptor is not None:
+            os.close(home_descriptor)
 
 
 def _safe_value(value: object) -> bool:

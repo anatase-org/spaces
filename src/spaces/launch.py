@@ -24,6 +24,7 @@ from typing import Any
 from . import _
 from . import auth
 from . import core
+from . import session
 from .distro import get_driver
 from .logging import configure_logging
 
@@ -743,6 +744,12 @@ def _ensure_user_homes(rootfs: Path, users: tuple[SpaceUser, ...]) -> None:
         else:
             os.chown(home, user.uid, user.gid)
             os.chmod(home, 0o700)
+        session.prepare_user_paths(
+            user.space_home,
+            user.uid,
+            user.gid,
+            user.name,
+        )
 
 
 def _prepare_mounts(users: tuple[SpaceUser, ...]) -> tuple[HomeMount, ...]:

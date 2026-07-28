@@ -974,10 +974,13 @@ class UserFixupTests(unittest.TestCase):
             "first\n",
         )
 
-    def test_missing_skeleton_creates_empty_home(self) -> None:
+    def test_missing_skeleton_creates_session_paths(self) -> None:
         user = self._user()
         launch_module._ensure_user_homes(self.rootfs, (user,))
-        self.assertEqual(list(user.space_home.iterdir()), [])
+        self.assertEqual(
+            {path.name for path in user.space_home.iterdir()},
+            {".config"},
+        )
 
     def test_symlinked_skeleton_is_rejected(self) -> None:
         outside = self.root / "outside"
