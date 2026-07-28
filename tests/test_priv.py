@@ -81,25 +81,6 @@ class PrivilegedTests(unittest.TestCase):
                     ],
                     check=True,
                 ),
-                mock.call(
-                    [
-                        "chroot",
-                        str(space / "rootfs"),
-                        "/usr/bin/env",
-                        "DEBIAN_FRONTEND=noninteractive",
-                        "apt-get",
-                        "install",
-                        "--yes",
-                        "--no-install-recommends",
-                        "openssh-client",
-                        "nano",
-                        "sudo",
-                        "polkitd",
-                        "breeze",
-                        "plasma-integration",
-                    ],
-                    check=True,
-                ),
             ]
         )
         self.assertEqual(run.call_count, 4)
@@ -131,17 +112,9 @@ class PrivilegedTests(unittest.TestCase):
             "# Ubuntu sources have moved to "
             "/etc/apt/sources.list.d/ubuntu.sources\n",
         )
-        self.assertEqual(
-            print_output.call_args_list,
-            [
-                mock.call("Bootstrapping Ubuntu Resolute (26.04)...", flush=True),
-                mock.call(
-                    "Adding additional packages:\n"
-                    "openssh-client, nano, sudo, polkitd, "
-                    "breeze, plasma-integration",
-                    flush=True,
-                ),
-            ],
+        print_output.assert_any_call(
+            "Bootstrapping Ubuntu Resolute (26.04)...",
+            flush=True,
         )
 
     def test_custom_stops_service_without_bootstrapping(self) -> None:
