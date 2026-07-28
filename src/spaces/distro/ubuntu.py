@@ -10,7 +10,7 @@ from .. import _
 from .model import Distribution
 
 
-PACKAGES = ("ssh", "python3", "nano")
+PACKAGES = ("openssh-client", "python3", "nano")
 RELEASES = {
     "noble": _("Noble (24.04)"),
     "resolute": _("Resolute (26.04)"),

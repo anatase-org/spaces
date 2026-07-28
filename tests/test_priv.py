@@ -74,7 +74,7 @@ class PrivilegedTests(unittest.TestCase):
                         "install",
                         "--yes",
                         "--no-install-recommends",
-                        "ssh",
+                        "openssh-client",
                         "python3",
                         "nano",
                     ],
@@ -88,7 +88,7 @@ class PrivilegedTests(unittest.TestCase):
             [
                 mock.call("Bootstrapping Ubuntu Resolute (26.04)...", flush=True),
                 mock.call(
-                    "Adding additional packages:\nssh, python3, nano",
+                    "Adding additional packages:\nopenssh-client, python3, nano",
                     flush=True,
                 ),
             ],
