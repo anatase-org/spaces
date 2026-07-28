@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import pwd
 import shutil
 import subprocess
 import sys
@@ -54,20 +55,37 @@ def build_parser() -> argparse.ArgumentParser:
         nargs=argparse.REMAINDER,
         metavar=_("ARGUMENT"),
     )
+
+    enter_parser = subparsers.add_parser(
+        "enter",
+        help=_("enter a space or run a command in it"),
+        usage=_("spaces enter SPACE [--] [COMMAND ...]"),
+    )
+    enter_parser.add_argument("space")
+    enter_parser.add_argument(
+        "command_arguments",
+        nargs=argparse.REMAINDER,
+        metavar=_("COMMAND"),
+    )
     return parser
 
 
-def _helper_command(operation: str, payload: dict[str, Any]) -> list[str]:
+def _raw_helper_command(
+    operation: str,
+    arguments: list[str],
+    *,
+    keep_cwd: bool = False,
+) -> list[str]:
     helper = shutil.which("spaces.priv")
     if helper:
-        command = [helper, operation, json.dumps(payload, separators=(",", ":"))]
+        command = [helper, operation, *arguments]
     else:
         command = [
             sys.executable,
             "-m",
             "spaces.priv",
             operation,
-            json.dumps(payload, separators=(",", ":")),
+            *arguments,
         ]
     if os.geteuid() != 0:
         pkexec = shutil.which("pkexec")
@@ -75,11 +93,19 @@ def _helper_command(operation: str, payload: dict[str, Any]) -> list[str]:
             raise core.SpacesError(
                 _("pkexec is required to modify spaces.")
             )
-        if operation == "cp":
+        if keep_cwd:
             command[0:0] = [pkexec, "--keep-cwd"]
         else:
             command.insert(0, pkexec)
     return command
+
+
+def _helper_command(operation: str, payload: dict[str, Any]) -> list[str]:
+    return _raw_helper_command(
+        operation,
+        [json.dumps(payload, separators=(",", ":"))],
+        keep_cwd=operation == "cp",
+    )
 
 
 def _invoke_helper(operation: str, payload: dict[str, Any]) -> int:
@@ -87,6 +113,19 @@ def _invoke_helper(operation: str, payload: dict[str, Any]) -> int:
         configure_logging(rich=True)
         completed = run_streamed(
             _helper_command(operation, payload),
+            check=False,
+        )
+    except OSError as error:
+        raise core.SpacesError(
+            _("Could not execute spaces.priv: {error}", error=error)
+        ) from error
+    return completed.returncode
+
+
+def _invoke_raw_helper(operation: str, arguments: list[str]) -> int:
+    try:
+        completed = subprocess.run(
+            _raw_helper_command(operation, arguments),
             check=False,
         )
     except OSError as error:
@@ -254,6 +293,39 @@ def _cp(arguments: list[str]) -> int:
     return _invoke_helper("cp", {"arguments": fixed_arguments})
 
 
+def _enter(space: str, command: list[str]) -> int:
+    core.validate_space_name(space)
+    identity = core.initiating_identity()
+    try:
+        user = pwd.getpwuid(identity.uid)
+    except KeyError as error:
+        raise core.SpacesError(
+            _("No passwd entry exists for UID {uid}.", uid=identity.uid)
+        ) from error
+
+    try:
+        available = subprocess.run(
+            ["/usr/bin/machinectl", "--quiet", "show", space],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        ).returncode == 0
+    except OSError as error:
+        raise core.SpacesError(
+            _("Could not query space availability: {error}", error=error)
+        ) from error
+
+    if not available:
+        returncode = _invoke_raw_helper("start", [space])
+        if returncode != 0:
+            return returncode
+
+    enter_arguments = [f"{user.pw_name}@{space}"]
+    if command:
+        enter_arguments.extend(["--", *command])
+    return _invoke_raw_helper("enter", enter_arguments)
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         raw_arguments = list(sys.argv[1:] if argv is None else argv)
@@ -269,6 +341,8 @@ def main(argv: list[str] | None = None) -> int:
             return _configure(arguments.name, user_only=arguments.user)
         elif arguments.command == "delete":
             return _delete(arguments.name, noconfirm=arguments.noconfirm)
+        elif arguments.command == "enter":
+            return _enter(arguments.space, arguments.command_arguments)
         raise core.SpacesError(
             _("Unknown command: {command!r}.", command=arguments.command)
         )

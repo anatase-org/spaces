@@ -63,17 +63,42 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("Requires:       systemd\n", spec)
         self.assertIn("Requires:       systemd-container\n", spec)
 
-    def test_polkit_policy_requires_admin(self) -> None:
+    def test_polkit_policy_scopes_authorization_by_operation(self) -> None:
         policy = ROOT / "data" / "org.anatase.spaces.policy"
         root = ElementTree.parse(policy).getroot()
-        defaults = root.find("./action/defaults")
-        self.assertIsNotNone(defaults)
-        self.assertEqual(
-            [child.text for child in defaults],
-            ["auth_admin", "auth_admin", "auth_admin"],
-        )
-        annotation = root.find("./action/annotate")
-        self.assertEqual(annotation.text, "/usr/bin/spaces.priv")
+        actions = {
+            action.attrib["id"]: action for action in root.findall("./action")
+        }
+        expected = {
+            "org.anatase.spaces.create": ("create", "auth_admin"),
+            "org.anatase.spaces.configure": ("configure", "auth_admin"),
+            "org.anatase.spaces.delete": ("delete", "auth_admin"),
+            "org.anatase.spaces.cp": ("cp", "auth_admin"),
+            "org.anatase.spaces.start": ("start", "yes"),
+            "org.anatase.spaces.enter": ("enter", "yes"),
+        }
+        self.assertEqual(set(actions), set(expected))
+        for action_id, (operation, authorization) in expected.items():
+            action = actions[action_id]
+            defaults = action.find("./defaults")
+            self.assertIsNotNone(defaults)
+            self.assertEqual(
+                [child.text for child in defaults],
+                [authorization, authorization, authorization],
+            )
+            annotations = {
+                item.attrib["key"]: item.text
+                for item in action.findall("./annotate")
+            }
+            self.assertEqual(
+                annotations,
+                {
+                    "org.freedesktop.policykit.exec.path": (
+                        "/usr/bin/spaces.priv"
+                    ),
+                    "org.freedesktop.policykit.exec.argv1": operation,
+                },
+            )
 
     def test_pkgbuild_uses_current_checkout(self) -> None:
         pkgbuild = (ROOT / "pkg" / "PKGBUILD").read_text(encoding="utf-8")

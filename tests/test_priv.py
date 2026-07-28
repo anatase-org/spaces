@@ -308,6 +308,184 @@ class PrivilegedTests(unittest.TestCase):
             check=False,
         )
 
+    def test_start_validates_space_and_starts_service(self) -> None:
+        (self.state_root / "work").mkdir(parents=True)
+        completed = subprocess.CompletedProcess([], 42)
+        with mock.patch.object(
+            priv.subprocess, "run", return_value=completed
+        ) as run:
+            self.assertEqual(priv.start("work"), 42)
+
+        run.assert_called_once_with(
+            [
+                "/usr/bin/systemctl",
+                "start",
+                "spaces@work.service",
+            ],
+            check=False,
+        )
+
+    def test_start_rejects_missing_or_symlinked_space(self) -> None:
+        outside = Path(self.temporary.name) / "outside"
+        outside.mkdir()
+        self.state_root.mkdir()
+        (self.state_root / "linked").symlink_to(
+            outside,
+            target_is_directory=True,
+        )
+        for name in ("missing", "linked"):
+            with (
+                self.subTest(name=name),
+                mock.patch.object(priv.subprocess, "run") as run,
+                self.assertRaises(core.SpacesError),
+            ):
+                priv.start(name)
+            run.assert_not_called()
+
+    def test_enter_validates_user_and_runs_machinectl(self) -> None:
+        info = core.create_info(
+            "work",
+            {"id": "custom"},
+            core.Identity(1000, 1000, Path("/home/alice")),
+            "basic",
+            [],
+        )
+        space = self.state_root / "work"
+        space.mkdir(parents=True)
+        priv._write_info(space, info)
+        completed = subprocess.CompletedProcess([], 42)
+        with (
+            mock.patch.dict(os.environ, {"PKEXEC_UID": "1000"}, clear=True),
+            mock.patch.object(
+                priv.pwd,
+                "getpwnam",
+                return_value=mock.Mock(
+                    pw_uid=1000,
+                    pw_name="alice@example",
+                ),
+            ) as getpwnam,
+            mock.patch.object(
+                priv.subprocess, "run", return_value=completed
+            ) as run,
+        ):
+            self.assertEqual(
+                priv.enter(
+                    "alice@example@work",
+                    ["--help", "literal value", "$HOME"],
+                ),
+                42,
+            )
+
+        getpwnam.assert_called_once_with("alice@example")
+        run.assert_called_once_with(
+            [
+                "/usr/bin/machinectl",
+                "--quiet",
+                "--uid=alice@example",
+                "--",
+                "shell",
+                "work",
+                "--help",
+                "literal value",
+                "$HOME",
+            ],
+            check=False,
+        )
+
+    def test_enter_without_command_uses_machinectl_default_shell(self) -> None:
+        info = core.create_info(
+            "work",
+            {"id": "custom"},
+            core.Identity(1000, 1000, Path("/home/alice")),
+            "basic",
+            [],
+        )
+        space = self.state_root / "work"
+        space.mkdir(parents=True)
+        priv._write_info(space, info)
+        with (
+            mock.patch.dict(os.environ, {"PKEXEC_UID": "1000"}, clear=True),
+            mock.patch.object(
+                priv.pwd,
+                "getpwnam",
+                return_value=mock.Mock(pw_uid=1000, pw_name="alice"),
+            ),
+            mock.patch.object(
+                priv.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess([], 0),
+            ) as run,
+        ):
+            self.assertEqual(priv.enter("alice@work", []), 0)
+
+        self.assertEqual(run.call_args.args[0][-2:], ["shell", "work"])
+
+    def test_enter_rejects_another_or_unconfigured_user(self) -> None:
+        space = self.state_root / "ubuntu"
+        space.mkdir(parents=True)
+        priv._write_info(space, self.info)
+        with (
+            mock.patch.dict(os.environ, {"PKEXEC_UID": "1000"}, clear=True),
+            mock.patch.object(
+                priv.pwd,
+                "getpwnam",
+                return_value=mock.Mock(pw_uid=1001),
+            ),
+            mock.patch.object(priv.subprocess, "run") as run,
+            self.assertRaises(core.SpacesError),
+        ):
+            priv.enter("alice@ubuntu", [])
+        run.assert_not_called()
+
+        with (
+            mock.patch.dict(os.environ, {"PKEXEC_UID": "1000"}, clear=True),
+            mock.patch.object(
+                priv.pwd,
+                "getpwnam",
+                return_value=mock.Mock(pw_uid=1000),
+            ),
+            mock.patch.object(priv.subprocess, "run") as run,
+            self.assertRaises(core.SpacesError),
+        ):
+            priv.enter("alice@ubuntu", [])
+        run.assert_not_called()
+
+    def test_enter_rejects_malformed_target_or_unknown_user(self) -> None:
+        for target in ("alice", "@work", "alice@"):
+            with (
+                self.subTest(target=target),
+                mock.patch.object(priv.pwd, "getpwnam") as getpwnam,
+                mock.patch.object(priv.subprocess, "run") as run,
+                self.assertRaises(core.SpacesError),
+            ):
+                priv.enter(target, [])
+            getpwnam.assert_not_called()
+            run.assert_not_called()
+
+        with (
+            mock.patch.object(
+                priv.pwd,
+                "getpwnam",
+                side_effect=KeyError("alice"),
+            ),
+            mock.patch.object(priv.subprocess, "run") as run,
+            self.assertRaises(core.SpacesError),
+        ):
+            priv.enter("alice@work", [])
+        run.assert_not_called()
+
+    def test_enter_parser_removes_argument_separator(self) -> None:
+        with (
+            mock.patch.object(priv.os, "geteuid", return_value=0),
+            mock.patch.object(priv, "enter", return_value=42) as enter,
+        ):
+            self.assertEqual(
+                priv.main(["enter", "alice@work", "--", "--help"]),
+                42,
+            )
+
+        enter.assert_called_once_with("alice@work", ["--help"])
+
     def test_launch_return_code_is_propagated(self) -> None:
         with (
             mock.patch.object(priv.os, "geteuid", return_value=0),

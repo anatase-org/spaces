@@ -6,14 +6,75 @@
   <vendor>Anatase</vendor>
   <vendor_url>https://github.com/anatase-org/spaces</vendor_url>
 
-  <action id="org.anatase.spaces.configure">
-    <description>Manage Spaces environments and their files</description>
-    <message>Administrator authentication is required to modify Spaces</message>
+  <action id="org.anatase.spaces.create">
+    <description>Create a Spaces environment</description>
+    <message>Administrator authentication is required to create a space</message>
     <defaults>
       <allow_any>auth_admin</allow_any>
       <allow_inactive>auth_admin</allow_inactive>
       <allow_active>auth_admin</allow_active>
     </defaults>
     <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/spaces.priv</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">create</annotate>
+  </action>
+
+  <action id="org.anatase.spaces.configure">
+    <description>Configure a Spaces environment</description>
+    <message>Administrator authentication is required to configure a space</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/spaces.priv</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">configure</annotate>
+  </action>
+
+  <action id="org.anatase.spaces.delete">
+    <description>Delete a Spaces environment</description>
+    <message>Administrator authentication is required to delete a space</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/spaces.priv</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">delete</annotate>
+  </action>
+
+  <action id="org.anatase.spaces.cp">
+    <description>Copy files involving a Spaces environment</description>
+    <message>Administrator authentication is required to copy space files</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/spaces.priv</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">cp</annotate>
+  </action>
+
+  <action id="org.anatase.spaces.start">
+    <description>Start a Spaces environment</description>
+    <message>Starting a space is allowed without authentication</message>
+    <defaults>
+      <allow_any>yes</allow_any>
+      <allow_inactive>yes</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/spaces.priv</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">start</annotate>
+  </action>
+
+  <action id="org.anatase.spaces.enter">
+    <description>Enter a Spaces environment as the current user</description>
+    <message>Entering a configured space is allowed without authentication</message>
+    <defaults>
+      <allow_any>yes</allow_any>
+      <allow_inactive>yes</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/spaces.priv</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">enter</annotate>
   </action>
 </policyconfig>

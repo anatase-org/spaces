@@ -1,4 +1,4 @@
-"""Root-only Spaces filesystem operations.
+"""Root-only Spaces management operations.
 
 This module intentionally imports only Python standard-library modules and
 ``spaces.core``, which is also standard-library-only.
@@ -10,6 +10,7 @@ import argparse
 import fcntl
 import json
 import os
+import pwd
 import shutil
 import subprocess
 import sys
@@ -22,6 +23,10 @@ from . import _
 from . import core
 from .distro import DistributionError, get_driver
 from .launch import launch
+
+
+SYSTEMCTL = "/usr/bin/systemctl"
+MACHINECTL = "/usr/bin/machinectl"
 
 
 def _root_owned_directory(path: Path) -> None:
@@ -133,6 +138,89 @@ def _assert_initiating_user(info: dict[str, Any]) -> None:
                 "permissions."
             )
         )
+
+
+def _space_directory(name: str) -> Path:
+    core.validate_space_name(name)
+    space = core.STATE_ROOT / name
+    if space.is_symlink() or not space.is_dir():
+        raise core.SpacesError(
+            _("Space {name!r} does not exist.", name=name)
+        )
+    return space
+
+
+def _space_info(name: str) -> dict[str, Any]:
+    space = _space_directory(name)
+    info_path = space / "info.json"
+    if info_path.is_symlink() or not info_path.is_file():
+        raise core.SpacesError(
+            _("Unsafe space information path: {path}.", path=info_path)
+        )
+    info = core.load_info(info_path)
+    if info is None:
+        raise core.SpacesError(
+            _("Space {name!r} has an invalid info.json.", name=name)
+        )
+    if info["name"] != name:
+        raise core.SpacesError(_("Space name does not match its info.json."))
+    return info
+
+
+def start(name: str) -> int:
+    _space_directory(name)
+    completed = subprocess.run(
+        [SYSTEMCTL, "start", f"spaces@{name}.service"],
+        check=False,
+    )
+    return completed.returncode
+
+
+def enter(target: str, command: list[str]) -> int:
+    user_name, separator, space_name = target.rpartition("@")
+    if not separator or not user_name or not space_name:
+        raise core.SpacesError(
+            _("Enter target must have the form USER@SPACE.")
+        )
+    core.validate_space_name(space_name)
+
+    try:
+        user = pwd.getpwnam(user_name)
+    except KeyError as error:
+        raise core.SpacesError(
+            _("Host user {user!r} does not exist.", user=user_name)
+        ) from error
+    caller_uid = _caller_uid()
+    if user.pw_uid != caller_uid:
+        raise core.SpacesError(
+            _(
+                "Enter target user must match the initiating user."
+            )
+        )
+
+    info = _space_info(space_name)
+    if str(caller_uid) not in info["permissions"]["users"]:
+        raise core.SpacesError(
+            _(
+                "User {user!r} is not configured for space {space!r}.",
+                user=user_name,
+                space=space_name,
+            )
+        )
+
+    completed = subprocess.run(
+        [
+            MACHINECTL,
+            "--quiet",
+            f"--uid={user.pw_name}",
+            "--",
+            "shell",
+            space_name,
+            *command,
+        ],
+        check=False,
+    )
+    return completed.returncode
 
 
 def create(info: dict[str, Any]) -> None:
@@ -258,6 +346,14 @@ def build_parser() -> argparse.ArgumentParser:
         command_parser.add_argument("payload")
     launch_parser = subparsers.add_parser("launch")
     launch_parser.add_argument("space")
+    start_parser = subparsers.add_parser("start")
+    start_parser.add_argument("space")
+    enter_parser = subparsers.add_parser("enter")
+    enter_parser.add_argument("target")
+    enter_parser.add_argument(
+        "command_arguments",
+        nargs=argparse.REMAINDER,
+    )
     return parser
 
 
@@ -269,6 +365,10 @@ def main(argv: list[str] | None = None) -> int:
         arguments = build_parser().parse_args(argv)
         if arguments.command == "launch":
             return launch(arguments.space)
+        if arguments.command == "start":
+            return start(arguments.space)
+        if arguments.command == "enter":
+            return enter(arguments.target, arguments.command_arguments)
 
         payload = json.loads(arguments.payload)
         if arguments.command == "create":

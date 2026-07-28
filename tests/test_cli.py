@@ -44,6 +44,24 @@ class CliTests(unittest.TestCase):
             ["/usr/bin/pkexec", "--keep-cwd", "/usr/bin/spaces.priv"],
         )
 
+    def test_raw_helper_inherits_terminal_streams(self) -> None:
+        command = ["pkexec", "/usr/bin/spaces.priv", "enter", "alice@work"]
+        completed = subprocess.CompletedProcess(command, 42)
+        with (
+            mock.patch.object(
+                cli, "_raw_helper_command", return_value=command
+            ),
+            mock.patch.object(
+                cli.subprocess, "run", return_value=completed
+            ) as run,
+        ):
+            self.assertEqual(
+                cli._invoke_raw_helper("enter", ["alice@work"]),
+                42,
+            )
+
+        run.assert_called_once_with(command, check=False)
+
     def test_known_unimplemented_distribution(self) -> None:
         self.assertEqual(cli.main(["create", "arch"]), 2)
 
@@ -265,6 +283,112 @@ class CliTests(unittest.TestCase):
                 ]
             },
         )
+
+    def test_enter_starts_unavailable_space_then_forwards_command(self) -> None:
+        identity = core.Identity(1000, 1000, Path("/home/alice"))
+        unavailable = subprocess.CompletedProcess([], 1)
+        with (
+            mock.patch.object(
+                core, "initiating_identity", return_value=identity
+            ),
+            mock.patch.object(
+                cli.pwd,
+                "getpwuid",
+                return_value=mock.Mock(pw_name="alice"),
+            ),
+            mock.patch.object(
+                cli.subprocess, "run", return_value=unavailable
+            ) as run,
+            mock.patch.object(
+                cli,
+                "_invoke_raw_helper",
+                side_effect=[0, 0],
+            ) as invoke,
+        ):
+            self.assertEqual(
+                cli.main(
+                    [
+                        "enter",
+                        "work",
+                        "--",
+                        "sh",
+                        "-c",
+                        "printf '%s' \"$HOME\"",
+                    ]
+                ),
+                0,
+            )
+
+        run.assert_called_once_with(
+            ["/usr/bin/machinectl", "--quiet", "show", "work"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.assertEqual(
+            invoke.call_args_list,
+            [
+                mock.call("start", ["work"]),
+                mock.call(
+                    "enter",
+                    [
+                        "alice@work",
+                        "--",
+                        "sh",
+                        "-c",
+                        "printf '%s' \"$HOME\"",
+                    ],
+                ),
+            ],
+        )
+
+    def test_enter_available_space_skips_start_and_defaults_to_shell(
+        self,
+    ) -> None:
+        identity = core.Identity(1000, 1000, Path("/home/alice"))
+        available = subprocess.CompletedProcess([], 0)
+        with (
+            mock.patch.object(
+                core, "initiating_identity", return_value=identity
+            ),
+            mock.patch.object(
+                cli.pwd,
+                "getpwuid",
+                return_value=mock.Mock(pw_name="alice"),
+            ),
+            mock.patch.object(
+                cli.subprocess, "run", return_value=available
+            ),
+            mock.patch.object(
+                cli, "_invoke_raw_helper", return_value=0
+            ) as invoke,
+        ):
+            self.assertEqual(cli.main(["enter", "work"]), 0)
+
+        invoke.assert_called_once_with("enter", ["alice@work"])
+
+    def test_enter_does_not_continue_after_start_failure(self) -> None:
+        identity = core.Identity(1000, 1000, Path("/home/alice"))
+        unavailable = subprocess.CompletedProcess([], 1)
+        with (
+            mock.patch.object(
+                core, "initiating_identity", return_value=identity
+            ),
+            mock.patch.object(
+                cli.pwd,
+                "getpwuid",
+                return_value=mock.Mock(pw_name="alice"),
+            ),
+            mock.patch.object(
+                cli.subprocess, "run", return_value=unavailable
+            ),
+            mock.patch.object(
+                cli, "_invoke_raw_helper", return_value=42
+            ) as invoke,
+        ):
+            self.assertEqual(cli.main(["enter", "work"]), 42)
+
+        invoke.assert_called_once_with("start", ["work"])
 
     def test_existing_space_prepends_override_step(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
