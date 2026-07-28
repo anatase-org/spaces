@@ -14,6 +14,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -629,6 +630,13 @@ def _plan_mounts(
     )
 
 
+def _mount_summary(mounts: Iterable[HomeMount]) -> str:
+    descriptions = [
+        f"{mount.source} -> {mount.destination}" for mount in mounts
+    ]
+    return ", ".join(descriptions) if descriptions else _("none")
+
+
 def _close_mounts(mounts: Any) -> None:
     for mount in mounts:
         try:
@@ -802,12 +810,14 @@ class _MountWorker:
         monitor: _LoginMonitor,
         available_mounts: tuple[HomeMount, ...],
         initial_mounts: tuple[HomeMount, ...],
+        initial_eligible_uids: frozenset[int],
     ) -> None:
         self._space_name = space_name
         self._users = users
         self._monitor = monitor
         self._available_mounts = available_mounts
         self._mounted = set(initial_mounts)
+        self._eligible_uids = initial_eligible_uids
         self._process: subprocess.Popen[Any] | None = None
         self._attached = threading.Event()
         self._stopping = threading.Event()
@@ -875,12 +885,15 @@ class _MountWorker:
         return False
 
     def _reconcile(self) -> None:
+        eligible_uids = _eligible_uids(self._monitor, self._users)
         desired = set(
             _plan_mounts(
                 self._available_mounts,
-                _eligible_uids(self._monitor, self._users),
+                eligible_uids,
             )
         )
+        logged_in = eligible_uids - self._eligible_uids
+        logged_out = self._eligible_uids - eligible_uids
         additions = sorted(desired - self._mounted)
         removals = sorted(
             self._mounted - desired,
@@ -888,12 +901,17 @@ class _MountWorker:
             reverse=True,
         )
         if not additions and not removals:
+            self._log_user_transitions(logged_in, logged_out, (), ())
+            self._eligible_uids = eligible_uids
             return
         if not self._wait_until_registered():
             return
+        removed: list[HomeMount] = []
         for mount in removals:
             self._remove(mount)
             self._mounted.remove(mount)
+            removed.append(mount)
+        added: list[HomeMount] = []
         for mount in additions:
             try:
                 self._add(mount)
@@ -909,6 +927,41 @@ class _MountWorker:
                 )
                 continue
             self._mounted.add(mount)
+            added.append(mount)
+        self._log_user_transitions(logged_in, logged_out, added, removed)
+        self._eligible_uids = eligible_uids
+
+    def _log_user_transitions(
+        self,
+        logged_in: frozenset[int],
+        logged_out: frozenset[int],
+        added: tuple[HomeMount, ...] | list[HomeMount],
+        removed: tuple[HomeMount, ...] | list[HomeMount],
+    ) -> None:
+        for user in self._users:
+            identity = f"{user.name} ({user.uid}:{user.gid})"
+            if user.uid in logged_out:
+                mounts = _mount_summary(
+                    mount for mount in removed if mount.uid == user.uid
+                )
+                logger.info(
+                    _(
+                        "User {user} logged out; unmounted: {mounts}.",
+                        user=identity,
+                        mounts=mounts,
+                    )
+                )
+            if user.uid in logged_in:
+                mounts = _mount_summary(
+                    mount for mount in added if mount.uid == user.uid
+                )
+                logger.info(
+                    _(
+                        "User {user} logged in; mounted: {mounts}.",
+                        user=identity,
+                        mounts=mounts,
+                    )
+                )
 
     def _add(self, mount: HomeMount) -> None:
         subprocess.run(
@@ -1020,9 +1073,10 @@ def launch(space_name: str) -> int:
     worker: _MountWorker | None = None
     try:
         monitor = _LoginMonitor()
+        initial_eligible_uids = _eligible_uids(monitor, users)
         initial_mounts = _plan_mounts(
             available_mounts,
-            _eligible_uids(monitor, users),
+            initial_eligible_uids,
         )
         worker = _MountWorker(
             space_name,
@@ -1030,6 +1084,7 @@ def launch(space_name: str) -> int:
             monitor,
             available_mounts,
             initial_mounts,
+            initial_eligible_uids,
         )
         worker.start()
         process = subprocess.Popen(

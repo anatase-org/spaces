@@ -288,6 +288,10 @@ class LaunchTests(unittest.TestCase):
         mounts = self.worker_class.call_args.args[4]
         self.assertEqual(len(mounts), 1)
         self.assertEqual(mounts[0].destination, "/home/user/Projects")
+        self.assertEqual(
+            self.worker_class.call_args.args[5],
+            frozenset({1000}),
+        )
         self.worker.start.assert_called()
         self.worker.attach.assert_called_once_with(process)
         self.worker.stop.assert_called()
@@ -801,16 +805,68 @@ class LoginAndMountWorkerTests(unittest.TestCase):
             monitor,
             (mount,),
             (mount,),
+            frozenset({user.uid}),
         )
         worker._registered = True
         worker._process = mock.Mock()
 
-        with mock.patch.object(worker, "_remove") as remove:
+        with (
+            mock.patch.object(worker, "_remove") as remove,
+            self.assertLogs(launch_module.logger, level="INFO"),
+        ):
             worker._reconcile()
             remove.assert_not_called()
             monitor.state.return_value = "closing"
             worker._reconcile()
             remove.assert_called_once_with(mount)
+
+    def test_login_and_logout_log_user_and_mounts(self) -> None:
+        user = self._user(1000)
+        mount = launch_module.HomeMount(
+            destination="/home/user1000/Projects",
+            source=Path("/host/Projects"),
+            uid=1000,
+            source_fd=42,
+        )
+        monitor = mock.Mock()
+        monitor.state.return_value = "offline"
+        worker = launch_module._MountWorker(
+            "work",
+            (user,),
+            monitor,
+            (mount,),
+            (),
+            frozenset(),
+        )
+        worker._registered = True
+        worker._process = mock.Mock()
+
+        with (
+            mock.patch.object(worker, "_add"),
+            mock.patch.object(worker, "_remove"),
+            self.assertLogs(
+                launch_module.logger,
+                level="INFO",
+            ) as logs,
+        ):
+            monitor.state.return_value = "active"
+            worker._reconcile()
+            monitor.state.return_value = "offline"
+            worker._reconcile()
+
+        self.assertEqual(
+            logs.output,
+            [
+                (
+                    "INFO:spaces.launch:User user1000 (1000:1000) logged in; "
+                    "mounted: /host/Projects -> /home/user1000/Projects."
+                ),
+                (
+                    "INFO:spaces.launch:User user1000 (1000:1000) logged out; "
+                    "unmounted: /host/Projects -> /home/user1000/Projects."
+                ),
+            ],
+        )
 
     def test_failed_runtime_mount_is_skipped(self) -> None:
         user = self._user(1000)
@@ -834,6 +890,7 @@ class LoginAndMountWorkerTests(unittest.TestCase):
             monitor,
             (failed_mount, mounted),
             (),
+            frozenset(),
         )
         worker._registered = True
         worker._process = mock.Mock()
@@ -862,7 +919,14 @@ class LoginAndMountWorkerTests(unittest.TestCase):
 
     def test_remove_uses_systemd_lazy_unmount(self) -> None:
         monitor = mock.Mock()
-        worker = launch_module._MountWorker("work", (), monitor, (), ())
+        worker = launch_module._MountWorker(
+            "work",
+            (),
+            monitor,
+            (),
+            (),
+            frozenset(),
+        )
         mount = launch_module.HomeMount(
             destination="/home/alice/Projects",
             source=Path("/host/Projects"),
@@ -917,7 +981,14 @@ class LoginAndMountWorkerTests(unittest.TestCase):
         )
 
     def test_add_uses_machinectl_bind(self) -> None:
-        worker = launch_module._MountWorker("work", (), mock.Mock(), (), ())
+        worker = launch_module._MountWorker(
+            "work",
+            (),
+            mock.Mock(),
+            (),
+            (),
+            frozenset(),
+        )
         mount = launch_module.HomeMount(
             destination="/home/alice/Projects",
             source=Path("/host/Projects"),
