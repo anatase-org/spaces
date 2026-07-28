@@ -343,12 +343,21 @@ class LaunchTests(unittest.TestCase):
                 launch_module.auth, "validate_native_runtime"
             ) as validate,
             mock.patch.object(
+                launch_module.session,
+                "kwallet_installed",
+                return_value=True,
+            ) as kwallet_installed,
+            mock.patch.object(
                 launch_module.subprocess, "Popen", return_value=process
             ) as popen,
             mock.patch.object(launch_module.signal, "signal"),
         ):
             self.assertEqual(launch_module.launch("work"), 0)
         validate.assert_called_once_with(self.rootfs)
+        kwallet_installed.assert_called_once_with(self.rootfs)
+        self.assertTrue(
+            self.worker_class.call_args.kwargs["initialize_wallet"]
+        )
         self.assertIn(
             "--bind-ro=/usr/lib/spaces/guest:/run/spaces-host/bin",
             popen.call_args.args[0],

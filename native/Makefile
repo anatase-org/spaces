@@ -34,6 +34,8 @@ check-guest-abi: all
 install: check-guest-abi
 	install -Dm755 pam_spaces.so \
 		$(DESTDIR)$(GUESTDIR)/pam_spaces.so
+	install -Dm755 spaces-empty-password-kwallet \
+		$(DESTDIR)$(GUESTDIR)/spaces-empty-password-kwallet
 	install -Dm755 spaces-pam-worker \
 		$(DESTDIR)$(LIBEXECDIR)/spaces-pam-worker
 	install -Dm755 spaces-session-launcher \

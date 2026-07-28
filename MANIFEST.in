@@ -3,4 +3,5 @@ include data/org.anatase.spaces.policy
 include data/spaces@.service
 recursive-include data/pam *
 recursive-include native Makefile *.c *.h *.py
+include native/spaces-empty-password-kwallet
 recursive-include tests *.py

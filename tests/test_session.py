@@ -522,6 +522,90 @@ class PolkitAgentTests(unittest.TestCase):
             self.assertIsNone(session.polkit_agent(rootfs))
 
 
+class KWalletTests(unittest.TestCase):
+    def test_detects_ksecretd_and_its_dbus_service(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            rootfs = Path(temporary)
+            executable = rootfs / session.KWALLET_EXECUTABLE
+            service = rootfs / session.KWALLET_SERVICE
+            executable.parent.mkdir(parents=True)
+            service.parent.mkdir(parents=True)
+            executable.write_text("", encoding="utf-8")
+            executable.chmod(0o755)
+            service.write_text("[D-BUS Service]\n", encoding="utf-8")
+
+            self.assertTrue(session.kwallet_installed(rootfs))
+
+    def test_rejects_missing_or_escaped_kwallet_installation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            rootfs = Path(temporary) / "rootfs"
+            outside = Path(temporary) / "ksecretd"
+            rootfs.mkdir()
+            outside.write_text("", encoding="utf-8")
+            outside.chmod(0o755)
+            executable = rootfs / session.KWALLET_EXECUTABLE
+            service = rootfs / session.KWALLET_SERVICE
+            executable.parent.mkdir(parents=True)
+            service.parent.mkdir(parents=True)
+            executable.symlink_to(outside)
+            service.write_text("[D-BUS Service]\n", encoding="utf-8")
+
+            self.assertFalse(session.kwallet_installed(rootfs))
+
+    def test_controller_initializes_wallet_once_before_publishing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            desktop_user = user(root)
+            state_root = root / "state"
+            (state_root / "work").mkdir(parents=True)
+            controller = session.DesktopController(
+                "work",
+                (desktop_user,),
+                initialize_wallet=True,
+            )
+            completed = subprocess.CompletedProcess([], 0)
+            plan = session.DesktopPlan(
+                "2",
+                (),
+                {"DISPLAY": ":0"},
+            )
+            with (
+                mock.patch.object(core, "STATE_ROOT", state_root),
+                mock.patch.object(controller, "_prepare_guest_root"),
+                mock.patch.object(
+                    session.subprocess,
+                    "run",
+                    return_value=completed,
+                ) as run,
+            ):
+                controller._activate(desktop_user, plan)
+                controller._initialize_wallet(
+                    desktop_user,
+                    plan.environment,
+                )
+                self.assertEqual(
+                    session._read_record("work", desktop_user.uid),
+                    ("active", "2", {"DISPLAY": ":0"}),
+                )
+
+            run.assert_called_once_with(
+                [
+                    session.MACHINECTL,
+                    "--quiet",
+                    "--no-ask-password",
+                    f"--uid={desktop_user.name}",
+                    "--setenv=DISPLAY=:0",
+                    "--",
+                    "shell",
+                    "work",
+                    session.EMPTY_PASSWORD_KWALLET,
+                ],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+
 class NativeLauncherTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:

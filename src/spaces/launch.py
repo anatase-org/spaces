@@ -1157,6 +1157,7 @@ class _MountWorker:
         available_mounts: tuple[HomeMount, ...],
         initial_mounts: tuple[HomeMount, ...],
         initial_eligible_uids: frozenset[int],
+        initialize_wallet: bool = False,
     ) -> None:
         self._space_name = space_name
         self._users = users
@@ -1170,7 +1171,11 @@ class _MountWorker:
         self._registered = False
         self._login_snapshot: _LoginSnapshot | None = None
         self._last_reconcile_at: float | None = None
-        self._desktop = session.DesktopController(space_name, users)
+        self._desktop = session.DesktopController(
+            space_name,
+            users,
+            initialize_wallet=initialize_wallet,
+        )
         self._thread = threading.Thread(
             target=self._run,
             name=f"spaces-{space_name}-mounts",
@@ -1581,6 +1586,7 @@ def launch(space_name: str) -> int:
             available_mounts,
             initial_mounts,
             initial_eligible_uids,
+            initialize_wallet=session.kwallet_installed(rootfs),
         )
         worker.start()
         process = subprocess.Popen(

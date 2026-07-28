@@ -20,6 +20,8 @@ PACKAGES = (
     "pkexec",
     "polkit-kde-agent-1",
     "polkitd",
+    # Used to initialize an installed guest KWallet over its session bus.
+    "libglib2.0-bin",
     # these are required for plasma applications to look correct
     "breeze",
     "plasma-integration",
