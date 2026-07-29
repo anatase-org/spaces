@@ -27,6 +27,7 @@ from textual.widgets.selection_list import Selection
 from . import _
 from .core import (
     DEFAULT_HOME_FOLDERS,
+    DEVICE_LEVELS,
     NETWORK_LEVELS,
     SpacesError,
     validate_space_name,
@@ -292,6 +293,21 @@ class PermissionForm(
         "advanced": _("Advanced — shared networking and privileged ports"),
         "admin": _("Admin — full network admin with CAP_NET_RAW and CAP_NET_ADMIN"),
     }
+    DEVICE_LABELS = {
+        "disabled": _("Disabled — no host devices"),
+        "basic": _(
+            "Basic — ordinary uaccess and video devices, excluding capture "
+            "inputs and security devices"
+        ),
+        "admin": _(
+            "Admin — all device nodes except positively identified "
+            "security devices"
+        ),
+        "full": _(
+            "Full — bind the host /dev directly, including input and "
+            "security devices"
+        ),
+    }
 
     def __init__(
         self,
@@ -300,6 +316,7 @@ class PermissionForm(
         folders: list[str],
         network: str,
         selected_home: list[str],
+        devices: str = "basic",
         host_authentication: bool = True,
         include_system: bool,
         distribution_title: str,
@@ -315,6 +332,7 @@ class PermissionForm(
         super().__init__(ansi_color=True)
         self.home = home
         self.initial_network = network
+        self.initial_devices = devices
         self.initial_host_authentication = host_authentication
         self.initial_home = set(selected_home)
         self.initial_administrator = administrator
@@ -339,7 +357,7 @@ class PermissionForm(
         self.steps = (
             (["override"] if override else [])
             + (
-                ["system", "host-authentication"]
+                ["system", "devices", "host-authentication"]
                 if include_system
                 else []
             )
@@ -375,6 +393,24 @@ class PermissionForm(
                                 self.NETWORK_LABELS[level],
                                 value=level == self.initial_network,
                                 id=f"network-{level}",
+                            )
+                with Vertical(
+                    id="devices-step",
+                    classes="step",
+                ):
+                    yield Static(
+                        _(
+                            "Choose which host devices are available inside "
+                            "this space."
+                        ),
+                        classes="description",
+                    )
+                    with RadioSet(id="devices"):
+                        for level in DEVICE_LEVELS:
+                            yield CleanRadioButton(
+                                self.DEVICE_LABELS[level],
+                                value=level == self.initial_devices,
+                                id=f"devices-{level}",
                             )
                 with Vertical(
                     id="host-authentication-step",
@@ -516,6 +552,7 @@ class PermissionForm(
         titles = {
             "override": _("Space already exists"),
             "system": _("System permissions"),
+            "devices": _("Device permissions"),
             "host-authentication": _("Host authentication permissions"),
             "user": _("User permissions"),
             "desktop": _("Desktop permissions"),
@@ -546,6 +583,7 @@ class PermissionForm(
         select_button.disabled = current == "override"
         focus_targets = {
             "system": "#network",
+            "devices": "#devices",
             "host-authentication": "#host-authentication",
             "user": "#home-folders",
             "desktop": "#desktop",
@@ -575,6 +613,7 @@ class PermissionForm(
         else:
             targets = {
                 "system": "#network",
+                "devices": "#devices",
                 "host-authentication": "#host-authentication",
                 "desktop": "#desktop",
                 "administrator": "#administrator",
@@ -625,6 +664,9 @@ class PermissionForm(
         if self.include_system:
             result["network"] = self._radio_value(
                 self.query_one("#network", RadioSet), "network-"
+            )
+            result["devices"] = self._radio_value(
+                self.query_one("#devices", RadioSet), "devices-"
             )
             result["host_authentication"] = self._radio_value(
                 self.query_one("#host-authentication", RadioSet),

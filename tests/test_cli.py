@@ -199,6 +199,10 @@ class CliTests(unittest.TestCase):
         self.assertTrue(
             payload["permissions"]["system"]["host_authentication"]
         )
+        self.assertEqual(
+            payload["permissions"]["system"]["devices"],
+            "basic",
+        )
 
     def test_create_custom_uses_prompted_name(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -284,6 +288,7 @@ class CliTests(unittest.TestCase):
                     "run_permission_wizard",
                     return_value={
                         "network": "advanced",
+                        "devices": "admin",
                         "host_authentication": False,
                         "home": [],
                         "administrator": True,
@@ -299,6 +304,7 @@ class CliTests(unittest.TestCase):
             invoke.call_args.args[1]["permissions"]["system"],
             {
                 "network": "advanced",
+                "devices": "admin",
                 "host_authentication": False,
             },
         )
@@ -741,6 +747,42 @@ class CliTests(unittest.TestCase):
             ):
                 self.assertEqual(cli.main(["create", "ubuntu"]), 130)
         self.assertTrue(wizard.call_args.kwargs["override"])
+        self.assertEqual(wizard.call_args.kwargs["devices"], "basic")
+
+    def test_recreating_space_preserves_device_permission(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            target = state / "ubuntu"
+            target.mkdir(parents=True)
+            identity = core.Identity(1000, 1000, Path(temporary))
+            info = core.create_info(
+                "ubuntu",
+                {"id": "ubuntu", "version": "resolute"},
+                identity,
+                "basic",
+                [],
+                devices="admin",
+            )
+            (target / "info.json").write_text(
+                json.dumps(info),
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.object(core, "STATE_ROOT", state),
+                mock.patch.object(
+                    core,
+                    "initiating_identity",
+                    return_value=identity,
+                ),
+                mock.patch.object(
+                    cli,
+                    "run_permission_wizard",
+                    return_value=None,
+                ) as wizard,
+            ):
+                self.assertEqual(cli.main(["create", "ubuntu"]), 130)
+
+        self.assertEqual(wizard.call_args.kwargs["devices"], "admin")
 
 
 if __name__ == "__main__":

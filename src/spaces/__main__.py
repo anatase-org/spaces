@@ -254,6 +254,7 @@ def _create(distro_id: str) -> int:
     existing_info = core.load_info(target / "info.json") if override else None
     (
         network,
+        devices,
         host_authentication,
         selected_home,
         administrator,
@@ -271,6 +272,7 @@ def _create(distro_id: str) -> int:
         home=identity.home,
         folders=folders,
         network=network,
+        devices=devices,
         host_authentication=host_authentication,
         selected_home=selected_home,
         administrator=administrator,
@@ -297,6 +299,7 @@ def _create(distro_id: str) -> int:
         identity=identity,
         network=result["network"],
         home=result["home"],
+        devices=result.get("devices", "basic"),
         administrator=result.get("administrator", True),
         host_authentication=result.get("host_authentication", True),
         desktop=result.get("desktop", True),
@@ -354,6 +357,7 @@ def _configure(name: str, *, user: str | None) -> int:
         )
     (
         network,
+        devices,
         host_authentication,
         selected_home,
         administrator,
@@ -367,6 +371,7 @@ def _configure(name: str, *, user: str | None) -> int:
         home=identity.home,
         folders=core.discover_home_folders(identity.home),
         network=network,
+        devices=devices,
         host_authentication=host_authentication,
         selected_home=selected_home,
         administrator=administrator,
@@ -396,6 +401,7 @@ def _configure(name: str, *, user: str | None) -> int:
     if not user_only:
         permissions["system"] = {
             "network": result["network"],
+            "devices": result["devices"],
             "host_authentication": result.get("host_authentication", True),
         }
     patch = {

@@ -31,7 +31,7 @@ class PackagingTests(unittest.TestCase):
 
     def test_systemd_template_launches_unescaped_space_name(self) -> None:
         service = ROOT / "data" / "spaces@.service"
-        unit = configparser.ConfigParser(interpolation=None)
+        unit = configparser.ConfigParser(interpolation=None, strict=False)
         unit.read(service, encoding="utf-8")
 
         self.assertEqual(unit["Service"]["Type"], "notify")
@@ -39,6 +39,11 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(unit["Service"]["Delegate"], "yes")
         self.assertEqual(unit["Service"]["KillMode"], "mixed")
         self.assertEqual(unit["Service"]["SyslogIdentifier"], "spaces-%I")
+        self.assertEqual(unit["Service"]["DevicePolicy"], "closed")
+        service_text = service.read_text(encoding="utf-8")
+        self.assertIn("DeviceAllow=/dev/net/tun rwm", service_text)
+        self.assertIn("DeviceAllow=char-pts rw", service_text)
+        self.assertIn("DeviceAllow=/dev/fuse rwm", service_text)
         self.assertEqual(
             unit["Service"]["ExecStart"],
             "/usr/bin/spaces.priv launch %I",

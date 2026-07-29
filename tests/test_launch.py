@@ -84,8 +84,14 @@ class LaunchTests(unittest.TestCase):
             return_value=self.worker,
         )
         self.worker_class = self.worker_patch.start()
+        self.device_policy_patch = mock.patch.object(
+            launch_module,
+            "_set_device_policy",
+        )
+        self.device_policy = self.device_policy_patch.start()
 
     def tearDown(self) -> None:
+        self.device_policy_patch.stop()
         self.worker_patch.stop()
         self.session_runtime_patch.stop()
         self.monitor_patch.stop()
@@ -100,6 +106,7 @@ class LaunchTests(unittest.TestCase):
         home: list[str] | None = None,
         host_authentication: bool = False,
         desktop: bool = False,
+        devices: str = "disabled",
     ) -> None:
         info = core.create_info(
             name,
@@ -107,6 +114,7 @@ class LaunchTests(unittest.TestCase):
             self.identity,
             network,
             home or [],
+            devices=devices,
             host_authentication=host_authentication,
             desktop=desktop,
         )
@@ -253,6 +261,7 @@ class LaunchTests(unittest.TestCase):
             self.identity,
             "basic",
             [],
+            devices="disabled",
             host_authentication=True,
             desktop=False,
         )
@@ -353,6 +362,136 @@ class LaunchTests(unittest.TestCase):
             "--bind-ro=/usr/lib/spaces/guest:/run/spaces-host/bin",
             popen.call_args.args[0],
         )
+        self.assertFalse(
+            any("/dev/dri" in argument for argument in popen.call_args.args[0])
+        )
+
+    def test_disabled_devices_add_no_host_device_binds(self) -> None:
+        self._write_info(devices="disabled", desktop=True)
+        process = mock.Mock()
+        process.wait.return_value = 0
+        self.device_policy.reset_mock()
+
+        with (
+            mock.patch.object(
+                launch_module.auth,
+                "validate_native_runtime",
+            ),
+            mock.patch.object(
+                launch_module.subprocess,
+                "Popen",
+                return_value=process,
+            ) as popen,
+            mock.patch.object(launch_module.signal, "signal"),
+        ):
+            self.assertEqual(launch_module.launch("work"), 0)
+
+        command = popen.call_args.args[0]
+        self.assertNotIn("--bind=/dev", command)
+        self.assertFalse(any("/dev/dri" in argument for argument in command))
+        self.assertEqual(
+            self.device_policy.call_args_list,
+            [
+                mock.call("work", "disabled", ()),
+                mock.call("work", "disabled"),
+            ],
+        )
+
+    def test_full_devices_bind_dev_and_use_unrestricted_policy(self) -> None:
+        self._write_info(devices="full")
+        process = mock.Mock()
+        process.wait.return_value = 0
+        self.device_policy.reset_mock()
+
+        with (
+            mock.patch.object(
+                launch_module.subprocess,
+                "Popen",
+                return_value=process,
+            ) as popen,
+            mock.patch.object(launch_module.signal, "signal"),
+        ):
+            self.assertEqual(launch_module.launch("work"), 0)
+
+        self.assertIn("--bind=/dev", popen.call_args.args[0])
+        self.assertEqual(
+            self.device_policy.call_args_list,
+            [
+                mock.call("work", "full", ()),
+                mock.call("work", "disabled"),
+            ],
+        )
+
+    def test_missing_devices_defaults_to_basic_and_starts_monitor_first(
+        self,
+    ) -> None:
+        self._write_info(devices="basic")
+        info_path = self.space / "info.json"
+        info = json.loads(info_path.read_text(encoding="utf-8"))
+        del info["permissions"]["system"]["devices"]
+        info_path.write_text(json.dumps(info), encoding="utf-8")
+        process = mock.Mock()
+        process.wait.return_value = 0
+        device_udev = mock.Mock()
+        device_monitor = mock.Mock()
+        device_udev.monitor.return_value = device_monitor
+        device_worker = mock.Mock()
+        discovered = launch_module.devices.DeviceNode(
+            destination=launch_module.PurePosixPath("/dev/snd/pcm0"),
+            source=Path("/dev/snd/pcm0"),
+            kind="c",
+            major=116,
+            minor=1,
+        )
+        events: list[str] = []
+        device_udev.monitor.side_effect = lambda: (
+            events.append("monitor") or device_monitor
+        )
+        self.device_policy.reset_mock()
+
+        with (
+            mock.patch.object(
+                launch_module.devices,
+                "Udev",
+                return_value=device_udev,
+            ),
+            mock.patch.object(
+                launch_module.devices,
+                "discover",
+                side_effect=lambda *_args, **_kwargs: (
+                    events.append("discover") or (discovered,)
+                ),
+            ),
+            mock.patch.object(
+                launch_module,
+                "_DeviceWorker",
+                return_value=device_worker,
+            ),
+            mock.patch.object(
+                launch_module.subprocess,
+                "Popen",
+                return_value=process,
+            ) as popen,
+            mock.patch.object(launch_module.signal, "signal"),
+        ):
+            self.assertEqual(launch_module.launch("work"), 0)
+
+        self.assertEqual(events, ["monitor", "discover"])
+        self.assertIn(
+            "--bind=/dev/snd/pcm0:/dev/snd/pcm0",
+            popen.call_args.args[0],
+        )
+        self.assertEqual(
+            self.device_policy.call_args_list,
+            [
+                mock.call("work", "basic", (discovered,)),
+                mock.call("work", "disabled"),
+            ],
+        )
+        device_worker.start.assert_called_once_with()
+        device_worker.attach.assert_called_once_with(process)
+        device_worker.stop.assert_called_once_with()
+        device_worker.join.assert_called_once_with()
 
     def test_enabled_unknown_policy_is_rejected(self) -> None:
         self._write_info(host_authentication=True)

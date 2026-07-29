@@ -467,7 +467,7 @@ class PortalNativeTests(unittest.TestCase):
                     except ProcessLookupError:
                         pass
 
-    def test_screen_cast_restore_data_round_trip_is_stateless(self) -> None:
+    def test_host_portal_restore_data_round_trip_is_stateless(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             library_path = Path(temporary) / "spaces-portal-test.so"
             pkg_config = subprocess.run(
@@ -482,7 +482,6 @@ class PortalNativeTests(unittest.TestCase):
                     "-shared",
                     "-fPIC",
                     "-std=gnu11",
-                    "-DSPACES_PORTAL_TEST",
                     "-Wno-unused-function",
                     "-o",
                     str(library_path),
@@ -509,14 +508,14 @@ class PortalNativeTests(unittest.TestCase):
             library.g_variant_print.restype = ctypes.c_void_p
             library.g_variant_unref.argtypes = [ctypes.c_void_p]
             library.g_free.argtypes = [ctypes.c_void_p]
-            library.screen_cast_options_to_host.argtypes = [
+            library.portal_restore_options_to_host.argtypes = [
                 ctypes.c_void_p
             ]
-            library.screen_cast_options_to_host.restype = ctypes.c_void_p
-            library.screen_cast_results_to_backend.argtypes = [
+            library.portal_restore_options_to_host.restype = ctypes.c_void_p
+            library.portal_restore_results_to_backend.argtypes = [
                 ctypes.c_void_p
             ]
-            library.screen_cast_results_to_backend.restype = ctypes.c_void_p
+            library.portal_restore_results_to_backend.restype = ctypes.c_void_p
 
             def parse(text: str) -> int:
                 error = ctypes.c_void_p()
@@ -544,7 +543,7 @@ class PortalNativeTests(unittest.TestCase):
                 "'streams': <@a(ua{sv}) []>}"
             )
             backend_results = library.g_variant_ref_sink(
-                library.screen_cast_results_to_backend(host_results)
+                library.portal_restore_results_to_backend(host_results)
             )
             backend_text = render(backend_results)
             self.assertNotIn("restore_token", backend_text)
@@ -555,7 +554,7 @@ class PortalNativeTests(unittest.TestCase):
             )
 
             host_options = library.g_variant_ref_sink(
-                library.screen_cast_options_to_host(backend_results)
+                library.portal_restore_options_to_host(backend_results)
             )
             host_text = render(host_options)
             self.assertIn("'restore_token': <'host-token'>", host_text)
@@ -567,7 +566,7 @@ class PortalNativeTests(unittest.TestCase):
                 "'restore_token': <'injected-token'>}"
             )
             filtered_options = library.g_variant_ref_sink(
-                library.screen_cast_options_to_host(foreign_options)
+                library.portal_restore_options_to_host(foreign_options)
             )
             filtered_text = render(filtered_options)
             self.assertNotIn("restore_data", filtered_text)

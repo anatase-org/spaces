@@ -7,6 +7,10 @@ NotifyAccess=all
 Delegate=yes
 KillMode=mixed
 SyslogIdentifier=spaces-%I
+DevicePolicy=closed
+DeviceAllow=/dev/net/tun rwm
+DeviceAllow=char-pts rw
+DeviceAllow=/dev/fuse rwm
 ExecStart=/usr/bin/spaces.priv launch %I
 
 [Install]

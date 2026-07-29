@@ -19,6 +19,7 @@ STATE_ROOT = Path("/var/lib/spaces")
 KNOWN_DISTRIBUTIONS = KNOWN_IDS
 RESERVED_NAMES = frozenset(KNOWN_DISTRIBUTIONS)
 NETWORK_LEVELS = ("basic", "advanced", "admin")
+DEVICE_LEVELS = ("disabled", "basic", "admin", "full")
 DEFAULT_HOME_FOLDERS = ("Projects", "Downloads")
 SPACE_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
 
@@ -148,6 +149,11 @@ def _validate_system_permissions(value: object) -> dict[str, Any]:
     if network not in NETWORK_LEVELS:
         raise SpacesError(
             _("Unknown network permission: {network!r}.", network=network)
+        )
+    devices = system.get("devices", "basic")
+    if devices not in DEVICE_LEVELS:
+        raise SpacesError(
+            _("Unknown device permission: {devices!r}.", devices=devices)
         )
     host_authentication = system.get("host_authentication", True)
     if not isinstance(host_authentication, bool):
@@ -326,20 +332,31 @@ def load_info(path: Path) -> dict[str, Any] | None:
 
 def defaults_from_info(
     info: Mapping[str, Any] | None, identity: Identity
-) -> tuple[str, bool, list[str], bool, bool]:
+) -> tuple[str, str, bool, list[str], bool, bool]:
     network = "basic"
+    devices = "basic"
     host_authentication = True
     selected_home = list(DEFAULT_HOME_FOLDERS)
     administrator = True
     desktop = True
     if not info:
-        return network, host_authentication, selected_home, administrator, desktop
+        return (
+            network,
+            devices,
+            host_authentication,
+            selected_home,
+            administrator,
+            desktop,
+        )
 
     permissions = info.get("permissions", {})
     system_permissions = permissions.get("system", {})
     existing_network = system_permissions.get("network")
     if existing_network in NETWORK_LEVELS:
         network = existing_network
+    existing_devices = system_permissions.get("devices")
+    if existing_devices in DEVICE_LEVELS:
+        devices = existing_devices
     existing_host_authentication = system_permissions.get(
         "host_authentication"
     )
@@ -362,7 +379,14 @@ def defaults_from_info(
     existing_desktop = user_permissions.get("desktop")
     if isinstance(existing_desktop, bool):
         desktop = existing_desktop
-    return network, host_authentication, selected_home, administrator, desktop
+    return (
+        network,
+        devices,
+        host_authentication,
+        selected_home,
+        administrator,
+        desktop,
+    )
 
 
 def create_info(
@@ -374,6 +398,7 @@ def create_info(
     administrator: bool = True,
     host_authentication: bool = True,
     desktop: bool = True,
+    devices: str = "basic",
 ) -> dict[str, Any]:
     value = {
         "schema_version": SCHEMA_VERSION,
@@ -382,6 +407,7 @@ def create_info(
         "permissions": {
             "system": {
                 "network": network,
+                "devices": devices,
                 "host_authentication": host_authentication,
             },
             "users": {

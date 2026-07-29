@@ -24,6 +24,7 @@ from typing import Any
 from . import _
 from . import auth
 from . import core
+from . import devices
 from . import session
 from .distro import get_driver
 from .logging import configure_logging
@@ -36,6 +37,7 @@ MACHINECTL = "/usr/bin/machinectl"
 SYSTEMCTL = "/usr/bin/systemctl"
 SYSTEMD_ESCAPE = "/usr/bin/systemd-escape"
 SYSTEMD_UMOUNT = "/usr/bin/systemd-umount"
+BUSCTL = "/usr/bin/busctl"
 API_VFS_WRITABLE = "SYSTEMD_NSPAWN_API_VFS_WRITABLE"
 PING_GROUP_RANGE = Path("/proc/sys/net/ipv4/ping_group_range")
 UNPRIVILEGED_PING_GROUP_RANGE = (0, 2_147_483_647)
@@ -45,6 +47,11 @@ ELIGIBLE_USER_STATES = frozenset({"active", "online", "lingering"})
 INELIGIBLE_USER_STATES = frozenset({"closing", "offline"})
 LOGIN_RECONCILE_INTERVAL_SECONDS = 1.0
 PORTAL_RECONCILE_INTERVAL_SECONDS = 5.0
+BASE_DEVICE_ALLOW = (
+    ("/dev/net/tun", "rwm"),
+    ("char-pts", "rw"),
+    ("/dev/fuse", "rwm"),
+)
 SYMLINKS = [
     # Ostree system weirdness
     ("/var/home", "/home"),
@@ -854,10 +861,59 @@ def _mount_summary(mounts: Iterable[HomeMount]) -> str:
 
 
 def _bind_argument(mount: HomeMount) -> str:
+    return _path_bind_argument(mount.source, mount.destination)
+
+
+def _path_bind_argument(source: Path, destination: str | PurePosixPath) -> str:
     def escape(value: str) -> str:
         return value.replace("\\", "\\\\").replace(":", "\\:")
 
-    return f"--bind={escape(str(mount.source))}:{escape(mount.destination)}"
+    return f"--bind={escape(str(source))}:{escape(str(destination))}"
+
+
+def _set_device_policy(
+    space_name: str,
+    level: str,
+    nodes: Iterable[devices.DeviceNode] = (),
+) -> None:
+    """Atomically replace the service instance's device cgroup policy."""
+
+    unit = f"spaces@{space_name}.service"
+    if level == "full":
+        policy = "auto"
+        allowed: tuple[tuple[str, str], ...] = ()
+    else:
+        policy = "closed"
+        allowed = (
+            *BASE_DEVICE_ALLOW,
+            *((node.allow_spec, "rw") for node in sorted(nodes)),
+        )
+    subprocess.run(
+        [
+            BUSCTL,
+            "call",
+            "org.freedesktop.systemd1",
+            "/org/freedesktop/systemd1",
+            "org.freedesktop.systemd1.Manager",
+            "SetUnitProperties",
+            "sba(sv)",
+            unit,
+            "true",
+            "2",
+            "DevicePolicy",
+            "s",
+            policy,
+            "DeviceAllow",
+            "a(ss)",
+            str(len(allowed)),
+            *(
+                value
+                for device_allow in allowed
+                for value in device_allow
+            ),
+        ],
+        check=True,
+    )
 
 
 class _LoginMonitor:
@@ -1446,43 +1502,213 @@ class _MountWorker:
         )
 
     def _remove(self, mount: HomeMount) -> None:
-        escaped = subprocess.run(
-            [
-                SYSTEMD_ESCAPE,
-                "--path",
-                "--suffix=mount",
-                mount.destination,
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-        if not escaped:
-            raise core.SpacesError(
-                _("Could not derive a mount unit for {path}.", path=mount.destination)
+        _unmount_in_machine(self._space_name, mount.destination)
+
+
+def _unmount_in_machine(space_name: str, destination: str) -> None:
+    """Lazily revoke one runtime bind from a running space."""
+
+    escaped = subprocess.run(
+        [
+            SYSTEMD_ESCAPE,
+            "--path",
+            "--suffix=mount",
+            destination,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if not escaped:
+        raise core.SpacesError(
+            _("Could not derive a mount unit for {path}.", path=destination)
+        )
+    subprocess.run(
+        [
+            SYSTEMCTL,
+            f"--machine={space_name}",
+            "--no-ask-password",
+            "set-property",
+            "--runtime",
+            escaped,
+            "LazyUnmount=yes",
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [
+            SYSTEMD_UMOUNT,
+            f"--machine={space_name}",
+            "--no-ask-password",
+            "--quiet",
+            destination,
+        ],
+        check=True,
+    )
+
+
+class _DeviceWorker:
+    """Reconcile filtered device binds when udev reports host changes."""
+
+    def __init__(
+        self,
+        space_name: str,
+        level: str,
+        udev: devices.Udev,
+        monitor: devices.UdevMonitor,
+        initial_nodes: tuple[devices.DeviceNode, ...],
+    ) -> None:
+        self._space_name = space_name
+        self._level = level
+        self._udev = udev
+        self._monitor = monitor
+        self._mounted = set(initial_nodes)
+        self._process: subprocess.Popen[Any] | None = None
+        self._attached = threading.Event()
+        self._stopping = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"spaces-{space_name}-devices",
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def attach(self, process: subprocess.Popen[Any]) -> None:
+        self._process = process
+        self._attached.set()
+
+    def stop(self) -> None:
+        self._stopping.set()
+        self._attached.set()
+        self._monitor.stop()
+
+    def join(self) -> None:
+        self._thread.join()
+
+    def _run(self) -> None:
+        try:
+            self._attached.wait()
+            if self._stopping.is_set() or self._process is None:
+                return
+            if not self._wait_until_registered():
+                return
+            self._reconcile()
+            while not self._stopping.is_set() and self._monitor.wait():
+                if self._stopping.is_set():
+                    break
+                self._reconcile()
+        except Exception as error:
+            logger.error(
+                _("Device monitor failed; stopping the space: {error}", error=error)
             )
-        subprocess.run(
-            [
-                SYSTEMCTL,
-                f"--machine={self._space_name}",
-                "--no-ask-password",
-                "set-property",
-                "--runtime",
-                escaped,
-                "LazyUnmount=yes",
-            ],
-            check=True,
+            process = self._process
+            if process is not None and process.poll() is None:
+                process.send_signal(signal.SIGTERM)
+
+    def _wait_until_registered(self) -> bool:
+        process = self._process
+        assert process is not None
+        while not self._stopping.is_set() and process.poll() is None:
+            machine = subprocess.run(
+                [
+                    MACHINECTL,
+                    "--quiet",
+                    "--no-ask-password",
+                    "show",
+                    "--property=Leader",
+                    "--value",
+                    self._space_name,
+                ],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            if machine.returncode != 0:
+                self._stopping.wait(0.05)
+                continue
+            guest_shell = subprocess.run(
+                [
+                    MACHINECTL,
+                    "--quiet",
+                    "--no-ask-password",
+                    "--uid=root",
+                    "--",
+                    "shell",
+                    self._space_name,
+                    "/usr/bin/true",
+                ],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            if guest_shell.returncode == 0:
+                return True
+            self._stopping.wait(0.05)
+        return False
+
+    def _reconcile(self) -> None:
+        desired = set(
+            devices.discover(
+                self._level,
+                metadata_reader=self._udev.metadata,
+            )
         )
-        subprocess.run(
-            [
-                SYSTEMD_UMOUNT,
-                f"--machine={self._space_name}",
-                "--no-ask-password",
-                "--quiet",
-                mount.destination,
-            ],
-            check=True,
+        removals = sorted(
+            self._mounted - desired,
+            key=lambda node: len(node.destination.parts),
+            reverse=True,
         )
+        for node in removals:
+            _unmount_in_machine(self._space_name, str(node.destination))
+            self._mounted.remove(node)
+        if removals:
+            _set_device_policy(
+                self._space_name, self._level, self._mounted
+            )
+
+        for node in sorted(desired - self._mounted):
+            proposed = {*self._mounted, node}
+            try:
+                _set_device_policy(self._space_name, self._level, proposed)
+                subprocess.run(
+                    [
+                        MACHINECTL,
+                        "--quiet",
+                        "--no-ask-password",
+                        "--mkdir",
+                        "bind",
+                        self._space_name,
+                        str(node.source),
+                        str(node.destination),
+                    ],
+                    check=True,
+                )
+            except (OSError, subprocess.CalledProcessError) as error:
+                _set_device_policy(
+                    self._space_name, self._level, self._mounted
+                )
+                logger.warning(
+                    _(
+                        "Could not expose device {device}; skipping it: {error}",
+                        device=node.source,
+                        error=error,
+                    )
+                )
+                continue
+            self._mounted.add(node)
+
+
+def _device_bind_arguments(
+    level: str,
+    nodes: Iterable[devices.DeviceNode],
+) -> tuple[str, ...]:
+    if level == "full":
+        return ("--bind=/dev",)
+    return tuple(
+        _path_bind_argument(node.source, node.destination)
+        for node in sorted(nodes)
+    )
 
 
 def _command(
@@ -1528,6 +1754,7 @@ def launch(space_name: str) -> int:
     configure_logging(rich=False)
     rootfs, home, info = _load_space(space_name)
     network = info["permissions"]["system"]["network"]
+    device_level = info["permissions"]["system"].get("devices", "basic")
     host_authentication = info["permissions"]["system"].get(
         "host_authentication",
         True,
@@ -1566,6 +1793,10 @@ def launch(space_name: str) -> int:
     available_mounts = _prepare_mounts(users)
     monitor: _LoginMonitor | None = None
     worker: _MountWorker | None = None
+    device_udev: devices.Udev | None = None
+    device_monitor: devices.UdevMonitor | None = None
+    device_worker: _DeviceWorker | None = None
+    device_policy_set = False
     authentication: auth.AuthenticationService | None = None
     authentication_binds: tuple[str, ...] = ()
     portal_binds = (
@@ -1595,6 +1826,24 @@ def launch(space_name: str) -> int:
             )
             authentication.start()
             authentication_binds += authentication_runtime.bind_arguments
+        initial_devices: tuple[devices.DeviceNode, ...] = ()
+        if device_level in {"basic", "admin"}:
+            device_udev = devices.Udev()
+            device_monitor = device_udev.monitor()
+            initial_devices = devices.discover(
+                device_level,
+                metadata_reader=device_udev.metadata,
+            )
+            device_worker = _DeviceWorker(
+                space_name,
+                device_level,
+                device_udev,
+                device_monitor,
+                initial_devices,
+            )
+            device_worker.start()
+        _set_device_policy(space_name, device_level, initial_devices)
+        device_policy_set = True
         monitor = _LoginMonitor()
         initial_eligible_uids = _eligible_uids(monitor, users)
         initial_mounts = _plan_mounts(
@@ -1618,11 +1867,20 @@ def launch(space_name: str) -> int:
                 home,
                 network,
                 initial_mounts,
-                (*authentication_binds, *portal_binds),
+                (
+                    *authentication_binds,
+                    *portal_binds,
+                    *_device_bind_arguments(
+                        device_level,
+                        initial_devices,
+                    ),
+                ),
             ),
             env=environment,
         )
         worker.attach(process)
+        if device_worker is not None:
+            device_worker.attach(process)
 
         def stop_authentication() -> None:
             nonlocal authentication
@@ -1637,10 +1895,21 @@ def launch(space_name: str) -> int:
         signal.signal(signal.SIGTERM, forward_signal)
         return process.wait()
     finally:
+        if device_worker is not None:
+            device_worker.stop()
         if worker is not None:
             worker.stop()
+        if device_worker is not None:
+            device_worker.join()
+        if worker is not None:
             worker.join()
         if monitor is not None:
             monitor.close()
+        if device_monitor is not None:
+            device_monitor.close()
+        if device_udev is not None:
+            device_udev.close()
         if authentication is not None:
             authentication.stop()
+        if device_policy_set:
+            _set_device_policy(space_name, "disabled")

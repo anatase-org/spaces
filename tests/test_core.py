@@ -200,6 +200,7 @@ class CoreTests(unittest.TestCase):
     def test_new_space_defaults(self) -> None:
         (
             network,
+            devices,
             host_authentication,
             selected_home,
             administrator,
@@ -209,6 +210,7 @@ class CoreTests(unittest.TestCase):
             core.Identity(1000, 1000, Path("/home/user")),
         )
         self.assertEqual(network, "basic")
+        self.assertEqual(devices, "basic")
         self.assertTrue(host_authentication)
         self.assertEqual(selected_home, ["Projects", "Downloads"])
         self.assertTrue(administrator)
@@ -299,6 +301,10 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(
             info["permissions"]["system"]["host_authentication"]
         )
+        self.assertEqual(
+            info["permissions"]["system"]["devices"],
+            "basic",
+        )
         self.assertTrue(
             info["permissions"]["users"]["1000"]["permissions"]["desktop"]
         )
@@ -314,9 +320,14 @@ class CoreTests(unittest.TestCase):
             administrator=False,
         )
 
-        _network, _host_auth, _home, administrator, _desktop = core.defaults_from_info(
-            info, identity
-        )
+        (
+            _network,
+            _devices,
+            _host_auth,
+            _home,
+            administrator,
+            _desktop,
+        ) = core.defaults_from_info(info, identity)
 
         self.assertFalse(administrator)
 
@@ -332,9 +343,14 @@ class CoreTests(unittest.TestCase):
         del info["permissions"]["users"]["1000"]["permissions"]["administrator"]
 
         core.validate_info(info)
-        _network, _host_auth, _home, administrator, _desktop = core.defaults_from_info(
-            info, identity
-        )
+        (
+            _network,
+            _devices,
+            _host_auth,
+            _home,
+            administrator,
+            _desktop,
+        ) = core.defaults_from_info(info, identity)
 
         self.assertTrue(administrator)
 
@@ -346,9 +362,14 @@ class CoreTests(unittest.TestCase):
         del info["permissions"]["system"]["host_authentication"]
 
         core.validate_info(info)
-        _network, host_auth, _home, _administrator, _desktop = core.defaults_from_info(
-            info, identity
-        )
+        (
+            _network,
+            _devices,
+            host_auth,
+            _home,
+            _administrator,
+            _desktop,
+        ) = core.defaults_from_info(info, identity)
 
         self.assertTrue(host_auth)
 
@@ -383,11 +404,31 @@ class CoreTests(unittest.TestCase):
         info = core.create_info(
             "work", {"id": "custom"}, identity, "basic", [], desktop=False
         )
-        self.assertFalse(core.defaults_from_info(info, identity)[4])
+        self.assertFalse(core.defaults_from_info(info, identity)[5])
         del info["permissions"]["users"]["1000"]["permissions"]["desktop"]
         core.validate_info(info)
-        self.assertTrue(core.defaults_from_info(info, identity)[4])
+        self.assertTrue(core.defaults_from_info(info, identity)[5])
         info["permissions"]["users"]["1000"]["permissions"]["desktop"] = 1
+        with self.assertRaises(core.SpacesError):
+            core.validate_info(info)
+
+    def test_device_permission_defaults_validates_and_is_preserved(self) -> None:
+        identity = core.Identity(1000, 1000, Path("/home/user"))
+        info = core.create_info(
+            "work",
+            {"id": "custom"},
+            identity,
+            "basic",
+            [],
+            devices="admin",
+        )
+        self.assertEqual(core.defaults_from_info(info, identity)[1], "admin")
+
+        del info["permissions"]["system"]["devices"]
+        core.validate_info(info)
+        self.assertEqual(core.defaults_from_info(info, identity)[1], "basic")
+
+        info["permissions"]["system"]["devices"] = "unknown"
         with self.assertRaises(core.SpacesError):
             core.validate_info(info)
 
