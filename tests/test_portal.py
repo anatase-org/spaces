@@ -395,6 +395,32 @@ class PortalNativeTests(unittest.TestCase):
         )
         return address, int(completed.stdout.strip())
 
+    @staticmethod
+    def _wait_for_bus_name(address: str, name: str) -> bool:
+        for _attempt in range(100):
+            owner = subprocess.run(
+                [
+                    "gdbus",
+                    "call",
+                    "--address",
+                    address,
+                    "--dest",
+                    "org.freedesktop.DBus",
+                    "--object-path",
+                    "/org/freedesktop/DBus",
+                    "--method",
+                    "org.freedesktop.DBus.NameHasOwner",
+                    name,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if owner.returncode == 0 and "true" in owner.stdout:
+                return True
+            time.sleep(0.01)
+        return False
+
     def test_backend_registers_only_host_interfaces_and_rejects_direct_callers(
         self,
     ) -> None:
@@ -415,29 +441,10 @@ class PortalNativeTests(unittest.TestCase):
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            for _attempt in range(100):
-                owner = subprocess.run(
-                    [
-                        "gdbus",
-                        "call",
-                        "--address",
-                        host_address,
-                        "--dest",
-                        "org.freedesktop.DBus",
-                        "--object-path",
-                        "/org/freedesktop/DBus",
-                        "--method",
-                        "org.freedesktop.DBus.NameHasOwner",
-                        "org.freedesktop.portal.Desktop",
-                    ],
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                )
-                if owner.returncode == 0 and "true" in owner.stdout:
-                    break
-                time.sleep(0.01)
-            else:
+            if not self._wait_for_bus_name(
+                host_address,
+                "org.freedesktop.portal.Desktop",
+            ):
                 self.fail("fake host portal did not acquire its bus name")
             process = subprocess.Popen(
                 [ROOT / "native" / "spaces-portal"],
@@ -565,6 +572,33 @@ class PortalNativeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             address, bus_pid = self._bus(root / "bus")
+            # The private daemon still has the host's D-Bus activation paths.
+            # Own the portal name so a valid broker call cannot auto-start the
+            # real host portal.
+            fake_portal = subprocess.Popen(
+                [
+                    "dbus-test-tool",
+                    "echo",
+                    "--name=org.freedesktop.portal.Desktop",
+                ],
+                env={
+                    **os.environ,
+                    "DBUS_SESSION_BUS_ADDRESS": address,
+                },
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            if not self._wait_for_bus_name(
+                address,
+                "org.freedesktop.portal.Desktop",
+            ):
+                fake_portal.terminate()
+                fake_portal.wait(timeout=2)
+                try:
+                    os.kill(bus_pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                self.fail("fake host portal did not acquire its bus name")
             base = root / "base"
             nested = root / "nested"
             (base / "nested").mkdir(parents=True)
@@ -651,6 +685,9 @@ class PortalNativeTests(unittest.TestCase):
                 if broker.poll() is None:
                     broker.terminate()
                 broker.wait(timeout=2)
+                if fake_portal.poll() is None:
+                    fake_portal.terminate()
+                fake_portal.wait(timeout=2)
                 try:
                     os.kill(bus_pid, signal.SIGTERM)
                 except ProcessLookupError:
