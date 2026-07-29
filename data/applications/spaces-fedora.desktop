@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
 Name=Space (Fedora)
-Comment=Enter the Fedora space
+Comment=Access and install Fedora applications
 TryExec=/usr/bin/spaces
 Exec=/usr/bin/spaces enter fedora
 Icon=spaces-fedora
