@@ -36,7 +36,6 @@ class CoreTests(unittest.TestCase):
         )
         self.assertIn("pkexec", ubuntu.PACKAGES)
         self.assertIn("polkit-kde-agent-1", ubuntu.PACKAGES)
-        self.assertIn("libglib2.0-bin", ubuntu.PACKAGES)
         self.assertIn("breeze", ubuntu.PACKAGES)
         self.assertIn("plasma-integration", ubuntu.PACKAGES)
         self.assertNotIn("python3", ubuntu.PACKAGES)

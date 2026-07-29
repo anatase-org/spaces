@@ -138,7 +138,6 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("check_guest_abi.py", makefile)
         for name in (
             "pam_spaces.so",
-            "spaces-empty-password-kwallet",
             "spaces-pam-worker",
             "spaces-session-launcher",
         ):
@@ -149,16 +148,6 @@ class PackagingTests(unittest.TestCase):
             "/usr/lib/spaces/guest/spaces-session-launcher",
             spec,
         )
-        self.assertIn(
-            "/usr/lib/spaces/guest/spaces-empty-password-kwallet",
-            spec,
-        )
-        wallet_helper = (
-            ROOT / "native" / "spaces-empty-password-kwallet"
-        ).read_text(encoding="utf-8")
-        self.assertIn("org.kde.secretservicecompat", wallet_helper)
-        self.assertIn("org.kde.KWallet.pamOpen", wallet_helper)
-        self.assertIn("test -x /usr/bin/ksecretd", wallet_helper)
         self.assertTrue(
             (ROOT / "native" / "spaces_session_launcher.c").exists()
         )
@@ -176,10 +165,6 @@ class PackagingTests(unittest.TestCase):
         manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8")
         self.assertIn(
             "recursive-include native Makefile *.c *.h *.py", manifest
-        )
-        self.assertIn(
-            "include native/spaces-empty-password-kwallet",
-            manifest,
         )
         self.assertIn("recursive-include data/pam *", manifest)
         profile = (

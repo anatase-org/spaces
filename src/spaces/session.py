@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
 import os
 import pwd
 import re
@@ -24,8 +23,6 @@ from typing import Protocol
 from . import _
 from . import core
 
-
-logger = logging.getLogger(__name__)
 
 MAX_ENVIRONMENT_VALUE = 4096
 MACHINECTL = "/usr/bin/machinectl"
@@ -108,13 +105,6 @@ POLKIT_AGENTS = (
     "/usr/lib/polkit-kde-authentication-agent-1",
 )
 POLKIT_AGENT_GLOB = "usr/lib/*/libexec/polkit-kde-authentication-agent-1"
-KWALLET_EXECUTABLE = Path("usr/bin/ksecretd")
-KWALLET_SERVICE = Path(
-    "usr/share/dbus-1/services/org.kde.secretservicecompat.service"
-)
-EMPTY_PASSWORD_KWALLET = (
-    "/run/spaces-host/bin/spaces-empty-password-kwallet"
-)
 
 
 class DesktopUser(Protocol):
@@ -926,40 +916,12 @@ def polkit_agent(rootfs: Path) -> str | None:
     return None
 
 
-def kwallet_installed(rootfs: Path) -> bool:
-    """Return whether the guest has the KWallet service used by our helper."""
-
-    try:
-        resolved_root = rootfs.resolve(strict=True)
-        executable = (rootfs / KWALLET_EXECUTABLE).resolve(strict=True)
-        service = (rootfs / KWALLET_SERVICE).resolve(strict=True)
-        executable_metadata = executable.stat()
-        service_metadata = service.stat()
-    except (OSError, RuntimeError):
-        return False
-    return (
-        executable.is_relative_to(resolved_root)
-        and service.is_relative_to(resolved_root)
-        and stat.S_ISREG(executable_metadata.st_mode)
-        and executable_metadata.st_mode & 0o111 != 0
-        and stat.S_ISREG(service_metadata.st_mode)
-    )
-
-
 class DesktopController:
     """Reconcile login-scoped desktop resources for one running space."""
 
-    def __init__(
-        self,
-        space_name: str,
-        users: tuple[DesktopUser, ...],
-        *,
-        initialize_wallet: bool = False,
-    ) -> None:
+    def __init__(self, space_name: str, users: tuple[DesktopUser, ...]) -> None:
         self.space_name = space_name
         self.users = {user.uid: user for user in users}
-        self.initialize_wallet = initialize_wallet
-        self.initialized_wallets: set[int] = set()
         self.active: dict[int, _ActiveDesktop] = {}
         self.destination_users: dict[str, set[int]] = {}
         self.destination_sources: dict[str, tuple[int, int]] = {}
@@ -1067,7 +1029,6 @@ class DesktopController:
             for binding in plan.binds:
                 self._mount(user.uid, binding)
                 mounted.append(binding)
-            self._initialize_wallet(user, plan.environment)
             _write_record(
                 self.space_name,
                 user.uid,
@@ -1093,57 +1054,6 @@ class DesktopController:
                 ) from cleanup_error
             raise
         return _ActiveDesktop(plan=plan)
-
-    def _initialize_wallet(
-        self,
-        user: DesktopUser,
-        environment: dict[str, str],
-    ) -> None:
-        if (
-            not self.initialize_wallet
-            or user.uid in self.initialized_wallets
-        ):
-            return
-        # One launch gets one best-effort initialization attempt per user.
-        # Session switches must not create another PAM/logind session.
-        self.initialized_wallets.add(user.uid)
-        try:
-            completed = subprocess.run(
-                [
-                    MACHINECTL,
-                    "--quiet",
-                    "--no-ask-password",
-                    f"--uid={user.name}",
-                    *(
-                        f"--setenv={name}={value}"
-                        for name, value in sorted(environment.items())
-                    ),
-                    "--",
-                    "shell",
-                    self.space_name,
-                    EMPTY_PASSWORD_KWALLET,
-                ],
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except OSError as error:
-            logger.warning(
-                _(
-                    "Could not initialize KWallet for {user}: {error}",
-                    user=user.name,
-                    error=error,
-                )
-            )
-            return
-        if completed.returncode != 0:
-            logger.warning(
-                _(
-                    "Could not initialize KWallet for {user}.",
-                    user=user.name,
-                )
-            )
-            return
 
     def _deactivate(
         self,
