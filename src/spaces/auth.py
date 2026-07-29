@@ -29,7 +29,11 @@ PAM_WORKER = Path("/usr/lib/spaces/spaces-pam-worker")
 GUEST_RUNTIME = "/run/spaces-host"
 GUEST_SOCKET = f"{GUEST_RUNTIME}/auth.sock"
 GUEST_NATIVE = f"{GUEST_RUNTIME}/bin"
-GUEST_BINARIES = ("pam_spaces.so", "spaces-session-launcher")
+GUEST_BINARIES = (
+    "pam_spaces.so",
+    "spaces-portal",
+    "spaces-session-launcher",
+)
 ELF_MACHINES = {
     "x86_64": 62,
     "aarch64": 183,

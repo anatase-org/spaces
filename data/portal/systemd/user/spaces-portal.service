@@ -1,0 +1,10 @@
+[Unit]
+Description=Spaces host portal backend
+StartLimitIntervalSec=0
+
+[Service]
+Type=dbus
+BusName=org.freedesktop.impl.portal.desktop.spaces
+ExecStart=/run/spaces-host/bin/spaces-portal
+Restart=always
+RestartSec=1

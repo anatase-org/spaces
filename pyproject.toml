@@ -47,3 +47,15 @@ spaces = ["overlay/*.png"]
   "data/pam/spaces.ubuntu",
 ]
 "lib/systemd/system" = ["data/spaces@.service"]
+"share/spaces/portal/dbus-1/services" = [
+  "data/portal/dbus-1/services/org.freedesktop.impl.portal.desktop.spaces.service",
+]
+"share/spaces/portal/xdg-desktop-portal" = [
+  "data/portal/xdg-desktop-portal/spaces-portals.conf",
+]
+"share/spaces/portal/xdg-desktop-portal/portals" = [
+  "data/portal/xdg-desktop-portal/portals/spaces.portal",
+]
+"share/spaces/portal/systemd/user" = [
+  "data/portal/systemd/user/spaces-portal.service",
+]

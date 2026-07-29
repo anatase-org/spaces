@@ -138,6 +138,7 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("check_guest_abi.py", makefile)
         for name in (
             "pam_spaces.so",
+            "spaces-portal",
             "spaces-pam-worker",
             "spaces-session-launcher",
         ):
@@ -148,6 +149,10 @@ class PackagingTests(unittest.TestCase):
             "/usr/lib/spaces/guest/spaces-session-launcher",
             spec,
         )
+        self.assertIn("/usr/lib/spaces/guest/spaces-portal", spec)
+        self.assertIn("Requires:       glib2", spec)
+        self.assertIn("Requires:       xdg-dbus-proxy", spec)
+        self.assertIn("BuildRequires:  glib2-devel", spec)
         self.assertTrue(
             (ROOT / "native" / "spaces_session_launcher.c").exists()
         )

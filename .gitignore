@@ -12,3 +12,4 @@ pkg/
 /native/pam_spaces.so
 /native/spaces-pam-worker
 /native/spaces-session-launcher
+/native/spaces-portal

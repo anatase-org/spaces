@@ -235,6 +235,9 @@ class DesktopPathTests(unittest.TestCase):
                 f"unix:{destination_root}/pulse/native",
             )
             self.assertEqual(plan.environment["QT_SCALE_FACTOR"], "1.5")
+            self.assertEqual(
+                plan.environment["XDG_CURRENT_DESKTOP"], "Spaces"
+            )
             self.assertNotIn("DBUS_SESSION_BUS_ADDRESS", plan.environment)
             self.assertNotIn("XDG_RUNTIME_DIR", plan.environment)
             self.assertNotIn("XDG_SESSION_ID", plan.environment)
@@ -442,6 +445,41 @@ class DesktopControllerTests(unittest.TestCase):
         mount.assert_called_once_with(self.desktop_user.uid, binding)
         unmount.assert_called_once_with(self.desktop_user.uid, binding)
 
+    def test_portal_failure_is_retried_without_replacing_desktop(self) -> None:
+        self.controller.portals_enabled = True
+        plan = session.DesktopPlan("2", (), {"DISPLAY": ":0"})
+        current = session._ActiveDesktop(plan)
+        self.controller.active[self.desktop_user.uid] = current
+        proxy = mock.Mock()
+        binding = session.DesktopBind(
+            "/run/spaces/desktop/1000/portal/bus",
+            self.root / "portal-bus",
+            1,
+            2,
+        )
+        with (
+            mock.patch.object(
+                session,
+                "start_portal_proxy",
+                side_effect=[
+                    core.SpacesError("transient"),
+                    (proxy, binding),
+                ],
+            ) as start,
+            mock.patch.object(self.controller, "_mount") as mount,
+            self.assertLogs(session.logger, "WARNING"),
+        ):
+            self.controller.reconcile_portals()
+            self.assertIsNone(current.portal)
+            self.assertIsNone(current.portal_binding)
+            self.assertIs(self.controller.active[self.desktop_user.uid], current)
+            self.controller.reconcile_portals()
+
+        self.assertEqual(start.call_count, 2)
+        mount.assert_called_once_with(self.desktop_user.uid, binding)
+        self.assertIs(current.portal, proxy)
+        self.assertEqual(current.portal_binding, binding)
+
     def test_forwarding_publishes_and_clears_combined_record(self) -> None:
         plan = session.DesktopPlan("2", (), {"DISPLAY": ":0"})
         with mock.patch.object(self.controller, "_prepare_guest_root"):
@@ -478,6 +516,33 @@ class DesktopControllerTests(unittest.TestCase):
         self.assertEqual(
             session._read_status("work", self.desktop_user.uid), "inactive"
         )
+
+    def test_logout_revokes_portal_before_stopping_proxy(self) -> None:
+        portal_binding = session.DesktopBind(
+            "/run/spaces/desktop/1000/portal/bus",
+            self.root / "portal-bus",
+            1,
+            2,
+        )
+        proxy = mock.Mock()
+        proxy.socket_path = self.root / "proxy-bus"
+        proxy.socket_path.write_text("", encoding="utf-8")
+        active = session._ActiveDesktop(
+            session.DesktopPlan("2", (), {"DISPLAY": ":0"}),
+            portal=proxy,
+            portal_binding=portal_binding,
+        )
+
+        with mock.patch.object(self.controller, "_unmount") as unmount:
+            self.controller._deactivate(self.desktop_user, active)
+
+        unmount.assert_called_once_with(
+            self.desktop_user.uid, portal_binding
+        )
+        proxy.close.assert_called_once_with()
+        self.assertIsNone(active.portal)
+        self.assertIsNone(active.portal_binding)
+        self.assertFalse(proxy.socket_path.exists())
 
     def test_failed_revocation_is_fatal(self) -> None:
         binding = session.DesktopBind("/desktop/socket", Path("/host"), 1, 2)
@@ -620,7 +685,7 @@ class NativeLauncherTests(unittest.TestCase):
 
         self.assertEqual(completed.returncode, 0)
         self.assertEqual(names.read_text(encoding="utf-8"), (
-            "DISPLAY\nWAYLAND_DISPLAY\n"
+            "--systemd\nDISPLAY\nWAYLAND_DISPLAY\n"
         ))
         self.assertEqual(display.read_text(encoding="utf-8"), ":77")
         self.assertEqual(completed.stdout, "")

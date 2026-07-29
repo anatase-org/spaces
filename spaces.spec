@@ -10,6 +10,8 @@ Source:       	https://github.com/anatase-org/spaces/archive/refs/tags/v%{versio
 ExclusiveArch:  x86_64 aarch64
 BuildRequires:  gcc
 BuildRequires:  binutils
+BuildRequires:  glib2-devel
+BuildRequires:  pkgconfig(gio-unix-2.0)
 BuildRequires:  pam-devel
 BuildRequires:  systemd-rpm-macros
 BuildRequires:  python3-devel
@@ -27,6 +29,8 @@ Requires:       debootstrap
 Requires:       ubuntu-keyring
 Requires:       systemd
 Requires:       systemd-container
+Requires:       glib2
+Requires:       xdg-dbus-proxy
 
 %description
 Spaces provide a chroot-like sandboxing environment for you to access your favorite distributions: Arch, Fedora, and Ubuntu. A simple permission system ensures your local files and credentials remain secure, even if your space is compromised. Spaces are constructed directly using packages from your chosen distribution repositories with signature enforcement. No container middleman or surprises.
@@ -66,5 +70,8 @@ install -Dm644 data/pam/spaces.system-auth \
 /usr/lib/spaces/spaces-pam-worker
 %dir /usr/lib/spaces/guest
 /usr/lib/spaces/guest/pam_spaces.so
+/usr/lib/spaces/guest/spaces-portal
 /usr/lib/spaces/guest/spaces-session-launcher
+%dir %{_datadir}/spaces/portal
+%{_datadir}/spaces/portal/*
 %{_unitdir}/spaces@.service

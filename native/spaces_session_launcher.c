@@ -162,12 +162,13 @@ static int update_dbus_environment(char *const *names, size_t count)
         if (null_fd > STDERR_FILENO)
             close(null_fd);
 
-        arguments = calloc(count + 2, sizeof(*arguments));
+        arguments = calloc(count + 3, sizeof(*arguments));
         if (arguments == NULL)
             _exit(127);
         arguments[0] = (char *)DBUS_UPDATE_ACTIVATION_ENVIRONMENT;
+        arguments[1] = (char *)"--systemd";
         for (index = 0; index < count; index++)
-            arguments[index + 1] = names[index];
+            arguments[index + 2] = names[index];
         execv(DBUS_UPDATE_ACTIVATION_ENVIRONMENT, arguments);
         _exit(127);
     }

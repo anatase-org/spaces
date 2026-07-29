@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import pwd
 import re
+import select
+import signal
 import stat
 import subprocess
 import tempfile
@@ -27,9 +30,13 @@ from . import core
 MAX_ENVIRONMENT_VALUE = 4096
 MACHINECTL = "/usr/bin/machinectl"
 SYSTEMCTL = "/usr/bin/systemctl"
+SYSTEMD_RUN = "/usr/bin/systemd-run"
+XDG_DBUS_PROXY = "/usr/bin/xdg-dbus-proxy"
 RUNTIME_ROOT = Path("/run/spaces")
 DESKTOP_ROOT = PurePosixPath("/run/spaces/desktop")
 ENVIRONMENT_DIRECTORY = "env"
+PORTAL_SOCKET_NAME = "bus"
+PORTAL_READY_TIMEOUT = 5.0
 LOCAL_DISPLAY_PATTERN = re.compile(
     r"^(?:(?:unix)/)?:(?P<number>[0-9]+)(?:\.[0-9]+)?$"
 )
@@ -84,6 +91,7 @@ DESKTOP_ENVIRONMENT = frozenset(
         "QT_STYLE_OVERRIDE",
         "QT_WAYLAND_DISABLE_WINDOWDECORATION",
         "SDL_VIDEODRIVER",
+        "SPACES_NAME",
         "WAYLAND_DISPLAY",
         "XAUTHORITY",
         "XCURSOR_PATH",
@@ -105,6 +113,48 @@ POLKIT_AGENTS = (
     "/usr/lib/polkit-kde-authentication-agent-1",
 )
 POLKIT_AGENT_GLOB = "usr/lib/*/libexec/polkit-kde-authentication-agent-1"
+HOST_PORTAL_INTERFACES = (
+    "Account",
+    "Clipboard",
+    "Email",
+    "GlobalShortcuts",
+    "Inhibit",
+    "InputCapture",
+    "Notification",
+    "Print",
+    "RemoteDesktop",
+    "ScreenCast",
+    "Screenshot",
+    "Settings",
+    "Wallpaper",
+)
+PORTAL_DATA_ROOT = Path("/usr/share/spaces/portal")
+PORTAL_DATA_BINDS = (
+    (
+        PORTAL_DATA_ROOT / "dbus-1" / "services",
+        "/usr/local/share/dbus-1/services",
+    ),
+    (
+        PORTAL_DATA_ROOT / "xdg-desktop-portal",
+        "/usr/local/share/xdg-desktop-portal",
+    ),
+    (
+        PORTAL_DATA_ROOT / "systemd" / "user",
+        "/usr/local/share/systemd/user",
+    ),
+)
+GUEST_PORTAL_FRONTENDS = (
+    "usr/libexec/xdg-desktop-portal",
+    "usr/lib/xdg-desktop-portal",
+)
+GUEST_KDE_PORTAL = "usr/share/xdg-desktop-portal/portals/kde.portal"
+GUEST_PIPEWIRE_CONFIGS = (
+    "usr/share/pipewire/client.conf",
+    "etc/pipewire/client.conf",
+)
+
+
+logger = logging.getLogger(__name__)
 
 
 class DesktopUser(Protocol):
@@ -156,6 +206,31 @@ class DesktopRevocationError(Exception):
 @dataclass
 class _ActiveDesktop:
     plan: DesktopPlan
+    portal: PortalProxy | None = None
+    portal_binding: DesktopBind | None = None
+
+
+@dataclass
+class PortalProxy:
+    """One login-scoped filtered connection to the host session bus."""
+
+    process: subprocess.Popen[bytes]
+    control_fd: int
+    socket_path: Path
+
+    def close(self) -> None:
+        if self.control_fd >= 0:
+            os.close(self.control_fd)
+            self.control_fd = -1
+        try:
+            self.process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            self.process.send_signal(signal.SIGTERM)
+            try:
+                self.process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait()
 
 
 def prepare_user_paths(
@@ -302,6 +377,188 @@ def host_manager_environment(user: DesktopUser) -> dict[str, str]:
     if completed.returncode != 0:
         return {}
     return _parse_environment(completed.stdout)
+
+
+def portal_bind_arguments(rootfs: Path) -> tuple[str, ...]:
+    """Return immutable portal assets when the guest portal stack is present.
+
+    This is deliberately a read-only preflight. Existing spaces can install
+    the missing packages and retry without a rootfs migration.
+    """
+
+    frontend = any(
+        (rootfs / candidate).is_file()
+        for candidate in GUEST_PORTAL_FRONTENDS
+    )
+    kde = (rootfs / GUEST_KDE_PORTAL).is_file()
+    pipewire = any(
+        (rootfs / candidate).is_file()
+        for candidate in GUEST_PIPEWIRE_CONFIGS
+    )
+    assets = all(source.is_dir() for source, _destination in PORTAL_DATA_BINDS)
+    if not frontend or not kde or not pipewire:
+        missing = []
+        if not frontend:
+            missing.append("xdg-desktop-portal")
+        if not kde:
+            missing.append("xdg-desktop-portal-kde")
+        if not pipewire:
+            missing.append("pipewire")
+        logger.warning(
+            _(
+                "Host portal integration is unavailable; install {packages} "
+                "inside the space to retry.",
+                packages=", ".join(missing),
+            )
+        )
+        return ()
+    if not assets:
+        logger.warning(
+            _("Host portal integration assets are missing; continuing without them.")
+        )
+        return ()
+    return tuple(
+        f"--bind-ro={source}:{destination}"
+        for source, destination in PORTAL_DATA_BINDS
+    )
+
+
+def _portal_policy_arguments() -> list[str]:
+    name = "org.freedesktop.portal.Desktop"
+    desktop = "/org/freedesktop/portal/desktop"
+    arguments = [
+        "--filter",
+        (
+            f"--call={name}=org.freedesktop.DBus.Introspectable."
+            f"Introspect@{desktop}"
+        ),
+        f"--call={name}=org.freedesktop.DBus.Properties.*@{desktop}",
+    ]
+    for interface in HOST_PORTAL_INTERFACES:
+        arguments.append(
+            f"--call={name}=org.freedesktop.portal.{interface}.*@{desktop}"
+        )
+        arguments.append(
+            f"--broadcast={name}=org.freedesktop.portal.{interface}.*@{desktop}"
+        )
+    for interface, subtree in (
+        ("Request", f"{desktop}/request/*"),
+        ("Session", f"{desktop}/session/*"),
+    ):
+        arguments.append(
+            f"--call={name}=org.freedesktop.portal.{interface}.*@{subtree}"
+        )
+        arguments.append(
+            f"--broadcast={name}=org.freedesktop.portal.{interface}.*@{subtree}"
+        )
+    return arguments
+
+
+def _prepare_portal_directory(space_name: str, user: DesktopUser) -> Path:
+    core.validate_space_name(space_name)
+    space = RUNTIME_ROOT / space_name
+    desktop = space / "desktop"
+    parent = desktop / str(user.uid)
+    directory = parent / "portal"
+    expected_owner = 0 if os.geteuid() == 0 else os.getuid()
+    for path in (space, desktop, parent):
+        if path.is_symlink():
+            raise core.SpacesError(_("Unsafe portal runtime path: {path}.", path=path))
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        metadata = path.lstat()
+        if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != expected_owner:
+            raise core.SpacesError(_("Unsafe portal runtime path: {path}.", path=path))
+        os.chmod(path, 0o711)
+    if directory.is_symlink():
+        raise core.SpacesError(_("Unsafe portal runtime path: {path}.", path=directory))
+    directory.mkdir(mode=0o700, exist_ok=True)
+    os.chown(directory, user.uid, user.gid)
+    os.chmod(directory, 0o700)
+    socket_path = directory / PORTAL_SOCKET_NAME
+    socket_path.unlink(missing_ok=True)
+    return socket_path
+
+
+def start_portal_proxy(
+    space_name: str,
+    user: DesktopUser,
+    session_id: str,
+) -> tuple[PortalProxy, DesktopBind]:
+    """Start a filtered host bus in an app-scoped user systemd unit."""
+
+    socket_path = _prepare_portal_directory(space_name, user)
+    generation = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:16]
+    unit = (
+        "app-spaces-org.anatase.spaces."
+        f"{space_name}-{generation}.scope"
+    )
+    control_read, control_write = os.pipe2(os.O_CLOEXEC | os.O_NONBLOCK)
+    address = f"unix:path=/run/user/{user.uid}/bus"
+    command = [
+        SYSTEMD_RUN,
+        "--user",
+        "--scope",
+        "--quiet",
+        f"--unit={unit}",
+        "--",
+        XDG_DBUS_PROXY,
+        address,
+        str(socket_path),
+        f"--fd={control_write}",
+        *_portal_policy_arguments(),
+    ]
+    try:
+        process = subprocess.Popen(
+            command,
+            env={
+                "DBUS_SESSION_BUS_ADDRESS": address,
+                "LANG": "C.UTF-8",
+                "PATH": "/usr/bin",
+                "XDG_RUNTIME_DIR": f"/run/user/{user.uid}",
+            },
+            user=user.uid,
+            group=user.gid,
+            pass_fds=(control_write,),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        os.close(control_read)
+        os.close(control_write)
+        raise
+    os.close(control_write)
+    proxy = PortalProxy(process, control_read, socket_path)
+    poller = select.poll()
+    poller.register(control_read, select.POLLIN | select.POLLHUP | select.POLLERR)
+    try:
+        events = poller.poll(round(PORTAL_READY_TIMEOUT * 1000))
+        if not events or process.poll() is not None:
+            raise core.SpacesError(_("Timed out starting the host portal proxy."))
+        try:
+            ready = os.read(control_read, 1)
+        except BlockingIOError:
+            ready = b""
+        if not ready:
+            raise core.SpacesError(_("The host portal proxy exited before readiness."))
+        metadata = socket_path.lstat()
+        if not stat.S_ISSOCK(metadata.st_mode) or metadata.st_uid != user.uid:
+            raise core.SpacesError(_("Unsafe host portal proxy socket."))
+        binding = DesktopBind(
+            destination=str(
+                DESKTOP_ROOT
+                / str(user.uid)
+                / "portal"
+                / PORTAL_SOCKET_NAME
+            ),
+            source=socket_path,
+            device=metadata.st_dev,
+            inode=metadata.st_ino,
+        )
+        return proxy, binding
+    except Exception:
+        proxy.close()
+        socket_path.unlink(missing_ok=True)
+        raise
 
 
 def select_graphical_session(
@@ -659,6 +916,13 @@ def _plan(
                 "/usr/share/icons",
             ]
         )
+    current_desktop = environment.get("XDG_CURRENT_DESKTOP", "")
+    desktops = [
+        item
+        for item in current_desktop.split(":")
+        if item and item.casefold() != "spaces"
+    ]
+    environment["XDG_CURRENT_DESKTOP"] = ":".join(["Spaces", *desktops])
     environment["XDG_SESSION_TYPE"] = selected.session_type
     environment["XDG_SESSION_CLASS"] = "user"
     return DesktopPlan(
@@ -919,9 +1183,16 @@ def polkit_agent(rootfs: Path) -> str | None:
 class DesktopController:
     """Reconcile login-scoped desktop resources for one running space."""
 
-    def __init__(self, space_name: str, users: tuple[DesktopUser, ...]) -> None:
+    def __init__(
+        self,
+        space_name: str,
+        users: tuple[DesktopUser, ...],
+        *,
+        portals_enabled: bool = False,
+    ) -> None:
         self.space_name = space_name
         self.users = {user.uid: user for user in users}
+        self.portals_enabled = portals_enabled
         self.active: dict[int, _ActiveDesktop] = {}
         self.destination_users: dict[str, set[int]] = {}
         self.destination_sources: dict[str, tuple[int, int]] = {}
@@ -942,6 +1213,7 @@ class DesktopController:
             self.deactivate(user)
             return
         if current is not None and current.plan.session_id == selected.session_id:
+            self._repair_portal(user, current)
             return
 
         set_status(self.space_name, user.uid, "pending")
@@ -959,6 +1231,7 @@ class DesktopController:
         previous = current
         try:
             plan = _plan(user, selected, environment, generated)
+            plan.environment["SPACES_NAME"] = self.space_name
         except Exception as error:
             self._remove_generated(
                 DesktopPlan(selected.session_id, (), {}, generated)
@@ -1010,9 +1283,23 @@ class DesktopController:
             elif user.desktop and user.uid != 0:
                 set_status(self.space_name, user.uid, "inactive")
 
+    def reconcile_portals(self) -> None:
+        """Retry portal-only failures without rebuilding desktop forwarding."""
+
+        if not self.portals_enabled:
+            return
+        for uid, current in tuple(self.active.items()):
+            user = self.users.get(uid)
+            if user is not None:
+                self._repair_portal(user, current)
+
     def abandon(self) -> None:
         """Forget state after the machine has already removed its namespaces."""
 
+        for current in self.active.values():
+            if current.portal is not None:
+                current.portal.close()
+                current.portal.socket_path.unlink(missing_ok=True)
         self.active.clear()
         self.destination_users.clear()
         self.destination_sources.clear()
@@ -1025,10 +1312,35 @@ class DesktopController:
     ) -> _ActiveDesktop:
         self._prepare_guest_root(user)
         mounted: list[DesktopBind] = []
+        portal: PortalProxy | None = None
+        portal_binding: DesktopBind | None = None
         try:
             for binding in plan.binds:
                 self._mount(user.uid, binding)
                 mounted.append(binding)
+            if self.portals_enabled:
+                try:
+                    portal, portal_binding = start_portal_proxy(
+                        self.space_name,
+                        user,
+                        plan.session_id,
+                    )
+                    self._mount(user.uid, portal_binding)
+                    mounted.append(portal_binding)
+                except Exception as error:
+                    if portal is not None:
+                        portal.close()
+                        portal.socket_path.unlink(missing_ok=True)
+                    portal = None
+                    portal_binding = None
+                    logger.warning(
+                        _(
+                            "Could not enable host portals for {user}; "
+                            "desktop forwarding will continue: {error}",
+                            user=user.name,
+                            error=error,
+                        )
+                    )
             _write_record(
                 self.space_name,
                 user.uid,
@@ -1037,6 +1349,9 @@ class DesktopController:
                 plan.environment,
             )
         except Exception:
+            if portal is not None:
+                portal.close()
+                portal.socket_path.unlink(missing_ok=True)
             cleanup_errors: list[Exception] = []
             for binding in reversed(mounted):
                 try:
@@ -1053,7 +1368,83 @@ class DesktopController:
                     )
                 ) from cleanup_error
             raise
-        return _ActiveDesktop(plan=plan)
+        return _ActiveDesktop(
+            plan=plan,
+            portal=portal,
+            portal_binding=portal_binding,
+        )
+
+    def _repair_portal(
+        self,
+        user: DesktopUser,
+        current: _ActiveDesktop,
+    ) -> None:
+        if not self.portals_enabled:
+            return
+        if (
+            current.portal is not None
+            and current.portal_binding is not None
+            and current.portal.process.poll() is None
+        ):
+            try:
+                metadata = current.portal.socket_path.lstat()
+            except OSError:
+                metadata = None
+            if (
+                metadata is not None
+                and stat.S_ISSOCK(metadata.st_mode)
+                and metadata.st_uid == user.uid
+                and (metadata.st_dev, metadata.st_ino)
+                == (
+                    current.portal_binding.device,
+                    current.portal_binding.inode,
+                )
+            ):
+                return
+
+        if current.portal_binding is not None:
+            try:
+                self._unmount(user.uid, current.portal_binding)
+                current.portal_binding = None
+            except Exception as error:
+                logger.warning(
+                    _(
+                        "Could not revoke the failed host portal bridge for "
+                        "{user}; retrying later: {error}",
+                        user=user.name,
+                        error=error,
+                    )
+                )
+                return
+        if current.portal is not None:
+            current.portal.close()
+            current.portal.socket_path.unlink(missing_ok=True)
+        current.portal = None
+        current.portal_binding = None
+
+        portal: PortalProxy | None = None
+        try:
+            portal, binding = start_portal_proxy(
+                self.space_name,
+                user,
+                current.plan.session_id,
+            )
+            self._mount(user.uid, binding)
+        except Exception as error:
+            if portal is not None:
+                portal.close()
+                portal.socket_path.unlink(missing_ok=True)
+            logger.warning(
+                _(
+                    "Could not enable host portals for {user}; retrying "
+                    "without affecting desktop forwarding: {error}",
+                    user=user.name,
+                    error=error,
+                )
+            )
+            return
+        current.portal = portal
+        current.portal_binding = binding
 
     def _deactivate(
         self,
@@ -1063,6 +1454,9 @@ class DesktopController:
         remove_generated: bool = True,
     ) -> None:
         try:
+            if current.portal_binding is not None:
+                self._unmount(user.uid, current.portal_binding)
+                current.portal_binding = None
             for binding in reversed(current.plan.binds):
                 self._unmount(user.uid, binding)
         except Exception as error:
@@ -1074,6 +1468,11 @@ class DesktopController:
                     error=error,
                 )
             ) from error
+        finally:
+            if current.portal is not None:
+                current.portal.close()
+                current.portal.socket_path.unlink(missing_ok=True)
+                current.portal = None
         self.active.pop(user.uid, None)
         if remove_generated:
             self._remove_generated(current.plan)

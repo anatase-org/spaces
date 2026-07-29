@@ -24,6 +24,9 @@ PACKAGES = (
     "breeze",
     "plasma-integration",
     "kde-cli-tools",
+    "pipewire",
+    "xdg-desktop-portal",
+    "xdg-desktop-portal-kde",
 )
 HOST_AUTHENTICATION_PROFILE = Path(
     "/usr/share/spaces/pam/spaces.ubuntu"

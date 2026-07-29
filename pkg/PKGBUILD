@@ -16,6 +16,8 @@ depends=(
   'debootstrap'
   'ubuntu-keyring'
   'systemd'
+  'glib2'
+  'xdg-dbus-proxy'
 )
 makedepends=(
   'python-build'

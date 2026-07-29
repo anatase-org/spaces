@@ -38,6 +38,9 @@ class CoreTests(unittest.TestCase):
         self.assertIn("polkit-kde-agent-1", ubuntu.PACKAGES)
         self.assertIn("breeze", ubuntu.PACKAGES)
         self.assertIn("plasma-integration", ubuntu.PACKAGES)
+        self.assertIn("pipewire", ubuntu.PACKAGES)
+        self.assertIn("xdg-desktop-portal", ubuntu.PACKAGES)
+        self.assertIn("xdg-desktop-portal-kde", ubuntu.PACKAGES)
         self.assertNotIn("python3", ubuntu.PACKAGES)
 
     def test_ubuntu_reconciles_host_authentication_profile(self) -> None:

@@ -1,0 +1,4 @@
+[portal]
+DBusName=org.freedesktop.impl.portal.desktop.spaces
+Interfaces=org.freedesktop.impl.portal.Account;org.freedesktop.impl.portal.Clipboard;org.freedesktop.impl.portal.Email;org.freedesktop.impl.portal.GlobalShortcuts;org.freedesktop.impl.portal.Inhibit;org.freedesktop.impl.portal.InputCapture;org.freedesktop.impl.portal.Notification;org.freedesktop.impl.portal.Print;org.freedesktop.impl.portal.RemoteDesktop;org.freedesktop.impl.portal.ScreenCast;org.freedesktop.impl.portal.Screenshot;org.freedesktop.impl.portal.Settings;org.freedesktop.impl.portal.Wallpaper;
+UseIn=Spaces

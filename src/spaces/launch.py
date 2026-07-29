@@ -44,6 +44,7 @@ CAPABILITY_XATTR = "security.capability"
 ELIGIBLE_USER_STATES = frozenset({"active", "online", "lingering"})
 INELIGIBLE_USER_STATES = frozenset({"closing", "offline"})
 LOGIN_RECONCILE_INTERVAL_SECONDS = 1.0
+PORTAL_RECONCILE_INTERVAL_SECONDS = 5.0
 SYMLINKS = [
     # Ostree system weirdness
     ("/var/home", "/home"),
@@ -1020,8 +1021,15 @@ class _LoginMonitor:
                 self._libc.free(values)
         return tuple(sessions)
 
-    def wait(self) -> bool:
+    def wait(self, maximum_seconds: float | None = None) -> bool:
         timeout_ms = self._timeout_ms()
+        if maximum_seconds is not None:
+            maximum_ms = max(0, round(maximum_seconds * 1000))
+            timeout_ms = (
+                maximum_ms
+                if timeout_ms is None
+                else min(timeout_ms, maximum_ms)
+            )
         monitor_fd = self._library.sd_login_monitor_get_fd(self._monitor)
         for descriptor, _events in self._poll.poll(timeout_ms):
             if descriptor == self._read_fd:
@@ -1157,6 +1165,7 @@ class _MountWorker:
         available_mounts: tuple[HomeMount, ...],
         initial_mounts: tuple[HomeMount, ...],
         initial_eligible_uids: frozenset[int],
+        portals_enabled: bool = True,
     ) -> None:
         self._space_name = space_name
         self._users = users
@@ -1170,7 +1179,12 @@ class _MountWorker:
         self._registered = False
         self._login_snapshot: _LoginSnapshot | None = None
         self._last_reconcile_at: float | None = None
-        self._desktop = session.DesktopController(space_name, users)
+        self._portals_enabled = portals_enabled
+        self._desktop = session.DesktopController(
+            space_name,
+            users,
+            portals_enabled=portals_enabled,
+        )
         self._thread = threading.Thread(
             target=self._run,
             name=f"spaces-{space_name}-mounts",
@@ -1202,7 +1216,14 @@ class _MountWorker:
                 self._log_initial_mounts()
             self._reconcile()
             self._last_reconcile_at = time.monotonic()
-            while not self._stopping.is_set() and self._monitor.wait():
+            while (
+                not self._stopping.is_set()
+                and self._monitor.wait(
+                    PORTAL_RECONCILE_INTERVAL_SECONDS
+                    if self._portals_enabled
+                    else None
+                )
+            ):
                 if self._stopping.is_set():
                     break
                 if not self._wait_for_reconcile_slot():
@@ -1292,6 +1313,7 @@ class _MountWorker:
     def _reconcile(self) -> None:
         snapshot = _login_snapshot(self._monitor, self._users)
         if snapshot == self._login_snapshot:
+            self._desktop.reconcile_portals()
             return
         eligible_uids = snapshot.eligible_uids
         desired = set(
@@ -1546,6 +1568,11 @@ def launch(space_name: str) -> int:
     worker: _MountWorker | None = None
     authentication: auth.AuthenticationService | None = None
     authentication_binds: tuple[str, ...] = ()
+    portal_binds = (
+        session.portal_bind_arguments(rootfs)
+        if any(user.desktop and user.uid != 0 for user in users)
+        else ()
+    )
     try:
         native_required = host_authentication or any(
             user.desktop and user.uid != 0 for user in users
@@ -1581,6 +1608,7 @@ def launch(space_name: str) -> int:
             available_mounts,
             initial_mounts,
             initial_eligible_uids,
+            bool(portal_binds),
         )
         worker.start()
         process = subprocess.Popen(
@@ -1590,7 +1618,7 @@ def launch(space_name: str) -> int:
                 home,
                 network,
                 initial_mounts,
-                authentication_binds,
+                (*authentication_binds, *portal_binds),
             ),
             env=environment,
         )

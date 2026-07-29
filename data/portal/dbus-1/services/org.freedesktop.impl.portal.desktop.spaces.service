@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=org.freedesktop.impl.portal.desktop.spaces
+Exec=/run/spaces-host/bin/spaces-portal
+SystemdService=spaces-portal.service
