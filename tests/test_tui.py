@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest import mock
 
 from textual.color import Color
+from textual.geometry import Offset
 from textual.widgets import Button, Footer, Header, RadioSet, SelectionList
 
 from spaces.tui import (
@@ -94,7 +95,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                 ).pressed_button.id,
                 "host-authentication-true",
             )
-            self.assertTrue(app.native_ansi_color)
+            self.assertTrue(app.ansi_color)
             variables = app.get_css_variables()
             selected_label_background = next(
                 segment.style.bgcolor
@@ -338,6 +339,24 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                 app._bindings.key_to_bindings["backspace"][0].action,
                 "back",
             )
+
+    async def test_selected_radio_renders_with_mouse_outside_screen(self) -> None:
+        app = PermissionForm(
+            home=Path("/home/user"),
+            folders=[],
+            network="advanced",
+            selected_home=[],
+            include_system=True,
+            distribution_title="",
+            distribution_description="",
+            distribution_options=[],
+            distribution_value=None,
+        )
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            selected = app.query_one("#network", RadioSet).pressed_button
+            app.mouse_position = Offset(0, -1000)
+            selected.render()
 
     async def test_arch_distribution_options_are_checkboxes(self) -> None:
         app = PermissionForm(

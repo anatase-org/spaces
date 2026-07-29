@@ -74,7 +74,7 @@ class CleanRadioButton(RadioButton):
             # accent and hover states cannot blend with that cached blue.
             background = Color.parse(
                 self.app.theme_variables[
-                    "background" if self.is_mouse_over else "accent-muted"
+                    "background" if self.mouse_hover else "accent-muted"
                 ]
             )
             content = content.stylize(
