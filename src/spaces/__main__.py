@@ -12,9 +12,56 @@ from typing import Any
 
 from . import _
 from . import core
-from .distro import DistributionError, get_driver
-from .logging import configure_logging, log, run_streamed
-from .tui import ask_custom_name, run_permission_wizard
+
+
+def get_driver(distribution_id: str) -> Any:
+    """Load distribution code only when a command needs it."""
+
+    from .distro import get_driver as load_driver
+
+    return load_driver(distribution_id)
+
+
+def configure_logging(*, rich: bool = False) -> None:
+    """Load console logging only for operations that produce progress."""
+
+    from .logging import configure_logging as configure
+
+    configure(rich=rich)
+
+
+def log(message: str) -> None:
+    """Load console logging only for operations that produce progress."""
+
+    from .logging import log as write_log
+
+    write_log(message)
+
+
+def run_streamed(
+    command: list[str], *, check: bool = True
+) -> subprocess.CompletedProcess[str]:
+    """Load streamed logging only for management operations."""
+
+    from .logging import run_streamed as run
+
+    return run(command, check=check)
+
+
+def ask_custom_name() -> str | None:
+    """Load the interactive TUI only for commands that need it."""
+
+    from .tui import ask_custom_name as tui_ask_custom_name
+
+    return tui_ask_custom_name()
+
+
+def run_permission_wizard(**arguments: Any) -> dict[str, Any] | None:
+    """Load the interactive TUI only for commands that need it."""
+
+    from .tui import run_permission_wizard as tui_run_permission_wizard
+
+    return tui_run_permission_wizard(**arguments)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -233,6 +280,8 @@ def _invoke_raw_helper(operation: str, arguments: list[str]) -> int:
 
 
 def _create(distro_id: str, *, missing: bool = False) -> int:
+    from .distro import DistributionError
+
     driver = get_driver(distro_id)
     if driver is None:
         print(
@@ -504,16 +553,12 @@ def _enter(
         and not info_path.exists()
         and not info_path.is_symlink()
     )
-    driver = get_driver(space)
-    if (
-        (target_missing or info_missing)
-        and _has_controlling_terminal()
-        and driver is not None
-        and driver.default_name == space
-    ):
-        return_code = _create(space, missing=True)
-        if return_code != 0:
-            return return_code
+    if (target_missing or info_missing) and _has_controlling_terminal():
+        driver = get_driver(space)
+        if driver is not None and driver.default_name == space:
+            return_code = _create(space, missing=True)
+            if return_code != 0:
+                return return_code
 
     user_name: str | None = None
     if enter_user is None:

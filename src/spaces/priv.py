@@ -23,13 +23,26 @@ from typing import Any, Iterator
 from . import _
 from . import core
 from . import session
-from . import shortcuts
-from .distro import DistributionError, get_driver
-from .launch import launch
 
 
 SYSTEMCTL = "/usr/bin/systemctl"
 MACHINECTL = "/usr/bin/machinectl"
+
+
+def get_driver(distribution_id: str) -> Any:
+    """Load distribution management code only when it is needed."""
+
+    from .distro import get_driver as load_driver
+
+    return load_driver(distribution_id)
+
+
+def launch(space_name: str) -> int:
+    """Load launch orchestration only for the launch operation."""
+
+    from .launch import launch as launch_space
+
+    return launch_space(space_name)
 
 
 def _root_owned_directory(path: Path) -> None:
@@ -382,6 +395,9 @@ def enter_as_user(
 
 
 def create(info: dict[str, Any]) -> None:
+    from . import shortcuts
+    from .distro import DistributionError
+
     core.validate_creation_info(info)
     _assert_initiating_user(info)
     name = info["name"]
@@ -419,6 +435,8 @@ def create(info: dict[str, Any]) -> None:
 
 
 def configure(patch: dict[str, Any]) -> None:
+    from . import shortcuts
+
     core.validate_configure_patch(patch)
     update = patch["permissions"]["user"]
 
@@ -477,6 +495,8 @@ def configure(patch: dict[str, Any]) -> None:
 
 
 def delete(request: dict[str, Any]) -> None:
+    from . import shortcuts
+
     core.validate_delete_request(request)
     name = request["name"]
     space = core.STATE_ROOT / name

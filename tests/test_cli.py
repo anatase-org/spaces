@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,6 +13,24 @@ from spaces import __main__ as cli
 
 
 class CliTests(unittest.TestCase):
+    def test_entry_modules_defer_command_specific_dependencies(self) -> None:
+        source_root = Path(cli.__file__).resolve().parents[1]
+        script = (
+            "import sys\n"
+            f"sys.path.insert(0, {str(source_root)!r})\n"
+            "import spaces.__main__\n"
+            "assert 'spaces.tui' not in sys.modules\n"
+            "assert 'textual' not in sys.modules\n"
+            "import spaces.priv\n"
+            "assert 'spaces.shortcuts' not in sys.modules\n"
+            "assert 'spaces.launch' not in sys.modules\n"
+            "assert 'PIL' not in sys.modules\n"
+        )
+        subprocess.run(
+            [sys.executable, "-I", "-c", script],
+            check=True,
+        )
+
     def test_helper_output_is_streamed_after_privilege_handoff(self) -> None:
         command = ["pkexec", "/usr/bin/spaces.priv", "create", "{}"]
         completed = subprocess.CompletedProcess(command, 42)
