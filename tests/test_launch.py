@@ -364,9 +364,18 @@ class LaunchTests(unittest.TestCase):
             if argument.startswith("--capability=")
         )
         self.assertTrue(
-            capability_argument.endswith("CAP_PERFMON,CAP_BPF"),
+            capability_argument.endswith(
+                "CAP_AUDIT_CONTROL,CAP_AUDIT_WRITE,CAP_PERFMON,CAP_BPF"
+            ),
             capability_argument,
         )
+        dropped_capability_argument = next(
+            argument
+            for argument in arguments
+            if argument.startswith("--drop-capability=")
+        )
+        self.assertNotIn("CAP_AUDIT_CONTROL", dropped_capability_argument)
+        self.assertNotIn("CAP_AUDIT_WRITE", dropped_capability_argument)
 
         basic_arguments = launch_module._command(
             "work",
@@ -383,6 +392,19 @@ class LaunchTests(unittest.TestCase):
         )
         self.assertNotIn("CAP_PERFMON", basic_capability_argument)
         self.assertNotIn("CAP_BPF", basic_capability_argument)
+        basic_dropped_capability_argument = next(
+            argument
+            for argument in basic_arguments
+            if argument.startswith("--drop-capability=")
+        )
+        self.assertIn(
+            "CAP_AUDIT_CONTROL",
+            basic_dropped_capability_argument,
+        )
+        self.assertIn(
+            "CAP_AUDIT_WRITE",
+            basic_dropped_capability_argument,
+        )
 
     def test_enabled_authentication_starts_service_and_adds_exact_binds(
         self,

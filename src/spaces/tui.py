@@ -299,13 +299,16 @@ class PermissionForm(
     NETWORK_LABELS = {
         "basic": _("Basic — shared networking and unprivileged ports"),
         "advanced": _("Advanced — shared networking and privileged ports"),
-        "admin": _("Admin — full network admin with CAP_NET_RAW and CAP_NET_ADMIN"),
+        "admin": _(
+            "Admin — required for Docker; full network admin with "
+            "CAP_NET_RAW and CAP_NET_ADMIN"
+        ),
     }
     KERNEL_CAPABILITY_LABELS = {
         "basic": _("Basic — Essentials for daily work"),
         "development": _(
-            "Development — required for Docker; adds CAP_PERFMON, CAP_BPF, "
-            "and perf_event_open"
+            "Development — required for Docker; adds CAP_AUDIT_CONTROL, "
+            "CAP_AUDIT_WRITE, CAP_PERFMON, CAP_BPF, and perf_event_open"
         ),
     }
     DEVICE_LABELS = {

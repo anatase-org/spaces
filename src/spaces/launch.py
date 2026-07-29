@@ -130,6 +130,8 @@ NETWORK_CAPS = {
 KERNEL_CAPS = {
     "basic": (),
     "development": (
+        "CAP_AUDIT_CONTROL",
+        "CAP_AUDIT_WRITE",
         "CAP_PERFMON",
         "CAP_BPF",
     ),

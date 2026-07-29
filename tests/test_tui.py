@@ -55,6 +55,18 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             network = app.query_one("#network", RadioSet)
             self.assertEqual(network._selected, network.pressed_index)
             self.assertEqual(
+                [
+                    button.label.plain
+                    for button in network.query(CleanRadioButton)
+                ],
+                [
+                    "Basic — shared networking and unprivileged ports",
+                    "Advanced — shared networking and privileged ports",
+                    "Admin — required for Docker; full network admin with "
+                    "CAP_NET_RAW and CAP_NET_ADMIN",
+                ],
+            )
+            self.assertEqual(
                 app.query_one("#home-folders", SelectionList).selected,
                 ["Projects", "Downloads"],
             )
@@ -146,7 +158,8 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                 ],
                 [
                     "Basic — Essentials for daily work",
-                    "Development — required for Docker; adds CAP_PERFMON, "
+                    "Development — required for Docker; adds "
+                    "CAP_AUDIT_CONTROL, CAP_AUDIT_WRITE, CAP_PERFMON, "
                     "CAP_BPF, and perf_event_open",
                 ],
             )
