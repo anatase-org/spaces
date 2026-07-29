@@ -25,6 +25,7 @@ PACKAGES = (
     # these are required for plasma applications to look correct
     "breeze",
     "plasma-integration",
+    "kde-cli-tools",
 )
 HOST_AUTHENTICATION_PROFILE = Path(
     "/usr/share/spaces/pam/spaces.ubuntu"
