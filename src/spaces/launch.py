@@ -26,6 +26,7 @@ from . import auth
 from . import core
 from . import devices
 from . import session
+from . import shortcuts
 from .distro import get_driver
 from .logging import configure_logging
 
@@ -1759,6 +1760,7 @@ def launch(space_name: str) -> int:
         "host_authentication",
         True,
     )
+    shortcut_export = info["permissions"]["system"].get("shortcuts", True)
     environment = os.environ.copy()
     environment.pop(API_VFS_WRITABLE, None)
     if network == "admin":
@@ -1796,6 +1798,8 @@ def launch(space_name: str) -> int:
     device_udev: devices.Udev | None = None
     device_monitor: devices.UdevMonitor | None = None
     device_worker: _DeviceWorker | None = None
+    shortcut_monitor: shortcuts.InotifyMonitor | None = None
+    shortcut_worker: shortcuts.ShortcutWorker | None = None
     device_policy_set = False
     authentication: auth.AuthenticationService | None = None
     authentication_binds: tuple[str, ...] = ()
@@ -1805,6 +1809,42 @@ def launch(space_name: str) -> int:
         else ()
     )
     try:
+        if shortcut_export:
+            try:
+                shortcuts.reconcile(
+                    space_name,
+                    rootfs,
+                    info["distribution"]["id"],
+                )
+                shortcut_monitor = shortcuts.InotifyMonitor(rootfs)
+                shortcut_worker = shortcuts.ShortcutWorker(
+                    space_name,
+                    rootfs,
+                    info["distribution"]["id"],
+                    shortcut_monitor,
+                )
+                shortcut_worker.start()
+            except Exception as error:
+                logger.error(
+                    _(
+                        "Could not initialize application shortcuts: {error}",
+                        error=error,
+                    )
+                )
+                if shortcut_monitor is not None:
+                    shortcut_monitor.close()
+                    shortcut_monitor = None
+        else:
+            try:
+                shortcuts.remove(space_name)
+            except Exception as error:
+                logger.error(
+                    _(
+                        "Could not remove disabled application shortcuts: "
+                        "{error}",
+                        error=error,
+                    )
+                )
         native_required = host_authentication or any(
             user.desktop and user.uid != 0 for user in users
         )
@@ -1895,14 +1935,20 @@ def launch(space_name: str) -> int:
         signal.signal(signal.SIGTERM, forward_signal)
         return process.wait()
     finally:
+        if shortcut_worker is not None:
+            shortcut_worker.stop()
         if device_worker is not None:
             device_worker.stop()
         if worker is not None:
             worker.stop()
+        if shortcut_worker is not None:
+            shortcut_worker.join()
         if device_worker is not None:
             device_worker.join()
         if worker is not None:
             worker.join()
+        if shortcut_monitor is not None:
+            shortcut_monitor.close()
         if monitor is not None:
             monitor.close()
         if device_monitor is not None:

@@ -6,6 +6,8 @@
 #
 -e .
     # via -r requirements.in
+pillow==12.2.0
+    # via spaces
 linkify-it-py==2.1.0
     # via markdown-it-py
 markdown-it-py[linkify]==4.2.0

@@ -22,6 +22,7 @@ from typing import Any, Iterator
 from . import _
 from . import core
 from . import session
+from . import shortcuts
 from .distro import DistributionError, get_driver
 from .launch import launch
 
@@ -330,6 +331,7 @@ def create(info: dict[str, Any]) -> None:
             ["/usr/bin/systemctl", "stop", f"spaces@{name}.service"],
             check=True,
         )
+        shortcuts.remove(name)
         if space.is_symlink() or (space.exists() and not space.is_dir()):
             raise core.SpacesError(
                 _("Unsafe space path: {space}.", space=space)
@@ -412,6 +414,14 @@ def configure(patch: dict[str, Any]) -> None:
             ],
             check=True,
         )
+        if permissions["system"].get("shortcuts", True):
+            shortcuts.reconcile(
+                patch["name"],
+                space / "rootfs",
+                info["distribution"]["id"],
+            )
+        else:
+            shortcuts.remove(patch["name"])
 
 
 def delete(request: dict[str, Any]) -> None:
@@ -425,6 +435,7 @@ def delete(request: dict[str, Any]) -> None:
                 _("Space {name!r} does not exist.", name=name)
             )
         _assert_no_mounts(space)
+        shortcuts.remove(name)
         shutil.rmtree(space)
 
 

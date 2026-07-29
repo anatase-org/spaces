@@ -6,6 +6,8 @@ import unittest
 import xml.etree.ElementTree as ElementTree
 from pathlib import Path
 
+from PIL import Image
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -17,6 +19,7 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(scripts["spaces"], "spaces.__main__:main")
         self.assertEqual(scripts["spaces.priv"], "spaces.priv:main")
         package_data = project["tool"]["setuptools"]["package-data"]["spaces"]
+        self.assertIn("Pillow>=11.0", project["project"]["dependencies"])
         self.assertNotIn("distro/*.toml", package_data)
         self.assertTrue((ROOT / "src" / "spaces" / "distro" / "ubuntu.py").is_file())
         self.assertFalse(
@@ -122,6 +125,7 @@ class PackagingTests(unittest.TestCase):
             pkgbuild,
         )
         self.assertIn("'python-textual'", pkgbuild)
+        self.assertIn("'python-pillow'", pkgbuild)
         self.assertIn("'ubuntu-keyring'", pkgbuild)
         self.assertIn("'systemd'", pkgbuild)
         self.assertIn(
@@ -157,6 +161,7 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("/usr/lib/spaces/guest/spaces-portal", spec)
         self.assertIn("Requires:       glib2", spec)
         self.assertIn("Requires:       xdg-dbus-proxy", spec)
+        self.assertIn("Requires:       python3-pillow", spec)
         self.assertIn("BuildRequires:  glib2-devel", spec)
         self.assertTrue(
             (ROOT / "native" / "spaces_session_launcher.c").exists()
@@ -189,6 +194,12 @@ class PackagingTests(unittest.TestCase):
         )
         pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         self.assertIn('"data/pam/spaces.ubuntu"', pyproject)
+
+    def test_distro_overlays_are_packaged_at_export_resolution(self) -> None:
+        for name in ("arch", "fedora", "kali", "ubuntu"):
+            path = ROOT / "src" / "spaces" / "overlay" / f"{name}.png"
+            with Image.open(path) as image:
+                self.assertEqual(image.size, (256, 256))
 
     def test_pam_module_has_no_session_registration(self) -> None:
         source = (ROOT / "native" / "pam_spaces.c").read_text(

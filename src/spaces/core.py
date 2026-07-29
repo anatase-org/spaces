@@ -160,6 +160,11 @@ def _validate_system_permissions(value: object) -> dict[str, Any]:
         raise SpacesError(
             _("Host authentication permission must be a boolean.")
         )
+    shortcuts = system.get("shortcuts", True)
+    if not isinstance(shortcuts, bool):
+        raise SpacesError(
+            _("Application shortcuts permission must be a boolean.")
+        )
     return system
 
 
@@ -332,10 +337,11 @@ def load_info(path: Path) -> dict[str, Any] | None:
 
 def defaults_from_info(
     info: Mapping[str, Any] | None, identity: Identity
-) -> tuple[str, str, bool, list[str], bool, bool]:
+) -> tuple[str, str, bool, bool, list[str], bool, bool]:
     network = "basic"
     devices = "basic"
     host_authentication = True
+    shortcuts = True
     selected_home = list(DEFAULT_HOME_FOLDERS)
     administrator = True
     desktop = True
@@ -344,6 +350,7 @@ def defaults_from_info(
             network,
             devices,
             host_authentication,
+            shortcuts,
             selected_home,
             administrator,
             desktop,
@@ -362,6 +369,9 @@ def defaults_from_info(
     )
     if isinstance(existing_host_authentication, bool):
         host_authentication = existing_host_authentication
+    existing_shortcuts = system_permissions.get("shortcuts")
+    if isinstance(existing_shortcuts, bool):
+        shortcuts = existing_shortcuts
     user = permissions.get("users", {}).get(str(identity.uid), {})
     user_permissions = user.get("permissions", {})
     home = user_permissions.get("home")
@@ -383,6 +393,7 @@ def defaults_from_info(
         network,
         devices,
         host_authentication,
+        shortcuts,
         selected_home,
         administrator,
         desktop,
@@ -397,6 +408,7 @@ def create_info(
     home: list[str],
     administrator: bool = True,
     host_authentication: bool = True,
+    shortcuts: bool = True,
     desktop: bool = True,
     devices: str = "basic",
 ) -> dict[str, Any]:
@@ -409,6 +421,7 @@ def create_info(
                 "network": network,
                 "devices": devices,
                 "host_authentication": host_authentication,
+                "shortcuts": shortcuts,
             },
             "users": {
                 str(identity.uid): {

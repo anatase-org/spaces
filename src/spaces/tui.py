@@ -318,6 +318,7 @@ class PermissionForm(
         selected_home: list[str],
         devices: str = "basic",
         host_authentication: bool = True,
+        shortcuts: bool = True,
         include_system: bool,
         distribution_title: str,
         distribution_description: str,
@@ -334,6 +335,7 @@ class PermissionForm(
         self.initial_network = network
         self.initial_devices = devices
         self.initial_host_authentication = host_authentication
+        self.initial_shortcuts = shortcuts
         self.initial_home = set(selected_home)
         self.initial_administrator = administrator
         self.initial_desktop = desktop
@@ -357,7 +359,7 @@ class PermissionForm(
         self.steps = (
             (["override"] if override else [])
             + (
-                ["system", "devices", "host-authentication"]
+                ["system", "devices", "host-authentication", "shortcuts"]
                 if include_system
                 else []
             )
@@ -432,6 +434,28 @@ class PermissionForm(
                             _("Use host authentication"),
                             value=self.initial_host_authentication,
                             id="host-authentication-true",
+                        )
+                with Vertical(
+                    id="shortcuts-step",
+                    classes="step",
+                ):
+                    yield Static(
+                        _(
+                            "Should applications installed in this space be "
+                            "added to the host application menu?"
+                        ),
+                        classes="description",
+                    )
+                    with RadioSet(id="shortcuts"):
+                        yield CleanRadioButton(
+                            _("Do not create application shortcuts"),
+                            value=not self.initial_shortcuts,
+                            id="shortcuts-false",
+                        )
+                        yield CleanRadioButton(
+                            _("Create desktop application shortcuts"),
+                            value=self.initial_shortcuts,
+                            id="shortcuts-true",
                         )
             with Vertical(id="user-step", classes="step"):
                 yield Static(
@@ -554,6 +578,7 @@ class PermissionForm(
             "system": _("System permissions"),
             "devices": _("Device permissions"),
             "host-authentication": _("Host authentication permissions"),
+            "shortcuts": _("Application shortcuts permissions"),
             "user": _("User permissions"),
             "desktop": _("Desktop permissions"),
             "administrator": _("Administrator permissions"),
@@ -585,6 +610,7 @@ class PermissionForm(
             "system": "#network",
             "devices": "#devices",
             "host-authentication": "#host-authentication",
+            "shortcuts": "#shortcuts",
             "user": "#home-folders",
             "desktop": "#desktop",
             "administrator": "#administrator",
@@ -615,6 +641,7 @@ class PermissionForm(
                 "system": "#network",
                 "devices": "#devices",
                 "host-authentication": "#host-authentication",
+                "shortcuts": "#shortcuts",
                 "desktop": "#desktop",
                 "administrator": "#administrator",
                 "distribution": "#distribution-option",
@@ -671,6 +698,10 @@ class PermissionForm(
             result["host_authentication"] = self._radio_value(
                 self.query_one("#host-authentication", RadioSet),
                 "host-authentication-",
+            ) == "true"
+            result["shortcuts"] = self._radio_value(
+                self.query_one("#shortcuts", RadioSet),
+                "shortcuts-",
             ) == "true"
         if self.distribution_options:
             result["distribution_option"] = self._radio_value(

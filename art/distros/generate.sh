@@ -24,10 +24,10 @@ for image in "${images[@]}"; do
     output="${output_dir}/$(basename -- "${image}")"
 
     magick "${image}" \
-        -resize 45x45 \
+        -resize 110x110 \
         -background none \
         -gravity southeast \
-        -extent 128x128 \
+        -extent 256x256 \
         "${output}"
 
     echo "generated ${output}"

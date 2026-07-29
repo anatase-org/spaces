@@ -14,6 +14,7 @@ from unittest import mock
 
 from spaces import core
 from spaces import launch as launch_module
+from spaces import shortcuts
 
 
 class LaunchTests(unittest.TestCase):
@@ -46,6 +47,12 @@ class LaunchTests(unittest.TestCase):
             core, "STATE_ROOT", self.state_root
         )
         self.state_root_patch.start()
+        self.shortcuts_root_patch = mock.patch.object(
+            shortcuts,
+            "APPLICATIONS_ROOT",
+            Path(self.temporary.name) / "applications",
+        )
+        self.shortcuts_root_patch.start()
         self.session_runtime_patch = mock.patch.object(
             launch_module.session,
             "RUNTIME_ROOT",
@@ -97,6 +104,7 @@ class LaunchTests(unittest.TestCase):
         self.monitor_patch.stop()
         self.passwd_patch.stop()
         self.state_root_patch.stop()
+        self.shortcuts_root_patch.stop()
         self.temporary.cleanup()
 
     def _write_info(
@@ -107,6 +115,7 @@ class LaunchTests(unittest.TestCase):
         host_authentication: bool = False,
         desktop: bool = False,
         devices: str = "disabled",
+        shortcuts_enabled: bool = True,
     ) -> None:
         info = core.create_info(
             name,
@@ -116,12 +125,85 @@ class LaunchTests(unittest.TestCase):
             home or [],
             devices=devices,
             host_authentication=host_authentication,
+            shortcuts=shortcuts_enabled,
             desktop=desktop,
         )
         (self.space / "info.json").write_text(
             json.dumps(info),
             encoding="utf-8",
         )
+
+    def test_enabled_shortcuts_are_reconciled_and_monitored(self) -> None:
+        self._write_info()
+        process = mock.Mock()
+        process.wait.return_value = 0
+        shortcut_monitor = mock.Mock()
+        shortcut_worker = mock.Mock()
+        with (
+            mock.patch.object(
+                launch_module.shortcuts,
+                "reconcile",
+            ) as reconcile,
+            mock.patch.object(
+                launch_module.shortcuts,
+                "InotifyMonitor",
+                return_value=shortcut_monitor,
+            ),
+            mock.patch.object(
+                launch_module.shortcuts,
+                "ShortcutWorker",
+                return_value=shortcut_worker,
+            ) as worker_class,
+            mock.patch.object(
+                launch_module.subprocess,
+                "Popen",
+                return_value=process,
+            ),
+            mock.patch.object(launch_module.signal, "signal"),
+        ):
+            self.assertEqual(launch_module.launch("work"), 0)
+
+        reconcile.assert_called_once_with("work", self.rootfs, "custom")
+        worker_class.assert_called_once_with(
+            "work",
+            self.rootfs,
+            "custom",
+            shortcut_monitor,
+        )
+        shortcut_worker.start.assert_called_once_with()
+        shortcut_worker.stop.assert_called_once_with()
+        shortcut_worker.join.assert_called_once_with()
+        shortcut_monitor.close.assert_called_once_with()
+
+    def test_disabled_shortcuts_remove_exports_without_monitoring(self) -> None:
+        self._write_info(shortcuts_enabled=False)
+        process = mock.Mock()
+        process.wait.return_value = 0
+        with (
+            mock.patch.object(
+                launch_module.shortcuts,
+                "remove",
+            ) as remove,
+            mock.patch.object(
+                launch_module.shortcuts,
+                "reconcile",
+            ) as reconcile,
+            mock.patch.object(
+                launch_module.shortcuts,
+                "InotifyMonitor",
+            ) as monitor,
+            mock.patch.object(
+                launch_module.subprocess,
+                "Popen",
+                return_value=process,
+            ),
+            mock.patch.object(launch_module.signal, "signal"),
+        ):
+            self.assertEqual(launch_module.launch("work"), 0)
+
+        remove.assert_called_once_with("work")
+        reconcile.assert_not_called()
+        monitor.assert_not_called()
 
     def test_network_permissions_build_expected_launch(self) -> None:
         kept_caps = [

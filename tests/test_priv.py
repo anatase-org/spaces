@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from spaces import core, priv, session
+from spaces import core, priv, session, shortcuts
 from spaces.distro import ubuntu
 
 
@@ -28,6 +28,11 @@ class PrivilegedTests(unittest.TestCase):
         )
         self.patches = [
             mock.patch.object(core, "STATE_ROOT", self.state_root),
+            mock.patch.object(
+                shortcuts,
+                "APPLICATIONS_ROOT",
+                Path(self.temporary.name) / "applications",
+            ),
             mock.patch.object(priv.os, "chown"),
             mock.patch.object(priv.os, "fchown"),
             mock.patch.dict(os.environ, {}, clear=True),
@@ -131,6 +136,17 @@ class PrivilegedTests(unittest.TestCase):
             ],
             check=True,
         )
+
+    def test_rebuild_removes_existing_shortcut_versions(self) -> None:
+        info = core.create_info(
+            "work", {"id": "custom"}, self.identity, "basic", ["Projects"]
+        )
+        with (
+            mock.patch.object(ubuntu.subprocess, "run"),
+            mock.patch.object(shortcuts, "remove") as remove,
+        ):
+            priv.create(info)
+        remove.assert_called_once_with("work")
 
     def test_rebuild_removes_rootfs_and_preserves_home(self) -> None:
         with mock.patch.object(ubuntu.subprocess, "run"):
@@ -273,6 +289,30 @@ class PrivilegedTests(unittest.TestCase):
         )
         self.assertEqual(updated["permissions"]["system"]["network"], "basic")
 
+    def test_configure_disabled_shortcuts_removes_exports(self) -> None:
+        with mock.patch.object(ubuntu.subprocess, "run"):
+            priv.create(self.info)
+        patch = {
+            "schema_version": 1,
+            "name": "ubuntu",
+            "permissions": {
+                "system": {"network": "basic", "shortcuts": False},
+                "user": {
+                    "uid": 0,
+                    "gid": 0,
+                    "permissions": {"home": ["Projects"]},
+                },
+            },
+        }
+        with (
+            mock.patch.object(priv.subprocess, "run"),
+            mock.patch.object(shortcuts, "remove") as remove,
+            mock.patch.object(shortcuts, "reconcile") as reconcile,
+        ):
+            priv.configure(patch)
+        remove.assert_called_once_with("ubuntu")
+        reconcile.assert_not_called()
+
     def test_configure_can_target_another_user(self) -> None:
         with mock.patch.object(ubuntu.subprocess, "run"):
             priv.create(self.info)
@@ -318,6 +358,13 @@ class PrivilegedTests(unittest.TestCase):
         priv.delete({"name": "work"})
 
         self.assertFalse(space.exists())
+
+    def test_delete_removes_shortcut_versions(self) -> None:
+        space = self.state_root / "work"
+        (space / "rootfs").mkdir(parents=True)
+        with mock.patch.object(shortcuts, "remove") as remove:
+            priv.delete({"name": "work"})
+        remove.assert_called_once_with("work")
 
     def test_delete_rejects_symlink(self) -> None:
         outside = Path(self.temporary.name) / "outside"

@@ -9,6 +9,7 @@ url="https://github.com/anatase-org/spaces"
 license=('AGPL-3.0-or-later')
 depends=(
   'python'
+  'python-pillow'
   'python-rich'
   'python-textual'
   'polkit'

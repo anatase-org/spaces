@@ -84,6 +84,11 @@ def build_parser() -> argparse.ArgumentParser:
         metavar=_("USER"),
         help=_("enter as USER (requires administrator authentication)"),
     )
+    enter_parser.add_argument(
+        "--graphical",
+        action="store_true",
+        help=_("record that the command was launched from a desktop shortcut"),
+    )
     enter_parser.add_argument("space")
     enter_parser.add_argument(
         "command_arguments",
@@ -256,6 +261,7 @@ def _create(distro_id: str) -> int:
         network,
         devices,
         host_authentication,
+        shortcuts,
         selected_home,
         administrator,
         desktop,
@@ -274,6 +280,7 @@ def _create(distro_id: str) -> int:
         network=network,
         devices=devices,
         host_authentication=host_authentication,
+        shortcuts=shortcuts,
         selected_home=selected_home,
         administrator=administrator,
         desktop=desktop,
@@ -302,6 +309,7 @@ def _create(distro_id: str) -> int:
         devices=result.get("devices", "basic"),
         administrator=result.get("administrator", True),
         host_authentication=result.get("host_authentication", True),
+        shortcuts=result.get("shortcuts", True),
         desktop=result.get("desktop", True),
     )
     configure_logging(rich=True)
@@ -359,6 +367,7 @@ def _configure(name: str, *, user: str | None) -> int:
         network,
         devices,
         host_authentication,
+        shortcuts,
         selected_home,
         administrator,
         desktop,
@@ -373,6 +382,7 @@ def _configure(name: str, *, user: str | None) -> int:
         network=network,
         devices=devices,
         host_authentication=host_authentication,
+        shortcuts=shortcuts,
         selected_home=selected_home,
         administrator=administrator,
         desktop=desktop,
@@ -403,6 +413,7 @@ def _configure(name: str, *, user: str | None) -> int:
             "network": result["network"],
             "devices": result["devices"],
             "host_authentication": result.get("host_authentication", True),
+            "shortcuts": result.get("shortcuts", True),
         }
     patch = {
         "schema_version": core.SCHEMA_VERSION,
@@ -450,6 +461,7 @@ def _enter(
     command: list[str],
     *,
     enter_user: str | None = None,
+    graphical: bool = False,
 ) -> int:
     core.validate_space_name(space)
     user_name: str | None = None
@@ -518,6 +530,7 @@ def main(argv: list[str] | None = None) -> int:
                 arguments.space,
                 arguments.command_arguments,
                 enter_user=arguments.enter_user,
+                graphical=arguments.graphical,
             )
         raise core.SpacesError(
             _("Unknown command: {command!r}.", command=arguments.command)

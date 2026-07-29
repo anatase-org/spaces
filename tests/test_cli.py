@@ -199,6 +199,7 @@ class CliTests(unittest.TestCase):
         self.assertTrue(
             payload["permissions"]["system"]["host_authentication"]
         )
+        self.assertTrue(payload["permissions"]["system"]["shortcuts"])
         self.assertEqual(
             payload["permissions"]["system"]["devices"],
             "basic",
@@ -306,7 +307,30 @@ class CliTests(unittest.TestCase):
                 "network": "advanced",
                 "devices": "admin",
                 "host_authentication": False,
+                "shortcuts": True,
             },
+        )
+
+    def test_graphical_enter_is_internal_cli_context(self) -> None:
+        with mock.patch.object(cli, "_enter", return_value=42) as enter:
+            self.assertEqual(
+                cli.main(
+                    [
+                        "enter",
+                        "--graphical",
+                        "work",
+                        "--",
+                        "/usr/bin/code",
+                    ]
+                ),
+                42,
+            )
+
+        enter.assert_called_once_with(
+            "work",
+            ["/usr/bin/code"],
+            enter_user=None,
+            graphical=True,
         )
 
     def test_configure_named_user_targets_host_account(self) -> None:
@@ -610,7 +634,15 @@ class CliTests(unittest.TestCase):
             ) as invoke,
         ):
             self.assertEqual(
-                cli.main(["enter", "work", "--", "/usr/bin/kate"]),
+                cli.main(
+                    [
+                        "enter",
+                        "--graphical",
+                        "work",
+                        "--",
+                        "/usr/bin/kate",
+                    ]
+                ),
                 0,
             )
 

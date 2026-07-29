@@ -202,6 +202,7 @@ class CoreTests(unittest.TestCase):
             network,
             devices,
             host_authentication,
+            shortcuts,
             selected_home,
             administrator,
             desktop,
@@ -212,6 +213,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(network, "basic")
         self.assertEqual(devices, "basic")
         self.assertTrue(host_authentication)
+        self.assertTrue(shortcuts)
         self.assertEqual(selected_home, ["Projects", "Downloads"])
         self.assertTrue(administrator)
         self.assertTrue(desktop)
@@ -301,6 +303,7 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(
             info["permissions"]["system"]["host_authentication"]
         )
+        self.assertTrue(info["permissions"]["system"]["shortcuts"])
         self.assertEqual(
             info["permissions"]["system"]["devices"],
             "basic",
@@ -324,6 +327,7 @@ class CoreTests(unittest.TestCase):
             _network,
             _devices,
             _host_auth,
+            _shortcuts,
             _home,
             administrator,
             _desktop,
@@ -347,6 +351,7 @@ class CoreTests(unittest.TestCase):
             _network,
             _devices,
             _host_auth,
+            _shortcuts,
             _home,
             administrator,
             _desktop,
@@ -366,6 +371,7 @@ class CoreTests(unittest.TestCase):
             _network,
             _devices,
             host_auth,
+            _shortcuts,
             _home,
             _administrator,
             _desktop,
@@ -404,11 +410,29 @@ class CoreTests(unittest.TestCase):
         info = core.create_info(
             "work", {"id": "custom"}, identity, "basic", [], desktop=False
         )
-        self.assertFalse(core.defaults_from_info(info, identity)[5])
+        self.assertFalse(core.defaults_from_info(info, identity)[6])
         del info["permissions"]["users"]["1000"]["permissions"]["desktop"]
         core.validate_info(info)
-        self.assertTrue(core.defaults_from_info(info, identity)[5])
+        self.assertTrue(core.defaults_from_info(info, identity)[6])
         info["permissions"]["users"]["1000"]["permissions"]["desktop"] = 1
+        with self.assertRaises(core.SpacesError):
+            core.validate_info(info)
+
+    def test_shortcuts_permission_defaults_true_and_requires_boolean(self) -> None:
+        identity = core.Identity(1000, 1000, Path("/home/user"))
+        info = core.create_info(
+            "work",
+            {"id": "custom"},
+            identity,
+            "basic",
+            [],
+            shortcuts=False,
+        )
+        self.assertFalse(core.defaults_from_info(info, identity)[3])
+        del info["permissions"]["system"]["shortcuts"]
+        core.validate_info(info)
+        self.assertTrue(core.defaults_from_info(info, identity)[3])
+        info["permissions"]["system"]["shortcuts"] = 1
         with self.assertRaises(core.SpacesError):
             core.validate_info(info)
 

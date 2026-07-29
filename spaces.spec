@@ -21,6 +21,7 @@ BuildRequires:  python3-setuptools
 BuildRequires:  python3-wheel
 
 Requires:       python3
+Requires:       python3-pillow
 Requires:       python3-rich
 Requires:       python3-textual
 Requires:       polkit
