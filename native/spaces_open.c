@@ -184,7 +184,6 @@ static guint open_path(
     GDBusConnection *connection,
     const char *path,
     gboolean force_directory,
-    gboolean folder,
     const char *activation_token,
     GError **error
 )
@@ -227,11 +226,13 @@ static guint open_path(
         return response;
     }
     if (force_directory) {
+        /* OpenDirectory reveals the target in its parent. */
         writable = FALSE;
         method = "OpenDirectory";
     } else if (S_ISDIR(metadata.st_mode)) {
+        /* OpenFile on a directory opens that directory's contents. */
         writable = FALSE;
-        method = folder ? "OpenFile" : "OpenDirectory";
+        method = "OpenFile";
     } else if (S_ISREG(metadata.st_mode)) {
         method = "OpenFile";
     } else {
@@ -280,7 +281,6 @@ static guint open_path(
 int main(int argc, char **argv)
 {
     gboolean force_directory = FALSE;
-    gboolean folder = FALSE;
     const char *argument;
     const char *activation_token;
     GDBusConnection *connection;
@@ -295,7 +295,6 @@ int main(int argc, char **argv)
 
     signal(SIGPIPE, SIG_IGN);
     if (index < argc && g_str_equal(argv[index], "--folder")) {
-        folder = TRUE;
         index++;
     } else if (index < argc && g_str_equal(argv[index], "--directory")) {
         force_directory = TRUE;
@@ -352,8 +351,7 @@ int main(int argc, char **argv)
         goto failed_connection;
     }
     response = open_path(
-        connection, canonical, force_directory, folder,
-        activation_token, &error
+        connection, canonical, force_directory, activation_token, &error
     );
     free(canonical);
     g_free(absolute);
