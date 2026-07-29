@@ -57,6 +57,10 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("DeviceAllow=char-pts rw", service_text)
         self.assertIn("DeviceAllow=/dev/fuse rwm", service_text)
         self.assertEqual(
+            unit["Service"]["Environment"],
+            "PYTHONDONTWRITEBYTECODE=1",
+        )
+        self.assertEqual(
             unit["Service"]["ExecStart"],
             "/usr/bin/spaces.priv launch %I",
         )

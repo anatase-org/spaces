@@ -11,6 +11,7 @@ DevicePolicy=closed
 DeviceAllow=/dev/net/tun rwm
 DeviceAllow=char-pts rw
 DeviceAllow=/dev/fuse rwm
+Environment=PYTHONDONTWRITEBYTECODE=1
 ExecStart=/usr/bin/spaces.priv launch %I
 
 [Install]
