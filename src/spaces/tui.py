@@ -28,6 +28,7 @@ from . import _
 from .core import (
     DEFAULT_HOME_FOLDERS,
     DEVICE_LEVELS,
+    KERNEL_CAPABILITY_LEVELS,
     NETWORK_LEVELS,
     SpacesError,
     validate_space_name,
@@ -300,6 +301,13 @@ class PermissionForm(
         "advanced": _("Advanced — shared networking and privileged ports"),
         "admin": _("Admin — full network admin with CAP_NET_RAW and CAP_NET_ADMIN"),
     }
+    KERNEL_CAPABILITY_LABELS = {
+        "basic": _("Basic — Essentials for daily work"),
+        "development": _(
+            "Development — required for Docker; adds CAP_PERFMON, CAP_BPF, "
+            "and perf_event_open"
+        ),
+    }
     DEVICE_LABELS = {
         "disabled": _("Disabled — no host devices"),
         "basic": _(
@@ -323,6 +331,7 @@ class PermissionForm(
         folders: list[str],
         network: str,
         selected_home: list[str],
+        kernel_capabilities: str = "basic",
         devices: str = "basic",
         host_authentication: bool = True,
         shortcuts: bool = True,
@@ -344,6 +353,7 @@ class PermissionForm(
         super().__init__(ansi_color=True)
         self.home = home
         self.initial_network = network
+        self.initial_kernel_capabilities = kernel_capabilities
         self.initial_devices = devices
         self.initial_host_authentication = host_authentication
         self.initial_shortcuts = shortcuts
@@ -378,7 +388,13 @@ class PermissionForm(
         self.steps = (
             notice_steps
             + (
-                ["system", "devices", "host-authentication", "shortcuts"]
+                [
+                    "system",
+                    "kernel-capabilities",
+                    "devices",
+                    "host-authentication",
+                    "shortcuts",
+                ]
                 if include_system
                 else []
             )
@@ -424,6 +440,25 @@ class PermissionForm(
                                 self.NETWORK_LABELS[level],
                                 value=level == self.initial_network,
                                 id=f"network-{level}",
+                            )
+                with Vertical(
+                    id="kernel-capabilities-step",
+                    classes="step",
+                ):
+                    yield Static(
+                        _(
+                            "Choose the kernel capabilities available inside "
+                            "this space."
+                        ),
+                        classes="description",
+                    )
+                    with RadioSet(id="kernel-capabilities"):
+                        for level in KERNEL_CAPABILITY_LEVELS:
+                            yield CleanRadioButton(
+                                self.KERNEL_CAPABILITY_LABELS[level],
+                                value=level
+                                == self.initial_kernel_capabilities,
+                                id=f"kernel-capabilities-{level}",
                             )
                 with Vertical(
                     id="devices-step",
@@ -622,6 +657,7 @@ class PermissionForm(
             "override": _("Space already exists"),
             "missing": _("Space does not exist"),
             "system": _("System permissions"),
+            "kernel-capabilities": _("Kernel capabilities"),
             "devices": _("Device permissions"),
             "host-authentication": _("Host authentication permissions"),
             "shortcuts": _("Application shortcuts permissions"),
@@ -654,6 +690,7 @@ class PermissionForm(
         select_button.disabled = current in {"override", "missing"}
         focus_targets = {
             "system": "#network",
+            "kernel-capabilities": "#kernel-capabilities",
             "devices": "#devices",
             "host-authentication": "#host-authentication",
             "shortcuts": "#shortcuts",
@@ -693,6 +730,7 @@ class PermissionForm(
         else:
             targets = {
                 "system": "#network",
+                "kernel-capabilities": "#kernel-capabilities",
                 "devices": "#devices",
                 "host-authentication": "#host-authentication",
                 "shortcuts": "#shortcuts",
@@ -745,6 +783,10 @@ class PermissionForm(
         if self.include_system:
             result["network"] = self._radio_value(
                 self.query_one("#network", RadioSet), "network-"
+            )
+            result["kernel_capabilities"] = self._radio_value(
+                self.query_one("#kernel-capabilities", RadioSet),
+                "kernel-capabilities-",
             )
             result["devices"] = self._radio_value(
                 self.query_one("#devices", RadioSet), "devices-"

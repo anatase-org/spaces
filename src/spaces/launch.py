@@ -127,6 +127,13 @@ NETWORK_CAPS = {
         "CAP_NET_ADMIN",
     ),
 }
+KERNEL_CAPS = {
+    "basic": (),
+    "development": (
+        "CAP_PERFMON",
+        "CAP_BPF",
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -1762,11 +1769,13 @@ def _command(
     rootfs: Path,
     home: Path,
     network: str,
+    kernel_capabilities: str,
     mounts: tuple[HomeMount, ...] = (),
     authentication_binds: tuple[str, ...] = (),
 ) -> list[str]:
     network_caps = NETWORK_CAPS[network]
-    kept_caps = (*KEPT_CAPS, *network_caps)
+    kernel_caps = KERNEL_CAPS[kernel_capabilities]
+    kept_caps = (*KEPT_CAPS, *network_caps, *kernel_caps)
     dropped_caps = tuple(
         capability
         for capability in DROPPED_CAPS
@@ -1790,6 +1799,11 @@ def _command(
         "--settings=no",
         "--notify-ready=yes",
         "--resolv-conf=bind-host",
+        *(
+            ("--system-call-filter=perf_event_open",)
+            if kernel_capabilities == "development"
+            else ()
+        ),
         f"--drop-capability={','.join(dropped_caps)}",
         f"--capability={','.join(kept_caps)}",
     ]
@@ -1801,6 +1815,10 @@ def launch(space_name: str) -> int:
     configure_logging(rich=False)
     rootfs, home, info = _load_space(space_name)
     network = info["permissions"]["system"]["network"]
+    kernel_capabilities = info["permissions"]["system"].get(
+        "kernel_capabilities",
+        "basic",
+    )
     device_level = info["permissions"]["system"].get("devices", "basic")
     host_authentication = info["permissions"]["system"].get(
         "host_authentication",
@@ -1952,6 +1970,7 @@ def launch(space_name: str) -> int:
                 rootfs,
                 home,
                 network,
+                kernel_capabilities,
                 initial_mounts,
                 (
                     *authentication_binds,

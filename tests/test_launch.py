@@ -116,6 +116,7 @@ class LaunchTests(unittest.TestCase):
         desktop: bool = False,
         devices: str = "disabled",
         shortcuts_enabled: bool = True,
+        kernel_capabilities: str = "basic",
     ) -> None:
         info = core.create_info(
             name,
@@ -127,6 +128,7 @@ class LaunchTests(unittest.TestCase):
             host_authentication=host_authentication,
             shortcuts=shortcuts_enabled,
             desktop=desktop,
+            kernel_capabilities=kernel_capabilities,
         )
         (self.space / "info.json").write_text(
             json.dumps(info),
@@ -266,6 +268,17 @@ class LaunchTests(unittest.TestCase):
         for network, added_caps in network_caps.items():
             with self.subTest(network=network):
                 self._write_info(network)
+                if network == "basic":
+                    legacy_info = json.loads(
+                        (self.space / "info.json").read_text(encoding="utf-8")
+                    )
+                    del legacy_info["permissions"]["system"][
+                        "kernel_capabilities"
+                    ]
+                    (self.space / "info.json").write_text(
+                        json.dumps(legacy_info),
+                        encoding="utf-8",
+                    )
                 caller_thread = threading.current_thread()
                 called_thread: threading.Thread | None = None
 
@@ -334,6 +347,42 @@ class LaunchTests(unittest.TestCase):
                         launch_module.API_VFS_WRITABLE,
                         environment,
                     )
+
+    def test_development_kernel_capabilities_extend_launch(self) -> None:
+        arguments = launch_module._command(
+            "work",
+            self.rootfs,
+            self.home,
+            "basic",
+            "development",
+        )
+
+        self.assertIn("--system-call-filter=perf_event_open", arguments)
+        capability_argument = next(
+            argument
+            for argument in arguments
+            if argument.startswith("--capability=")
+        )
+        self.assertTrue(
+            capability_argument.endswith("CAP_PERFMON,CAP_BPF"),
+            capability_argument,
+        )
+
+        basic_arguments = launch_module._command(
+            "work",
+            self.rootfs,
+            self.home,
+            "basic",
+            "basic",
+        )
+        self.assertNotIn("--system-call-filter=perf_event_open", basic_arguments)
+        basic_capability_argument = next(
+            argument
+            for argument in basic_arguments
+            if argument.startswith("--capability=")
+        )
+        self.assertNotIn("CAP_PERFMON", basic_capability_argument)
+        self.assertNotIn("CAP_BPF", basic_capability_argument)
 
     def test_enabled_authentication_starts_service_and_adds_exact_binds(
         self,

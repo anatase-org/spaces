@@ -19,6 +19,7 @@ STATE_ROOT = Path("/var/lib/spaces")
 KNOWN_DISTRIBUTIONS = KNOWN_IDS
 RESERVED_NAMES = frozenset(KNOWN_DISTRIBUTIONS)
 NETWORK_LEVELS = ("basic", "advanced", "admin")
+KERNEL_CAPABILITY_LEVELS = ("basic", "development")
 DEVICE_LEVELS = ("disabled", "basic", "admin", "full")
 DEFAULT_HOME_FOLDERS = ("Projects", "Downloads")
 SPACE_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
@@ -149,6 +150,15 @@ def _validate_system_permissions(value: object) -> dict[str, Any]:
     if network not in NETWORK_LEVELS:
         raise SpacesError(
             _("Unknown network permission: {network!r}.", network=network)
+        )
+    kernel_capabilities = system.get("kernel_capabilities", "basic")
+    if kernel_capabilities not in KERNEL_CAPABILITY_LEVELS:
+        raise SpacesError(
+            _(
+                "Unknown kernel capabilities permission: "
+                "{kernel_capabilities!r}.",
+                kernel_capabilities=kernel_capabilities,
+            )
         )
     devices = system.get("devices", "basic")
     if devices not in DEVICE_LEVELS:
@@ -337,8 +347,9 @@ def load_info(path: Path) -> dict[str, Any] | None:
 
 def defaults_from_info(
     info: Mapping[str, Any] | None, identity: Identity
-) -> tuple[str, str, bool, bool, list[str], bool, bool]:
+) -> tuple[str, str, str, bool, bool, list[str], bool, bool]:
     network = "basic"
+    kernel_capabilities = "basic"
     devices = "basic"
     host_authentication = True
     shortcuts = True
@@ -348,6 +359,7 @@ def defaults_from_info(
     if not info:
         return (
             network,
+            kernel_capabilities,
             devices,
             host_authentication,
             shortcuts,
@@ -361,6 +373,11 @@ def defaults_from_info(
     existing_network = system_permissions.get("network")
     if existing_network in NETWORK_LEVELS:
         network = existing_network
+    existing_kernel_capabilities = system_permissions.get(
+        "kernel_capabilities"
+    )
+    if existing_kernel_capabilities in KERNEL_CAPABILITY_LEVELS:
+        kernel_capabilities = existing_kernel_capabilities
     existing_devices = system_permissions.get("devices")
     if existing_devices in DEVICE_LEVELS:
         devices = existing_devices
@@ -391,6 +408,7 @@ def defaults_from_info(
         desktop = existing_desktop
     return (
         network,
+        kernel_capabilities,
         devices,
         host_authentication,
         shortcuts,
@@ -411,6 +429,7 @@ def create_info(
     shortcuts: bool = True,
     desktop: bool = True,
     devices: str = "basic",
+    kernel_capabilities: str = "basic",
 ) -> dict[str, Any]:
     value = {
         "schema_version": SCHEMA_VERSION,
@@ -419,6 +438,7 @@ def create_info(
         "permissions": {
             "system": {
                 "network": network,
+                "kernel_capabilities": kernel_capabilities,
                 "devices": devices,
                 "host_authentication": host_authentication,
                 "shortcuts": shortcuts,

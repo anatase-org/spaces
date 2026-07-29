@@ -264,6 +264,7 @@ def _create(distro_id: str, *, missing: bool = False) -> int:
     )
     (
         network,
+        kernel_capabilities,
         devices,
         host_authentication,
         shortcuts,
@@ -292,6 +293,7 @@ def _create(distro_id: str, *, missing: bool = False) -> int:
         home=identity.home,
         folders=folders,
         network=network,
+        kernel_capabilities=kernel_capabilities,
         devices=devices,
         host_authentication=host_authentication,
         shortcuts=shortcuts,
@@ -329,6 +331,7 @@ def _create(distro_id: str, *, missing: bool = False) -> int:
         identity=identity,
         network=result["network"],
         home=result["home"],
+        kernel_capabilities=result.get("kernel_capabilities", "basic"),
         devices=result.get("devices", "basic"),
         administrator=result.get("administrator", True),
         host_authentication=result.get("host_authentication", True),
@@ -388,6 +391,7 @@ def _configure(name: str, *, user: str | None) -> int:
         )
     (
         network,
+        kernel_capabilities,
         devices,
         host_authentication,
         shortcuts,
@@ -403,6 +407,7 @@ def _configure(name: str, *, user: str | None) -> int:
         home=identity.home,
         folders=core.discover_home_folders(identity.home),
         network=network,
+        kernel_capabilities=kernel_capabilities,
         devices=devices,
         host_authentication=host_authentication,
         shortcuts=shortcuts,
@@ -434,6 +439,9 @@ def _configure(name: str, *, user: str | None) -> int:
     if not user_only:
         permissions["system"] = {
             "network": result["network"],
+            "kernel_capabilities": result.get(
+                "kernel_capabilities", "basic"
+            ),
             "devices": result["devices"],
             "host_authentication": result.get("host_authentication", True),
             "shortcuts": result.get("shortcuts", True),

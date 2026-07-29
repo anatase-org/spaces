@@ -200,6 +200,7 @@ class CoreTests(unittest.TestCase):
     def test_new_space_defaults(self) -> None:
         (
             network,
+            kernel_capabilities,
             devices,
             host_authentication,
             shortcuts,
@@ -211,6 +212,7 @@ class CoreTests(unittest.TestCase):
             core.Identity(1000, 1000, Path("/home/user")),
         )
         self.assertEqual(network, "basic")
+        self.assertEqual(kernel_capabilities, "basic")
         self.assertEqual(devices, "basic")
         self.assertTrue(host_authentication)
         self.assertTrue(shortcuts)
@@ -305,6 +307,10 @@ class CoreTests(unittest.TestCase):
         )
         self.assertTrue(info["permissions"]["system"]["shortcuts"])
         self.assertEqual(
+            info["permissions"]["system"]["kernel_capabilities"],
+            "basic",
+        )
+        self.assertEqual(
             info["permissions"]["system"]["devices"],
             "basic",
         )
@@ -325,6 +331,7 @@ class CoreTests(unittest.TestCase):
 
         (
             _network,
+            _kernel_capabilities,
             _devices,
             _host_auth,
             _shortcuts,
@@ -349,6 +356,7 @@ class CoreTests(unittest.TestCase):
         core.validate_info(info)
         (
             _network,
+            _kernel_capabilities,
             _devices,
             _host_auth,
             _shortcuts,
@@ -369,6 +377,7 @@ class CoreTests(unittest.TestCase):
         core.validate_info(info)
         (
             _network,
+            _kernel_capabilities,
             _devices,
             host_auth,
             _shortcuts,
@@ -410,10 +419,10 @@ class CoreTests(unittest.TestCase):
         info = core.create_info(
             "work", {"id": "custom"}, identity, "basic", [], desktop=False
         )
-        self.assertFalse(core.defaults_from_info(info, identity)[6])
+        self.assertFalse(core.defaults_from_info(info, identity)[7])
         del info["permissions"]["users"]["1000"]["permissions"]["desktop"]
         core.validate_info(info)
-        self.assertTrue(core.defaults_from_info(info, identity)[6])
+        self.assertTrue(core.defaults_from_info(info, identity)[7])
         info["permissions"]["users"]["1000"]["permissions"]["desktop"] = 1
         with self.assertRaises(core.SpacesError):
             core.validate_info(info)
@@ -428,10 +437,10 @@ class CoreTests(unittest.TestCase):
             [],
             shortcuts=False,
         )
-        self.assertFalse(core.defaults_from_info(info, identity)[3])
+        self.assertFalse(core.defaults_from_info(info, identity)[4])
         del info["permissions"]["system"]["shortcuts"]
         core.validate_info(info)
-        self.assertTrue(core.defaults_from_info(info, identity)[3])
+        self.assertTrue(core.defaults_from_info(info, identity)[4])
         info["permissions"]["system"]["shortcuts"] = 1
         with self.assertRaises(core.SpacesError):
             core.validate_info(info)
@@ -446,13 +455,36 @@ class CoreTests(unittest.TestCase):
             [],
             devices="admin",
         )
-        self.assertEqual(core.defaults_from_info(info, identity)[1], "admin")
+        self.assertEqual(core.defaults_from_info(info, identity)[2], "admin")
 
         del info["permissions"]["system"]["devices"]
         core.validate_info(info)
-        self.assertEqual(core.defaults_from_info(info, identity)[1], "basic")
+        self.assertEqual(core.defaults_from_info(info, identity)[2], "basic")
 
         info["permissions"]["system"]["devices"] = "unknown"
+        with self.assertRaises(core.SpacesError):
+            core.validate_info(info)
+
+    def test_kernel_capabilities_default_validates_and_is_preserved(self) -> None:
+        identity = core.Identity(1000, 1000, Path("/home/user"))
+        info = core.create_info(
+            "work",
+            {"id": "custom"},
+            identity,
+            "basic",
+            [],
+            kernel_capabilities="development",
+        )
+        self.assertEqual(
+            core.defaults_from_info(info, identity)[1],
+            "development",
+        )
+
+        del info["permissions"]["system"]["kernel_capabilities"]
+        core.validate_info(info)
+        self.assertEqual(core.defaults_from_info(info, identity)[1], "basic")
+
+        info["permissions"]["system"]["kernel_capabilities"] = "unknown"
         with self.assertRaises(core.SpacesError):
             core.validate_info(info)
 

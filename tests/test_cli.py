@@ -166,6 +166,7 @@ class CliTests(unittest.TestCase):
                     "run_permission_wizard",
                     return_value={
                         "network": "basic",
+                        "kernel_capabilities": "development",
                         "home": ["Projects"],
                         "distribution_option": "resolute",
                     },
@@ -202,6 +203,10 @@ class CliTests(unittest.TestCase):
             payload["permissions"]["system"]["host_authentication"]
         )
         self.assertTrue(payload["permissions"]["system"]["shortcuts"])
+        self.assertEqual(
+            payload["permissions"]["system"]["kernel_capabilities"],
+            "development",
+        )
         self.assertEqual(
             payload["permissions"]["system"]["devices"],
             "basic",
@@ -423,6 +428,7 @@ class CliTests(unittest.TestCase):
                     "run_permission_wizard",
                     return_value={
                         "network": "advanced",
+                        "kernel_capabilities": "development",
                         "devices": "admin",
                         "host_authentication": False,
                         "home": [],
@@ -439,6 +445,7 @@ class CliTests(unittest.TestCase):
             invoke.call_args.args[1]["permissions"]["system"],
             {
                 "network": "advanced",
+                "kernel_capabilities": "development",
                 "devices": "admin",
                 "host_authentication": False,
                 "shortcuts": True,
@@ -1112,9 +1119,13 @@ class CliTests(unittest.TestCase):
             ):
                 self.assertEqual(cli.main(["create", "ubuntu"]), 130)
         self.assertTrue(wizard.call_args.kwargs["override"])
+        self.assertEqual(
+            wizard.call_args.kwargs["kernel_capabilities"],
+            "basic",
+        )
         self.assertEqual(wizard.call_args.kwargs["devices"], "basic")
 
-    def test_recreating_space_preserves_device_permission(self) -> None:
+    def test_recreating_space_preserves_system_permissions(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary) / "state"
             target = state / "ubuntu"
@@ -1127,6 +1138,7 @@ class CliTests(unittest.TestCase):
                 "basic",
                 [],
                 devices="admin",
+                kernel_capabilities="development",
             )
             (target / "info.json").write_text(
                 json.dumps(info),
@@ -1147,6 +1159,10 @@ class CliTests(unittest.TestCase):
             ):
                 self.assertEqual(cli.main(["create", "ubuntu"]), 130)
 
+        self.assertEqual(
+            wizard.call_args.kwargs["kernel_capabilities"],
+            "development",
+        )
         self.assertEqual(wizard.call_args.kwargs["devices"], "admin")
 
 
