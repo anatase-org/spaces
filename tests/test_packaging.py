@@ -262,6 +262,7 @@ class PackagingTests(unittest.TestCase):
         for name in (
             "pam_spaces.so",
             "spaces-portal",
+            "spaces-secret-helper",
             "spaces-pam-worker",
             "spaces-session-launcher",
         ):
@@ -273,6 +274,9 @@ class PackagingTests(unittest.TestCase):
             spec,
         )
         self.assertIn("/usr/lib/spaces/guest/spaces-portal", spec)
+        self.assertIn(
+            "/usr/lib/spaces/guest/spaces-secret-helper", spec
+        )
         self.assertIn("Requires:       glib2", spec)
         self.assertIn("Requires:       xdg-dbus-proxy", spec)
         self.assertIn("Requires:       python3-pillow", spec)
@@ -318,6 +322,13 @@ class PackagingTests(unittest.TestCase):
             '"data/keys/kali-archive-key.gpg.base64"',
             pyproject,
         )
+        for asset in (
+            "org.freedesktop.secrets.service",
+            "org.kde.secretservicecompat.service",
+            "org.kde.kwalletd5.service",
+            "data/portal/config/kwalletrc",
+        ):
+            self.assertIn(asset, pyproject)
 
     def test_packaged_bootstrap_keys_have_expected_fingerprints(self) -> None:
         if shutil.which("gpg") is None:

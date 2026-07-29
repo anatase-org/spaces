@@ -98,6 +98,7 @@ DESKTOP_ENVIRONMENT = frozenset(
         "XCURSOR_SIZE",
         "XCURSOR_THEME",
         "XDG_CURRENT_DESKTOP",
+        "XDG_CONFIG_DIRS",
         "XDG_DATA_DIRS",
         "XDG_MENU_PREFIX",
         "XDG_SESSION_CLASS",
@@ -126,6 +127,7 @@ HOST_PORTAL_INTERFACES = (
     "RemoteDesktop",
     "ScreenCast",
     "Screenshot",
+    "Secret",
     "Settings",
     "Wallpaper",
 )
@@ -143,12 +145,20 @@ PORTAL_DATA_BINDS = (
         PORTAL_DATA_ROOT / "systemd" / "user",
         "/usr/local/share/systemd/user",
     ),
+    (
+        PORTAL_DATA_ROOT / "config",
+        "/run/spaces-host/config",
+    ),
 )
 GUEST_PORTAL_FRONTENDS = (
     "usr/libexec/xdg-desktop-portal",
     "usr/lib/xdg-desktop-portal",
 )
 GUEST_KDE_PORTAL = "usr/share/xdg-desktop-portal/portals/kde.portal"
+GUEST_KWALLET_PROVIDERS = (
+    "usr/bin/ksecretd",
+    "usr/bin/kwalletd5",
+)
 GUEST_PIPEWIRE_CONFIGS = (
     "usr/share/pipewire/client.conf",
     "etc/pipewire/client.conf",
@@ -392,17 +402,23 @@ def portal_bind_arguments(rootfs: Path) -> tuple[str, ...]:
         for candidate in GUEST_PORTAL_FRONTENDS
     )
     kde = (rootfs / GUEST_KDE_PORTAL).is_file()
+    kwallet = any(
+        (rootfs / candidate).is_file()
+        for candidate in GUEST_KWALLET_PROVIDERS
+    )
     pipewire = any(
         (rootfs / candidate).is_file()
         for candidate in GUEST_PIPEWIRE_CONFIGS
     )
     assets = all(source.is_dir() for source, _destination in PORTAL_DATA_BINDS)
-    if not frontend or not kde or not pipewire:
+    if not frontend or not kde or not kwallet or not pipewire:
         missing = []
         if not frontend:
             missing.append("xdg-desktop-portal")
         if not kde:
             missing.append("xdg-desktop-portal-kde")
+        if not kwallet:
+            missing.append("kwallet Secret Service provider")
         if not pipewire:
             missing.append("pipewire")
         logger.warning(
@@ -678,6 +694,7 @@ def _plan(
         "PIPEWIRE_RUNTIME_DIR",
         "XCURSOR_PATH",
         "XDG_DATA_DIRS",
+        "XDG_CONFIG_DIRS",
         "XDG_RUNTIME_DIR",
         "XDG_SESSION_ID",
     ):
@@ -924,6 +941,7 @@ def _plan(
         if item and item.casefold() != "spaces"
     ]
     environment["XDG_CURRENT_DESKTOP"] = ":".join(["Spaces", *desktops])
+    environment["XDG_CONFIG_DIRS"] = "/run/spaces-host/config:/etc/xdg"
     environment["XDG_SESSION_TYPE"] = selected.session_type
     environment["XDG_SESSION_CLASS"] = "user"
     return DesktopPlan(

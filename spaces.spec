@@ -90,6 +90,7 @@ done
 %dir /usr/lib/spaces/guest
 /usr/lib/spaces/guest/pam_spaces.so
 /usr/lib/spaces/guest/spaces-portal
+/usr/lib/spaces/guest/spaces-secret-helper
 /usr/lib/spaces/guest/spaces-session-launcher
 %dir %{_datadir}/spaces/portal
 %{_datadir}/spaces/portal/*

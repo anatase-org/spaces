@@ -1,7 +1,13 @@
 #define _GNU_SOURCE
 
+#include <errno.h>
+#include <fcntl.h>
 #include <gio/gio.h>
 #include <gio/gunixfdlist.h>
+#include <signal.h>
+#include <stdint.h>
+#include <string.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 #include "portal_interfaces.h"
@@ -14,6 +20,8 @@
 #define INTERFACE_DIRECTORY "/usr/share/dbus-1/interfaces"
 #define RESTORE_DATA_VENDOR "Spaces"
 #define RESTORE_DATA_VERSION 1
+#define SECRET_MAXIMUM 4096
+#define SECRET_SIZE 64
 
 #if defined(__x86_64__) || defined(__aarch64__)
 typedef int (*main_function)(int, char **, char **);
@@ -52,11 +60,11 @@ int __wrap___libc_start_main(
 static const char *backend_names[] = {
     "Account", "Clipboard", "Email", "GlobalShortcuts", "Inhibit",
     "InputCapture", "Notification", "Print", "RemoteDesktop",
-    "ScreenCast", "Screenshot", "Settings", "Wallpaper",
+    "ScreenCast", "Screenshot", "Secret", "Settings", "Wallpaper",
 };
 
 static const guint backend_versions[] = {
-    1, 1, 4, 2, 3, 2, 2, 4, 2, 6, 3, 1, 1,
+    1, 1, 4, 2, 3, 2, 2, 4, 2, 6, 3, 1, 1, 1,
 };
 
 typedef struct {
@@ -69,6 +77,9 @@ typedef struct {
     guint request_registration;
     gboolean cancelled;
     gboolean persistent;
+    char *secret_app_id;
+    int secret_guest_fd;
+    int secret_host_fd;
 } Pending;
 
 typedef struct {
@@ -146,13 +157,134 @@ static void pending_free(gpointer data)
 {
     Pending *pending = data;
 
+    if (pending->secret_host_fd >= 0) {
+        (void)ftruncate(pending->secret_host_fd, 0);
+        close(pending->secret_host_fd);
+    }
+    if (pending->secret_guest_fd >= 0)
+        close(pending->secret_guest_fd);
     g_clear_object(&pending->invocation);
     g_free(pending->guest_handle);
     g_free(pending->guest_session);
     g_free(pending->host_handle);
     g_free(pending->interface_name);
     g_free(pending->method_name);
+    g_free(pending->secret_app_id);
     g_free(pending);
+}
+
+static void secure_clear(void *data, gsize size)
+{
+    volatile unsigned char *cursor = data;
+
+    while (size-- > 0)
+        *cursor++ = 0;
+}
+
+gboolean portal_derive_secret(
+    const guint8 *host_secret,
+    gsize host_secret_size,
+    const char *app_id,
+    guint8 output[SECRET_SIZE]
+)
+{
+    static const guint8 domain[] =
+        "org.anatase.spaces.portal-secret.v1";
+    GHmac *hmac;
+    guint8 length[4];
+    gsize app_id_size;
+    gsize output_size = SECRET_SIZE;
+
+    if (host_secret == NULL || host_secret_size == 0
+        || app_id == NULL || output == NULL)
+        return FALSE;
+    app_id_size = strlen(app_id);
+    if (app_id_size > UINT32_MAX)
+        return FALSE;
+    length[0] = (guint8)(app_id_size >> 24);
+    length[1] = (guint8)(app_id_size >> 16);
+    length[2] = (guint8)(app_id_size >> 8);
+    length[3] = (guint8)app_id_size;
+
+    hmac = g_hmac_new(
+        G_CHECKSUM_SHA512, host_secret, host_secret_size
+    );
+    if (hmac == NULL)
+        return FALSE;
+    g_hmac_update(hmac, domain, sizeof(domain));
+    g_hmac_update(hmac, length, sizeof(length));
+    g_hmac_update(hmac, (const guint8 *)app_id, app_id_size);
+    g_hmac_get_digest(hmac, output, &output_size);
+    g_hmac_unref(hmac);
+    return output_size == SECRET_SIZE;
+}
+
+static gboolean write_all(int descriptor, const guint8 *data, gsize size)
+{
+    while (size > 0) {
+        ssize_t written = write(descriptor, data, size);
+
+        if (written < 0 && errno == EINTR)
+            continue;
+        if (written <= 0)
+            return FALSE;
+        data += written;
+        size -= (gsize)written;
+    }
+    return TRUE;
+}
+
+static gboolean finish_secret(Pending *pending)
+{
+    guint8 raw[SECRET_MAXIMUM + 1];
+    guint8 derived[SECRET_SIZE];
+    gsize size = 0;
+    gboolean success = FALSE;
+
+    if (pending->secret_host_fd < 0
+        || pending->secret_guest_fd < 0
+        || pending->secret_app_id == NULL
+        || lseek(pending->secret_host_fd, 0, SEEK_SET) < 0)
+        goto out;
+    while (size < sizeof(raw)) {
+        ssize_t count = read(
+            pending->secret_host_fd, raw + size, sizeof(raw) - size
+        );
+
+        if (count < 0 && errno == EINTR)
+            continue;
+        if (count < 0)
+            goto out;
+        if (count == 0)
+            break;
+        size += (gsize)count;
+    }
+    if (size == 0 || size > SECRET_MAXIMUM)
+        goto out;
+    if (!portal_derive_secret(
+            raw, size, pending->secret_app_id, derived
+        ))
+        goto out;
+    success = write_all(
+        pending->secret_guest_fd, derived, sizeof(derived)
+    );
+
+out:
+    secure_clear(raw, sizeof(raw));
+    secure_clear(derived, sizeof(derived));
+    if (pending->secret_host_fd >= 0)
+        (void)ftruncate(pending->secret_host_fd, 0);
+    return success;
+}
+
+static int create_secret_memfd(void)
+{
+#ifdef SYS_memfd_create
+    return (int)syscall(SYS_memfd_create, "spaces-portal-secret", 1U);
+#else
+    errno = ENOSYS;
+    return -1;
+#endif
 }
 
 static void session_free(gpointer data)
@@ -499,6 +631,13 @@ static GVariant *build_host_parameters(
             continue;
         }
         if (g_str_equal(argument->name, "app_id")) {
+            if (g_str_equal(
+                    pending->interface_name,
+                    "org.freedesktop.impl.portal.Secret"
+                ))
+                pending->secret_app_id = g_variant_dup_string(
+                    child, NULL
+                );
             g_variant_unref(child);
             continue;
         }
@@ -701,6 +840,13 @@ static void finish_pending(
     GDBusMethodInfo *method;
     guint outputs = 0;
 
+    if (response == 0
+        && pending->secret_host_fd >= 0
+        && (pending->cancelled || !finish_secret(pending))) {
+        response = pending->cancelled ? 1 : 2;
+        g_variant_unref(results);
+        results = empty_dict();
+    }
     if (response == 0) {
         if (method_returns_restore_data(
                 pending->interface_name, pending->method_name
@@ -947,6 +1093,7 @@ static void backend_method_call(
     Pending *pending;
     GVariant *host_parameters;
     GUnixFDList *fd_list;
+    GUnixFDList *host_fd_list = NULL;
     GError *error = NULL;
     gboolean request;
     gboolean create_session;
@@ -978,6 +1125,8 @@ static void backend_method_call(
     }
 
     pending = g_new0(Pending, 1);
+    pending->secret_guest_fd = -1;
+    pending->secret_host_fd = -1;
     pending->invocation = g_object_ref(invocation);
     pending->interface_name = g_strdup(interface_name);
     pending->method_name = g_strdup(method_name);
@@ -1017,6 +1166,54 @@ static void backend_method_call(
     fd_list = g_dbus_message_get_unix_fd_list(
         g_dbus_method_invocation_get_message(invocation)
     );
+    if (g_str_equal(suffix, "Secret")
+        && g_str_equal(method_name, "RetrieveSecret")) {
+        GVariant *fd_value = g_variant_get_child_value(parameters, 2);
+        gint fd_index = g_variant_get_handle(fd_value);
+        gint count = fd_list == NULL ? 0 : g_unix_fd_list_get_length(fd_list);
+        gint index;
+
+        g_variant_unref(fd_value);
+        if (fd_index < 0 || fd_index >= count) {
+            g_set_error(
+                &error, G_DBUS_ERROR, G_DBUS_ERROR_INVALID_ARGS,
+                "Secret output descriptor is unavailable"
+            );
+            goto secret_setup_failed;
+        }
+        pending->secret_guest_fd = g_unix_fd_list_get(
+            fd_list, fd_index, &error
+        );
+        if (pending->secret_guest_fd < 0)
+            goto secret_setup_failed;
+        pending->secret_host_fd = create_secret_memfd();
+        if (pending->secret_host_fd < 0) {
+            g_set_error(
+                &error, G_IO_ERROR, g_io_error_from_errno(errno),
+                "Could not create the secret transport: %s",
+                g_strerror(errno)
+            );
+            goto secret_setup_failed;
+        }
+        host_fd_list = g_unix_fd_list_new();
+        for (index = 0; index < count; index++) {
+            int descriptor = index == fd_index
+                ? pending->secret_host_fd
+                : g_unix_fd_list_get(fd_list, index, &error);
+            int appended;
+
+            if (descriptor < 0)
+                goto secret_setup_failed;
+            appended = g_unix_fd_list_append(
+                host_fd_list, descriptor, &error
+            );
+            if (index != fd_index)
+                close(descriptor);
+            if (appended < 0)
+                goto secret_setup_failed;
+        }
+        fd_list = host_fd_list;
+    }
     call = g_new0(HostCall, 1);
     call->portal = portal;
     call->pending = pending;
@@ -1031,7 +1228,26 @@ static void backend_method_call(
         G_DBUS_CALL_FLAGS_NONE, -1, fd_list, NULL,
         host_call_done, call
     );
+    g_clear_object(&host_fd_list);
     g_variant_type_free(reply_type);
+    g_free(host_interface);
+    return;
+
+secret_setup_failed:
+    g_dbus_method_invocation_return_gerror(invocation, error);
+    g_clear_error(&error);
+    g_clear_object(&host_fd_list);
+    g_variant_unref(host_parameters);
+    if (pending->request_registration != 0)
+        g_dbus_connection_unregister_object(
+            portal->guest, pending->request_registration
+        );
+    if (pending->guest_handle != NULL)
+        g_hash_table_remove(
+            portal->pending_by_guest, pending->guest_handle
+        );
+    else
+        pending_free(pending);
     g_free(host_interface);
 }
 
@@ -1372,6 +1588,7 @@ int main(void)
     guint host_watcher;
     guint owner;
 
+    signal(SIGPIPE, SIG_IGN);
     space_name = g_getenv("SPACES_NAME");
     if (space_name == NULL || *space_name == '\0') {
         g_printerr("spaces-portal: SPACES_NAME is unavailable\n");

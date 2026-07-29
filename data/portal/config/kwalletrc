@@ -1,0 +1,17 @@
+[Wallet]
+Enabled[$i]=true
+apiEnabled[$i]=true
+Default Wallet[$i]=spaces-managed-v1
+Local Wallet[$i]=spaces-managed-v1
+Use One Wallet[$i]=true
+First Use[$i]=false
+Leave Open[$i]=true
+Close When Idle[$i]=false
+Close on Screensaver[$i]=false
+Prompt on Open[$i]=false
+
+[KSecretD]
+Enabled[$i]=true
+
+[org.freedesktop.secrets]
+apiEnabled[$i]=true

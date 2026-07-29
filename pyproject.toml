@@ -57,6 +57,9 @@ spaces = ["overlay/*.png"]
 "lib/systemd/system" = ["data/spaces@.service"]
 "share/spaces/portal/dbus-1/services" = [
   "data/portal/dbus-1/services/org.freedesktop.impl.portal.desktop.spaces.service",
+  "data/portal/dbus-1/services/org.freedesktop.secrets.service",
+  "data/portal/dbus-1/services/org.kde.secretservicecompat.service",
+  "data/portal/dbus-1/services/org.kde.kwalletd5.service",
 ]
 "share/spaces/portal/xdg-desktop-portal" = [
   "data/portal/xdg-desktop-portal/spaces-portals.conf",
@@ -66,4 +69,7 @@ spaces = ["overlay/*.png"]
 ]
 "share/spaces/portal/systemd/user" = [
   "data/portal/systemd/user/spaces-portal.service",
+]
+"share/spaces/portal/config" = [
+  "data/portal/config/kwalletrc",
 ]

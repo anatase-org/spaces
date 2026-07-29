@@ -3,6 +3,7 @@ from __future__ import annotations
 import configparser
 import ctypes
 import hashlib
+import hmac
 import os
 import shlex
 import socket
@@ -31,6 +32,7 @@ HOST_INTERFACES = {
     "RemoteDesktop",
     "ScreenCast",
     "Screenshot",
+    "Secret",
     "Settings",
     "Wallpaper",
 }
@@ -69,9 +71,6 @@ class PortalConfigurationTests(unittest.TestCase):
                 "kde",
             )
         self.assertEqual(
-            preferred["org.freedesktop.impl.portal.Secret"], "none"
-        )
-        self.assertEqual(
             preferred["org.freedesktop.impl.portal.Lockdown"], "none"
         )
 
@@ -94,7 +93,7 @@ class PortalConfigurationTests(unittest.TestCase):
         policy = "\n".join(arguments)
         for name in HOST_INTERFACES:
             self.assertIn(f"org.freedesktop.portal.{name}.*", policy)
-        for name in (*SPACE_INTERFACES, "Secret", "Lockdown"):
+        for name in (*SPACE_INTERFACES, "Lockdown"):
             self.assertNotIn(f"org.freedesktop.portal.{name}.*", policy)
         self.assertNotIn("org.freedesktop.portal.*=*", policy)
         self.assertNotIn("--talk=", policy)
@@ -139,12 +138,14 @@ class PortalConfigurationTests(unittest.TestCase):
             frontend = rootfs / session.GUEST_PORTAL_FRONTENDS[0]
             kde = rootfs / session.GUEST_KDE_PORTAL
             pipewire = rootfs / session.GUEST_PIPEWIRE_CONFIGS[0]
+            kwallet = rootfs / session.GUEST_KWALLET_PROVIDERS[0]
             services = assets / "dbus-1" / "services"
             portal_data = assets / "xdg-desktop-portal"
             for path in (
                 frontend.parent,
                 kde.parent,
                 pipewire.parent,
+                kwallet.parent,
                 services,
                 portal_data,
             ):
@@ -168,6 +169,7 @@ class PortalConfigurationTests(unittest.TestCase):
             frontend.write_text("", encoding="utf-8")
             kde.write_text("", encoding="utf-8")
             pipewire.write_text("", encoding="utf-8")
+            kwallet.write_text("", encoding="utf-8")
             with mock.patch.object(session, "PORTAL_DATA_BINDS", binds):
                 self.assertEqual(
                     session.portal_bind_arguments(rootfs),
@@ -178,6 +180,36 @@ class PortalConfigurationTests(unittest.TestCase):
                         "/usr/local/share/xdg-desktop-portal",
                     ),
                 )
+
+    def test_secret_activation_and_wallet_configuration_are_managed(self) -> None:
+        services = ROOT / "data" / "portal" / "dbus-1" / "services"
+        for name in (
+            "org.freedesktop.secrets",
+            "org.kde.secretservicecompat",
+            "org.kde.kwalletd5",
+        ):
+            service = configparser.ConfigParser()
+            service.optionxform = str
+            service.read(services / f"{name}.service", encoding="utf-8")
+            self.assertEqual(service["D-BUS Service"]["Name"], name)
+            self.assertEqual(
+                service["D-BUS Service"]["Exec"],
+                "/run/spaces-host/bin/spaces-secret-helper "
+                f"--activation-name {name}",
+            )
+
+        wallet = (
+            ROOT / "data" / "portal" / "config" / "kwalletrc"
+        ).read_text(encoding="utf-8")
+        for entry in (
+            "Default Wallet[$i]=spaces-managed-v1",
+            "Local Wallet[$i]=spaces-managed-v1",
+            "Use One Wallet[$i]=true",
+            "Close When Idle[$i]=false",
+            "Close on Screensaver[$i]=false",
+            "apiEnabled[$i]=true",
+        ):
+            self.assertIn(entry, wallet)
 
 
 class PortalProxyTests(unittest.TestCase):
@@ -580,6 +612,111 @@ class PortalNativeTests(unittest.TestCase):
                 host_results,
             ):
                 library.g_variant_unref(variant)
+
+    def test_secret_derivations_are_domain_separated_and_stable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            flags = subprocess.run(
+                ["pkg-config", "--cflags", "--libs", "gio-unix-2.0"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            portal_library = root / "portal.so"
+            helper_library = root / "helper.so"
+            for source, output in (
+                ("spaces_portal.c", portal_library),
+                ("spaces_secret_helper.c", helper_library),
+            ):
+                subprocess.run(
+                    [
+                        os.environ.get("CC", "cc"),
+                        "-shared",
+                        "-fPIC",
+                        "-std=gnu11",
+                        "-Wno-unused-function",
+                        "-o",
+                        str(output),
+                        str(ROOT / "native" / source),
+                        *shlex.split(flags.stdout),
+                    ],
+                    check=True,
+                )
+
+            portal = ctypes.CDLL(str(portal_library))
+            helper = ctypes.CDLL(str(helper_library))
+            byte_pointer = ctypes.POINTER(ctypes.c_ubyte)
+            portal.portal_derive_secret.argtypes = [
+                byte_pointer,
+                ctypes.c_size_t,
+                ctypes.c_char_p,
+                byte_pointer,
+            ]
+            portal.portal_derive_secret.restype = ctypes.c_int
+            helper.spaces_derive_kwallet_key.argtypes = [
+                byte_pointer,
+                byte_pointer,
+            ]
+            helper.spaces_derive_kwallet_key.restype = ctypes.c_int
+            helper.spaces_prepare_headless_qt.argtypes = []
+            helper.spaces_prepare_headless_qt.restype = None
+
+            host = bytes(range(32))
+            host_buffer = (ctypes.c_ubyte * len(host)).from_buffer_copy(host)
+
+            def derive(app_id: str) -> bytes:
+                output = (ctypes.c_ubyte * 64)()
+                self.assertTrue(
+                    portal.portal_derive_secret(
+                        host_buffer,
+                        len(host),
+                        app_id.encode(),
+                        output,
+                    )
+                )
+                return bytes(output)
+
+            app_id = "org.example.ü"
+            expected = hmac.digest(
+                host,
+                b"org.anatase.spaces.portal-secret.v1\0"
+                + len(app_id.encode()).to_bytes(4, "big")
+                + app_id.encode(),
+                "sha512",
+            )
+            self.assertEqual(derive(app_id), expected)
+            self.assertNotEqual(derive(app_id), derive(""))
+            self.assertEqual(derive(""), derive(""))
+
+            portal_buffer = (ctypes.c_ubyte * 64).from_buffer_copy(expected)
+            wallet = (ctypes.c_ubyte * 56)()
+            self.assertTrue(
+                helper.spaces_derive_kwallet_key(portal_buffer, wallet)
+            )
+            self.assertEqual(
+                bytes(wallet),
+                hmac.digest(
+                    expected,
+                    b"org.anatase.spaces.kwallet-unlock.v1\0",
+                    "sha512",
+                )[:56],
+            )
+
+            libc = ctypes.CDLL(None)
+            libc.getenv.argtypes = [ctypes.c_char_p]
+            libc.getenv.restype = ctypes.c_char_p
+            previous_platform = os.environ.get("QT_QPA_PLATFORM")
+            try:
+                helper.spaces_prepare_headless_qt()
+                self.assertEqual(
+                    libc.getenv(b"QT_QPA_PLATFORM"), b"offscreen"
+                )
+            finally:
+                if previous_platform is None:
+                    os.environ.pop("QT_QPA_PLATFORM", None)
+                    libc.unsetenv(b"QT_QPA_PLATFORM")
+                else:
+                    os.environ["QT_QPA_PLATFORM"] = previous_platform
 
 
 if __name__ == "__main__":

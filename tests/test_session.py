@@ -238,6 +238,10 @@ class DesktopPathTests(unittest.TestCase):
             self.assertEqual(
                 plan.environment["XDG_CURRENT_DESKTOP"], "Spaces"
             )
+            self.assertEqual(
+                plan.environment["XDG_CONFIG_DIRS"],
+                "/run/spaces-host/config:/etc/xdg",
+            )
             self.assertNotIn("DBUS_SESSION_BUS_ADDRESS", plan.environment)
             self.assertNotIn("XDG_RUNTIME_DIR", plan.environment)
             self.assertNotIn("XDG_SESSION_ID", plan.environment)

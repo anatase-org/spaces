@@ -54,6 +54,8 @@ class DistributionDriverTests(unittest.TestCase):
         self.assertIn("dnf5", command)
         self.assertIn("systemd-pam", command)
         self.assertIn("dbus-tools", command)
+        self.assertIn("qca-qt6-ossl", command)
+        self.assertIn("qt6-qtwayland", command)
         with self.assertRaises(DistributionError):
             driver.validate({"id": "fedora", "version": "45"})
 
@@ -99,6 +101,7 @@ class DistributionDriverTests(unittest.TestCase):
             "polkit",
             "pipewire",
             "xdg-desktop-portal-kde",
+            "kwallet",
         ):
             self.assertIn(package, selected)
 
@@ -264,6 +267,9 @@ class DistributionDriverTests(unittest.TestCase):
                 kali._chroot_command(rootfs, "apt-get", "update"),
             )
             self.assertIn("--no-install-recommends", commands[3])
+            self.assertIn("kwallet6", commands[3])
+            self.assertIn("libqca-qt6-plugins", commands[3])
+            self.assertIn("qt6-wayland", commands[3])
             self.assertEqual(commands[4][-2:], ["--yes", "kali-linux-default"])
             self.assertEqual(commands[5], ["umount", str(rootfs / "proc")])
             self.assertFalse((rootfs / kali.POLICY_RC_D).exists())

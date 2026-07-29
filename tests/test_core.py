@@ -41,6 +41,20 @@ class CoreTests(unittest.TestCase):
         self.assertIn("pipewire", ubuntu.PACKAGES)
         self.assertIn("xdg-desktop-portal", ubuntu.PACKAGES)
         self.assertIn("xdg-desktop-portal-kde", ubuntu.PACKAGES)
+        self.assertEqual(
+            ubuntu.SECRET_PACKAGES,
+            {
+                "noble": (
+                    "libkf5wallet-bin",
+                    "libqca-qt5-2-plugins",
+                ),
+                "resolute": (
+                    "kwallet6",
+                    "libqca-qt6-plugins",
+                    "qt6-wayland",
+                ),
+            },
+        )
         self.assertNotIn("python3", ubuntu.PACKAGES)
 
     def test_ubuntu_reconciles_host_authentication_profile(self) -> None:

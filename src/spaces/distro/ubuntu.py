@@ -28,6 +28,14 @@ PACKAGES = (
     "xdg-desktop-portal",
     "xdg-desktop-portal-kde",
 )
+SECRET_PACKAGES = {
+    "noble": ("libkf5wallet-bin", "libqca-qt5-2-plugins"),
+    "resolute": (
+        "kwallet6",
+        "libqca-qt6-plugins",
+        "qt6-wayland",
+    ),
+}
 HOST_AUTHENTICATION_PROFILE = Path(
     "/usr/share/spaces/pam/spaces.ubuntu"
 )
@@ -99,6 +107,7 @@ class UbuntuDistribution(Distribution):
 
     def bootstrap(self, metadata: Mapping[str, Any], rootfs: Path) -> None:
         version = str(metadata["version"])
+        packages = (*PACKAGES, *SECRET_PACKAGES[version])
         print(
             _(
                 "Bootstrapping Ubuntu {version}...",
@@ -116,7 +125,7 @@ class UbuntuDistribution(Distribution):
             print(
                 _(
                     "Adding additional packages:\n{packages}",
-                    packages=", ".join(PACKAGES),
+                    packages=", ".join(packages),
                 ),
                 flush=True,
             )
@@ -127,7 +136,7 @@ class UbuntuDistribution(Distribution):
                     "install",
                     "--yes",
                     "--no-install-recommends",
-                    *PACKAGES,
+                    *packages,
                 ),
                 check=True,
             )
