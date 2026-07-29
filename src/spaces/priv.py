@@ -12,6 +12,7 @@ import json
 import os
 import pwd
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -42,11 +43,56 @@ def _root_owned_directory(path: Path) -> None:
 
 
 @contextmanager
-def _state_lock() -> Iterator[None]:
+def _space_lock(space: Path, *, create: bool = False) -> Iterator[None]:
+    """Serialize mutations to one space without blocking other spaces."""
+
     _root_owned_directory(core.STATE_ROOT)
-    descriptor = os.open(core.STATE_ROOT, os.O_RDONLY | os.O_DIRECTORY)
+    if space.parent != core.STATE_ROOT:
+        raise core.SpacesError(
+            _("Space lock path is outside the Spaces state directory.")
+        )
+    if space.is_symlink() or (space.exists() and not space.is_dir()):
+        raise core.SpacesError(
+            _("Unsafe space path: {space}.", space=space)
+        )
+    if not space.exists() and not create:
+        raise core.SpacesError(
+            _("Space {name!r} does not exist.", name=space.name)
+        )
+    if create:
+        _root_owned_directory(space)
+    try:
+        descriptor = os.open(
+            space,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+    except OSError as error:
+        raise core.SpacesError(
+            _("Could not lock space {name!r}.", name=space.name)
+        ) from error
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX)
+        opened = os.fstat(descriptor)
+        try:
+            current = space.stat(follow_symlinks=False)
+        except OSError as error:
+            raise core.SpacesError(
+                _(
+                    "Space {name!r} changed while waiting for its lock.",
+                    name=space.name,
+                )
+            ) from error
+        if (
+            not stat.S_ISDIR(current.st_mode)
+            or opened.st_dev != current.st_dev
+            or opened.st_ino != current.st_ino
+        ):
+            raise core.SpacesError(
+                _(
+                    "Space {name!r} changed while waiting for its lock.",
+                    name=space.name,
+                )
+            )
         yield
     finally:
         fcntl.flock(descriptor, fcntl.LOCK_UN)
@@ -326,18 +372,12 @@ def create(info: dict[str, Any]) -> None:
     distribution = info["distribution"]
     space = core.STATE_ROOT / name
 
-    with _state_lock():
+    with _space_lock(space, create=True):
         subprocess.run(
             ["/usr/bin/systemctl", "stop", f"spaces@{name}.service"],
             check=True,
         )
         shortcuts.remove(name)
-        if space.is_symlink() or (space.exists() and not space.is_dir()):
-            raise core.SpacesError(
-                _("Unsafe space path: {space}.", space=space)
-            )
-        _root_owned_directory(space)
-
         home = space / "home"
         if home.is_symlink() or (home.exists() and not home.is_dir()):
             raise core.SpacesError(_("Unsafe home path: {home}.", home=home))
@@ -367,11 +407,7 @@ def configure(patch: dict[str, Any]) -> None:
     update = patch["permissions"]["user"]
 
     space = core.STATE_ROOT / patch["name"]
-    with _state_lock():
-        if space.is_symlink() or not space.is_dir():
-            raise core.SpacesError(
-                _("Space {name!r} does not exist.", name=patch["name"])
-            )
+    with _space_lock(space):
         info_path = space / "info.json"
         if info_path.is_symlink() or not info_path.is_file():
             raise core.SpacesError(
@@ -429,11 +465,7 @@ def delete(request: dict[str, Any]) -> None:
     name = request["name"]
     space = core.STATE_ROOT / name
 
-    with _state_lock():
-        if space.is_symlink() or not space.is_dir():
-            raise core.SpacesError(
-                _("Space {name!r} does not exist.", name=name)
-            )
+    with _space_lock(space):
         _assert_no_mounts(space)
         shortcuts.remove(name)
         shutil.rmtree(space)

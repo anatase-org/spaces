@@ -6,6 +6,7 @@ import os
 import stat
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -148,6 +149,157 @@ class PrivilegedTests(unittest.TestCase):
             "Bootstrapping Ubuntu Resolute (26.04)...",
             flush=True,
         )
+
+    def test_space_lock_owns_the_specific_space_directory(self) -> None:
+        space = self.state_root / "work"
+        targets: list[Path] = []
+
+        def flock(descriptor: int, operation: int) -> None:
+            if operation == priv.fcntl.LOCK_EX:
+                targets.append(
+                    Path(os.readlink(f"/proc/self/fd/{descriptor}"))
+                )
+
+        with mock.patch.object(priv.fcntl, "flock", side_effect=flock):
+            with priv._space_lock(space, create=True):
+                pass
+
+        self.assertEqual(targets, [space])
+
+    def test_different_space_locks_can_run_concurrently(self) -> None:
+        release = threading.Event()
+        entered = {
+            "first": threading.Event(),
+            "second": threading.Event(),
+        }
+        errors: list[BaseException] = []
+
+        def hold(name: str) -> None:
+            try:
+                with priv._space_lock(
+                    self.state_root / name,
+                    create=True,
+                ):
+                    entered[name].set()
+                    release.wait(2)
+            except BaseException as error:
+                errors.append(error)
+
+        threads = [
+            threading.Thread(target=hold, args=(name,))
+            for name in ("first", "second")
+        ]
+        try:
+            threads[0].start()
+            self.assertTrue(entered["first"].wait(1))
+            threads[1].start()
+            self.assertTrue(entered["second"].wait(1))
+        finally:
+            release.set()
+            for thread in threads:
+                thread.join(2)
+
+        self.assertEqual(errors, [])
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+
+    def test_same_space_locks_remain_serialized(self) -> None:
+        space = self.state_root / "work"
+        release = threading.Event()
+        first_entered = threading.Event()
+        second_started = threading.Event()
+        second_entered = threading.Event()
+        errors: list[BaseException] = []
+
+        def first() -> None:
+            try:
+                with priv._space_lock(space, create=True):
+                    first_entered.set()
+                    release.wait(2)
+            except BaseException as error:
+                errors.append(error)
+
+        def second() -> None:
+            try:
+                second_started.set()
+                with priv._space_lock(space, create=True):
+                    second_entered.set()
+            except BaseException as error:
+                errors.append(error)
+
+        first_thread = threading.Thread(target=first)
+        second_thread = threading.Thread(target=second)
+        try:
+            first_thread.start()
+            self.assertTrue(first_entered.wait(1))
+            second_thread.start()
+            self.assertTrue(second_started.wait(1))
+            self.assertFalse(second_entered.wait(0.1))
+        finally:
+            release.set()
+            first_thread.join(2)
+            second_thread.join(2)
+
+        self.assertTrue(second_entered.is_set())
+        self.assertEqual(errors, [])
+        self.assertFalse(first_thread.is_alive())
+        self.assertFalse(second_thread.is_alive())
+
+    def test_create_bootstraps_different_spaces_concurrently(self) -> None:
+        release = threading.Event()
+        entered = {
+            "first": threading.Event(),
+            "second": threading.Event(),
+        }
+        errors: list[BaseException] = []
+        driver = mock.Mock()
+
+        def bootstrap(
+            metadata: dict[str, object],
+            rootfs: Path,
+        ) -> None:
+            entered[rootfs.parent.name].set()
+            release.wait(2)
+
+        driver.bootstrap.side_effect = bootstrap
+
+        def create(name: str) -> None:
+            try:
+                priv.create(
+                    core.create_info(
+                        name,
+                        {"id": "custom"},
+                        self.identity,
+                        "basic",
+                        [],
+                    )
+                )
+            except BaseException as error:
+                errors.append(error)
+
+        threads = [
+            threading.Thread(target=create, args=(name,))
+            for name in ("first", "second")
+        ]
+        with (
+            mock.patch.object(priv, "get_driver", return_value=driver),
+            mock.patch.object(priv.subprocess, "run"),
+        ):
+            try:
+                threads[0].start()
+                self.assertTrue(entered["first"].wait(1))
+                threads[1].start()
+                self.assertTrue(entered["second"].wait(1))
+            finally:
+                release.set()
+                for thread in threads:
+                    thread.join(2)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(driver.bootstrap.call_count, 2)
+        for name in ("first", "second"):
+            self.assertTrue(
+                (self.state_root / name / "info.json").is_file()
+            )
 
     def test_custom_stops_service_without_bootstrapping(self) -> None:
         info = core.create_info(
