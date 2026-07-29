@@ -783,6 +783,7 @@ class NativeLauncherTests(unittest.TestCase):
         agent.write_text(
             "#!/bin/sh\n"
             "printf '%s' \"$$\" > \"$SPACES_AGENT_MARKER\"\n"
+            "printf 'Authentication agent result: true\\n' >&2\n"
             "trap 'printf stopped > \"$SPACES_AGENT_STOPPED\"; exit 0' TERM\n"
             "while :; do sleep 0.05; done\n",
             encoding="utf-8",
@@ -827,6 +828,61 @@ class NativeLauncherTests(unittest.TestCase):
                 except ProcessLookupError:
                     pass
 
+    def test_waits_for_polkit_agent_registration(self) -> None:
+        marker = Path(self.temporary.name) / "registering-agent-pid"
+        ready = Path(self.temporary.name) / "registering-agent-ready"
+        stopped = Path(self.temporary.name) / "registering-agent-stopped"
+        agent = Path(self.temporary.name) / "registering-agent"
+        agent.write_text(
+            "#!/bin/sh\n"
+            "printf '%s' \"$$\" > \"$SPACES_AGENT_MARKER\"\n"
+            "sleep 0.2\n"
+            "printf ready > \"$SPACES_AGENT_READY\"\n"
+            "printf 'Authentication agent result: true\\n' >&2\n"
+            "trap 'printf stopped > \"$SPACES_AGENT_STOPPED\"; exit 0' TERM\n"
+            "while :; do sleep 0.05; done\n",
+            encoding="utf-8",
+        )
+        agent.chmod(0o755)
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "SPACES_AGENT_MARKER": str(marker),
+                "SPACES_AGENT_READY": str(ready),
+                "SPACES_AGENT_STOPPED": str(stopped),
+            }
+        )
+        completed = subprocess.run(
+            [
+                self.launcher,
+                "--agent",
+                agent,
+                "--",
+                "/bin/sh",
+                "-c",
+                f"test -f {shlex.quote(str(ready))}",
+            ],
+            check=False,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+
+        try:
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(completed.stderr, "")
+            self.assertTrue(self.wait_for_path(stopped))
+        finally:
+            if marker.exists() and not stopped.exists():
+                try:
+                    os.killpg(
+                        int(marker.read_text(encoding="utf-8")),
+                        signal.SIGTERM,
+                    )
+                except ProcessLookupError:
+                    pass
+
     def test_hides_polkit_agent_stdio(self) -> None:
         marker = Path(self.temporary.name) / "agent-pid"
         stopped = Path(self.temporary.name) / "agent-stopped"
@@ -834,6 +890,7 @@ class NativeLauncherTests(unittest.TestCase):
         agent.write_text(
             "#!/bin/sh\n"
             "printf '%s' \"$$\" > \"$SPACES_AGENT_MARKER\"\n"
+            "printf 'Authentication agent result: true\\n' >&2\n"
             "printf 'agent stdout spam\\n'\n"
             "printf 'agent stderr spam\\n' >&2\n"
             "trap 'printf stopped > \"$SPACES_AGENT_STOPPED\"; exit 0' TERM\n"
