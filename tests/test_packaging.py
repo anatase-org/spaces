@@ -113,6 +113,17 @@ class PackagingTests(unittest.TestCase):
         )
         self.assertIn("Requires:       systemd\n", spec)
         self.assertIn("Requires:       systemd-container\n", spec)
+        self.assertIn("Requires:       container-selinux\n", spec)
+        self.assertIn("BuildRequires:  container-selinux\n", spec)
+        self.assertIn(
+            "restorecon -RF %{_bindir}/spaces.priv "
+            "%{_localstatedir}/lib/spaces",
+            spec,
+        )
+        self.assertIn("selinux/spaces.pp", spec)
+        self.assertTrue((ROOT / "selinux" / "spaces.te").is_file())
+        self.assertTrue((ROOT / "selinux" / "spaces.fc").is_file())
+        self.assertTrue((ROOT / "selinux" / "spaces.if").is_file())
 
     def test_polkit_policy_scopes_authorization_by_operation(self) -> None:
         policy = ROOT / "data" / "org.anatase.spaces.policy"

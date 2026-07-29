@@ -40,6 +40,10 @@ SYSTEMD_ESCAPE = "/usr/bin/systemd-escape"
 SYSTEMD_UMOUNT = "/usr/bin/systemd-umount"
 BUSCTL = "/usr/bin/busctl"
 API_VFS_WRITABLE = "SYSTEMD_NSPAWN_API_VFS_WRITABLE"
+SELINUXFS = Path("/sys/fs/selinux")
+SELINUX_POLICY_PACKAGE = Path("/usr/share/selinux/packages/spaces.pp")
+SELINUX_PROCESS_CONTEXT = "system_u:system_r:spaces_container_t:s0"
+SELINUX_APIFS_CONTEXT = "system_u:object_r:spaces_apifs_file_t:s0"
 PING_GROUP_RANGE = Path("/proc/sys/net/ipv4/ping_group_range")
 UNPRIVILEGED_PING_GROUP_RANGE = (0, 2_147_483_647)
 PING_EXECUTABLES = ("/usr/bin/ping", "/bin/ping")
@@ -1778,6 +1782,25 @@ def _device_bind_arguments(
     )
 
 
+def _selinux_arguments() -> tuple[str, ...]:
+    """Select the packaged SELinux labels when its policy is available."""
+
+    if not (SELINUXFS / "enforce").is_file():
+        return ()
+    if not SELINUX_POLICY_PACKAGE.is_file():
+        logger.warning(
+            _(
+                "SELinux is active, but the Spaces policy package is "
+                "missing; launching without an explicit container context."
+            )
+        )
+        return ()
+    return (
+        f"--selinux-context={SELINUX_PROCESS_CONTEXT}",
+        f"--selinux-apifs-context={SELINUX_APIFS_CONTEXT}",
+    )
+
+
 def _command(
     space_name: str,
     rootfs: Path,
@@ -1813,6 +1836,7 @@ def _command(
         "--settings=no",
         "--notify-ready=yes",
         "--resolv-conf=bind-host",
+        *_selinux_arguments(),
         *(
             ("--system-call-filter=perf_event_open",)
             if kernel_caps

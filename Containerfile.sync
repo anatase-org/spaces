@@ -4,8 +4,10 @@ RUN dnf -y install \
         rpm-build \
         gcc \
         binutils \
+        container-selinux \
         glib2-devel \
         pam-devel \
+        selinux-policy-devel \
         systemd-rpm-macros \
         python3-devel \
         python3-build \

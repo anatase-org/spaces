@@ -10,9 +10,11 @@ Source:       	https://github.com/anatase-org/spaces/archive/refs/tags/v%{versio
 ExclusiveArch:  x86_64 aarch64
 BuildRequires:  gcc
 BuildRequires:  binutils
+BuildRequires:  container-selinux
 BuildRequires:  glib2-devel
 BuildRequires:  pkgconfig(gio-unix-2.0)
 BuildRequires:  pam-devel
+BuildRequires:  selinux-policy-devel
 BuildRequires:  systemd-rpm-macros
 BuildRequires:  python3-devel
 BuildRequires:  python3-build
@@ -33,6 +35,9 @@ Requires:       systemd
 Requires:       systemd-container
 Requires:       glib2
 Requires:       xdg-dbus-proxy
+Requires:       container-selinux
+Requires(post): policycoreutils
+Requires(postun): policycoreutils
 
 %description
 Spaces provide a chroot-like sandboxing environment for you to access your favorite distributions: Arch, Fedora, Kali, and Ubuntu. A simple permission system ensures your local files and credentials remain secure, even if your space is compromised. Spaces are constructed directly using packages from your chosen distribution repositories with signature enforcement. No container middleman or surprises.
@@ -44,12 +49,15 @@ Spaces provide a chroot-like sandboxing environment for you to access your favor
 %{python3} -m build --wheel --no-isolation
 %make_build -C native
 %{__make} -C native check-guest-abi
+%{__make} -f %{_datadir}/selinux/devel/Makefile -C selinux spaces.pp
 
 %install
 %{python3} -m installer --destdir="%{buildroot}" dist/*.whl
 %make_install -C native LIBEXECDIR=/usr/lib/spaces
 install -Dm644 data/pam/spaces.system-auth \
   %{buildroot}%{_sysconfdir}/pam.d/spaces
+install -Dm644 selinux/spaces.pp \
+  %{buildroot}%{_datadir}/selinux/packages/spaces.pp
 for distro in arch fedora ubuntu; do
   install -Dm644 "data/applications/spaces-${distro}.desktop" \
     "%{buildroot}%{_datadir}/applications/spaces-${distro}.desktop"
@@ -59,6 +67,9 @@ for distro in arch fedora ubuntu; do
 done
 
 %post
+%selinux_modules_install %{_datadir}/selinux/packages/spaces.pp
+restorecon -RF %{_bindir}/spaces.priv %{_localstatedir}/lib/spaces \
+  %{_rundir}/spaces 2>/dev/null || :
 %systemd_post spaces@.service
 %systemd_user_post spaces@.service
 
@@ -69,6 +80,7 @@ done
 %postun
 %systemd_postun_with_restart spaces@.service
 %systemd_user_postun_with_restart spaces@.service
+%selinux_modules_uninstall spaces
 
 %files
 %doc readme.md
@@ -76,6 +88,7 @@ done
 %{_bindir}/%{name}*
 %{python3_sitelib}/%{name}*
 %{_datadir}/polkit-1/actions/org.anatase.spaces.policy
+%{_datadir}/selinux/packages/spaces.pp
 %dir %{_datadir}/spaces
 %dir %{_datadir}/spaces/pam
 %{_datadir}/spaces/pam/spaces.common-auth

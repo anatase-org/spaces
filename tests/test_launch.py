@@ -311,6 +311,11 @@ class LaunchTests(unittest.TestCase):
                         "Popen",
                         side_effect=run,
                     ) as run_mock,
+                    mock.patch.object(
+                        launch_module,
+                        "_selinux_arguments",
+                        return_value=(),
+                    ),
                     mock.patch.object(launch_module.signal, "signal"),
                 ):
                     self.assertEqual(launch_module.launch("work"), 42)
@@ -347,6 +352,52 @@ class LaunchTests(unittest.TestCase):
                         launch_module.API_VFS_WRITABLE,
                         environment,
                     )
+
+    def test_selinux_arguments_require_active_selinux_and_policy(self) -> None:
+        selinuxfs = Path(self.temporary.name) / "selinux"
+        policy = Path(self.temporary.name) / "spaces.pp"
+        with (
+            mock.patch.object(launch_module, "SELINUXFS", selinuxfs),
+            mock.patch.object(
+                launch_module,
+                "SELINUX_POLICY_PACKAGE",
+                policy,
+            ),
+        ):
+            self.assertEqual(launch_module._selinux_arguments(), ())
+            selinuxfs.mkdir()
+            (selinuxfs / "enforce").touch()
+            self.assertEqual(launch_module._selinux_arguments(), ())
+            policy.touch()
+            self.assertEqual(
+                launch_module._selinux_arguments(),
+                (
+                    "--selinux-context="
+                    "system_u:system_r:spaces_container_t:s0",
+                    "--selinux-apifs-context="
+                    "system_u:object_r:spaces_apifs_file_t:s0",
+                ),
+            )
+
+    def test_command_adds_available_selinux_contexts(self) -> None:
+        contexts = (
+            "--selinux-context=test_process_t",
+            "--selinux-apifs-context=test_file_t",
+        )
+        with mock.patch.object(
+            launch_module,
+            "_selinux_arguments",
+            return_value=contexts,
+        ):
+            arguments = launch_module._command(
+                "work",
+                self.rootfs,
+                self.home,
+                "basic",
+                "basic",
+            )
+        for context in contexts:
+            self.assertIn(context, arguments)
 
     def test_development_kernel_capabilities_extend_launch(self) -> None:
         for level in ("development", "admin"):

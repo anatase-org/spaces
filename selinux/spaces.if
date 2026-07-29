@@ -1,0 +1,66 @@
+## <summary>SELinux policy for Spaces systemd-nspawn environments.</summary>
+
+########################################
+## <summary>
+## Execute Spaces in its host supervisor domain.
+## </summary>
+## <param name="domain">
+## <summary>Domain allowed to transition.</summary>
+## </param>
+#
+interface(`spaces_domtrans',`
+	gen_require(`
+		type spaces_t, spaces_exec_t;
+	')
+
+	corecmd_search_bin($1)
+	domtrans_pattern($1, spaces_exec_t, spaces_t)
+')
+
+########################################
+## <summary>
+## Read and write persistent Spaces state.
+## </summary>
+## <param name="domain">
+## <summary>Domain allowed to manage the state.</summary>
+## </param>
+#
+interface(`spaces_manage_files',`
+	gen_require(`
+		type spaces_file_t;
+	')
+
+	files_search_var_lib($1)
+	manage_dirs_pattern($1, spaces_file_t, spaces_file_t)
+	manage_files_pattern($1, spaces_file_t, spaces_file_t)
+	manage_lnk_files_pattern($1, spaces_file_t, spaces_file_t)
+')
+
+########################################
+## <summary>
+## Administer Spaces processes and files.
+## </summary>
+## <param name="domain">
+## <summary>Administrative domain.</summary>
+## </param>
+## <param name="role">
+## <summary>Administrative role.</summary>
+## </param>
+## <rolecap/>
+#
+interface(`spaces_admin',`
+	gen_require(`
+		type spaces_t, spaces_container_t;
+		type spaces_file_t, spaces_apifs_file_t, spaces_var_run_t;
+	')
+
+	allow $1 { spaces_t spaces_container_t }:process signal_perms;
+	ps_process_pattern($1, { spaces_t spaces_container_t })
+
+	files_search_var_lib($1)
+	admin_pattern($1, spaces_file_t)
+	admin_pattern($1, spaces_apifs_file_t)
+
+	files_search_pids($1)
+	admin_pattern($1, spaces_var_run_t)
+')

@@ -1,0 +1,225 @@
+policy_module(spaces, 1.0.0)
+
+########################################
+#
+# Declarations
+#
+
+type spaces_exec_t;
+
+type spaces_file_t;
+container_file(spaces_file_t)
+svirt_file_types(spaces_file_t)
+
+type spaces_apifs_file_t;
+container_file(spaces_apifs_file_t)
+svirt_file_types(spaces_apifs_file_t)
+term_pty(spaces_apifs_file_t)
+
+type spaces_var_run_t;
+files_pid_file(spaces_var_run_t)
+
+# The host-side supervisor is a container runtime, while the nspawn payload
+# gets a separate, MCS-constrained container domain.
+container_runtime_domain_template(spaces)
+init_daemon_domain(spaces_t, spaces_exec_t)
+
+gen_require(`
+	attribute container_domain;
+')
+type spaces_container_t, container_domain;
+domain_type(spaces_container_t)
+domain_user_exemption_target(spaces_container_t)
+mls_rangetrans_target(spaces_container_t)
+mcs_constrained(spaces_container_t)
+role system_r types spaces_container_t;
+
+kernel_read_all_proc(spaces_container_t)
+allow spaces_container_t spaces_file_t:file entrypoint;
+
+virt_sandbox_net_domain(spaces_container_t)
+
+########################################
+#
+# Spaces host supervisor
+#
+
+allow spaces_t self:fifo_file rw_fifo_file_perms;
+allow spaces_t self:unix_stream_socket create_stream_socket_perms;
+
+manage_dirs_pattern(spaces_t, spaces_file_t, spaces_file_t)
+manage_files_pattern(spaces_t, spaces_file_t, spaces_file_t)
+manage_lnk_files_pattern(spaces_t, spaces_file_t, spaces_file_t)
+manage_fifo_files_pattern(spaces_t, spaces_file_t, spaces_file_t)
+manage_sock_files_pattern(spaces_t, spaces_file_t, spaces_file_t)
+manage_chr_files_pattern(spaces_t, spaces_file_t, spaces_file_t)
+manage_blk_files_pattern(spaces_t, spaces_file_t, spaces_file_t)
+files_var_lib_filetrans(spaces_t, spaces_file_t, dir, "spaces")
+
+manage_dirs_pattern(spaces_t, spaces_var_run_t, spaces_var_run_t)
+manage_files_pattern(spaces_t, spaces_var_run_t, spaces_var_run_t)
+manage_lnk_files_pattern(spaces_t, spaces_var_run_t, spaces_var_run_t)
+manage_fifo_files_pattern(spaces_t, spaces_var_run_t, spaces_var_run_t)
+manage_sock_files_pattern(spaces_t, spaces_var_run_t, spaces_var_run_t)
+files_pid_filetrans(spaces_t, spaces_var_run_t, dir, "spaces")
+
+# systemd-nspawn creates and mounts the API filesystem before it transitions
+# the guest init process into spaces_container_t.
+manage_dirs_pattern(spaces_t, spaces_apifs_file_t, spaces_apifs_file_t)
+manage_files_pattern(spaces_t, spaces_apifs_file_t, spaces_apifs_file_t)
+manage_lnk_files_pattern(spaces_t, spaces_apifs_file_t, spaces_apifs_file_t)
+manage_fifo_files_pattern(spaces_t, spaces_apifs_file_t, spaces_apifs_file_t)
+manage_sock_files_pattern(spaces_t, spaces_apifs_file_t, spaces_apifs_file_t)
+manage_chr_files_pattern(spaces_t, spaces_apifs_file_t, spaces_apifs_file_t)
+manage_blk_files_pattern(spaces_t, spaces_apifs_file_t, spaces_apifs_file_t)
+allow spaces_t spaces_apifs_file_t:{ file dir } mounton;
+allow spaces_t spaces_apifs_file_t:filesystem { mount remount unmount };
+
+# systemd-nspawn uses setexeccon(3) for --selinux-context before it executes
+# the container's init.
+allow spaces_t self:process setexec;
+allow spaces_t spaces_container_t:process transition;
+allow spaces_t spaces_container_t:process { signal sigkill sigstop signull };
+allow spaces_container_t spaces_t:process sigchld;
+allow spaces_t spaces_container_t:process { noatsecure rlimitinh siginh };
+
+corecmd_exec_bin(spaces_t)
+corecmd_exec_shell(spaces_t)
+files_read_etc_files(spaces_t)
+kernel_mounton_kernel_sysctl(spaces_t)
+miscfiles_read_localization(spaces_t)
+selinux_get_enforce_mode(spaces_t)
+systemd_login_watch_pid_dirs(spaces_t)
+systemd_login_watch_session_dirs(spaces_t)
+systemd_read_logind_sessions_files(spaces_t)
+systemd_machined_watch_pid_dirs(spaces_t)
+systemd_machined_read_pid_files(spaces_t)
+init_create_pid_dirs(spaces_t)
+init_delete_pid_dir_entry(spaces_t)
+init_manage_pid_files(spaces_t)
+
+# systemd-nspawn removes its per-machine directories below
+# /run/systemd/nspawn during teardown.  The init policy has interfaces for
+# creating those directories and removing their entries, but not for rmdir.
+gen_require(`
+	type init_var_run_t;
+')
+allow spaces_t init_var_run_t:dir rmdir;
+
+########################################
+#
+# Spaces container payload
+#
+
+# Persistent state is relabeled only by the host.  The guest may manage and
+# execute the restored spaces_file_t tree, but it cannot change SELinux
+# labels or create that type on unrelated tmpfs mounts.
+allow spaces_container_t spaces_file_t:dir_file_class_set map;
+manage_dirs_pattern(spaces_container_t, spaces_file_t, spaces_file_t)
+manage_files_pattern(spaces_container_t, spaces_file_t, spaces_file_t)
+exec_files_pattern(spaces_container_t, spaces_file_t, spaces_file_t)
+manage_lnk_files_pattern(spaces_container_t, spaces_file_t, spaces_file_t)
+manage_fifo_files_pattern(spaces_container_t, spaces_file_t, spaces_file_t)
+manage_sock_files_pattern(spaces_container_t, spaces_file_t, spaces_file_t)
+manage_chr_files_pattern(spaces_container_t, spaces_file_t, spaces_file_t)
+manage_blk_files_pattern(spaces_container_t, spaces_file_t, spaces_file_t)
+allow spaces_container_t spaces_file_t:chr_file {
+	mmap_file_perms watch watch_reads
+};
+allow spaces_container_t spaces_file_t:fifo_file watch;
+allow spaces_container_t spaces_file_t:{ file dir } mounton;
+allow spaces_container_t spaces_file_t:filesystem { mount remount unmount };
+
+# The guest systemd manages units within the cgroup subtree delegated by the
+# host service.
+fs_manage_cgroup_dirs(spaces_container_t)
+fs_manage_cgroup_files(spaces_container_t)
+fs_remount_cgroup(spaces_container_t)
+
+# Runtime files created by guest systemd remain tmpfs_t.  Access them
+# directly instead of transitioning them to the persistent spaces_file_t.
+fs_manage_tmpfs_dirs(spaces_container_t)
+fs_manage_tmpfs_files(spaces_container_t)
+fs_manage_tmpfs_symlinks(spaces_container_t)
+fs_manage_tmpfs_sockets(spaces_container_t)
+fs_manage_tmpfs_chr_files(spaces_container_t)
+fs_manage_tmpfs_blk_files(spaces_container_t)
+fs_mounton_tmpfs(spaces_container_t)
+
+# systemd builds mount namespaces and BPF filters for guest services.
+dev_getattr_all_chr_files(spaces_container_t)
+dev_mounton_sysfs(spaces_container_t)
+dev_remount_sysfs_fs(spaces_container_t)
+fs_remount_tmpfs(spaces_container_t)
+fs_unmount_tmpfs(spaces_container_t)
+kernel_mount_proc(spaces_container_t)
+kernel_unmount_proc(spaces_container_t)
+kernel_mounton_all_proc(spaces_container_t)
+kernel_mounton_all_sysctls(spaces_container_t)
+kernel_mounton_kernel_sysctl(spaces_container_t)
+allow spaces_container_t self:bpf {
+	map_create map_read map_write prog_load prog_run
+};
+
+gen_require(`
+	attribute domain;
+	type cgroup_t;
+	type device_t;
+	type hugetlbfs_t;
+	type mtrr_device_t;
+	type proc_t;
+	type sysctl_t;
+	type tmpfs_t;
+')
+allow spaces_container_t cgroup_t:file mounton;
+allow spaces_container_t device_t:filesystem { remount unmount };
+allow spaces_container_t hugetlbfs_t:filesystem { mount unmount };
+allow spaces_container_t mtrr_device_t:file mounton;
+allow spaces_container_t proc_t:filesystem remount;
+allow spaces_container_t sysctl_t:file mounton;
+manage_fifo_files_pattern(spaces_container_t, tmpfs_t, tmpfs_t)
+allow spaces_t domain:system status;
+
+# An interactive entry inherits the caller's keyring, but the guest payload
+# does not need to inspect it.
+domain_dontaudit_search_all_domains_keyrings(spaces_container_t)
+
+# systemd-nspawn labels its API filesystem directly with
+# --selinux-apifs-context.  Grant the payload access explicitly instead of
+# using container_manage_files_template(), because that helper would install
+# a second, conflicting automatic transition for files created on tmpfs.
+allow spaces_container_t spaces_apifs_file_t:dir_file_class_set {
+	relabelfrom relabelto map
+};
+manage_dirs_pattern(spaces_container_t, spaces_apifs_file_t, spaces_apifs_file_t)
+manage_files_pattern(spaces_container_t, spaces_apifs_file_t, spaces_apifs_file_t)
+exec_files_pattern(spaces_container_t, spaces_apifs_file_t, spaces_apifs_file_t)
+manage_lnk_files_pattern(spaces_container_t, spaces_apifs_file_t, spaces_apifs_file_t)
+manage_fifo_files_pattern(spaces_container_t, spaces_apifs_file_t, spaces_apifs_file_t)
+manage_sock_files_pattern(spaces_container_t, spaces_apifs_file_t, spaces_apifs_file_t)
+manage_chr_files_pattern(spaces_container_t, spaces_apifs_file_t, spaces_apifs_file_t)
+manage_blk_files_pattern(spaces_container_t, spaces_apifs_file_t, spaces_apifs_file_t)
+allow spaces_container_t spaces_apifs_file_t:chr_file {
+	mmap_file_perms watch watch_reads
+};
+allow spaces_container_t spaces_apifs_file_t:fifo_file watch;
+allow spaces_container_t spaces_apifs_file_t:{ file dir } mounton;
+allow spaces_container_t spaces_apifs_file_t:filesystem {
+	mount remount unmount
+};
+
+# The guest PAM bridge connects back to the per-space host authentication
+# socket.  Runtime portal sockets use this type as well.
+allow spaces_container_t spaces_var_run_t:dir search_dir_perms;
+allow spaces_container_t spaces_var_run_t:sock_file rw_sock_file_perms;
+allow spaces_container_t spaces_t:unix_stream_socket connectto;
+
+# systemd-machined opens the container's /dev/ptmx when machinectl starts an
+# interactive or command shell.
+gen_require(`
+	type systemd_machined_t;
+')
+allow systemd_machined_t spaces_apifs_file_t:chr_file rw_chr_file_perms;
+allow systemd_machined_t spaces_file_t:dir mounton;
+userdom_search_user_home_content(systemd_machined_t)
+userdom_dontaudit_getattr_user_home_content(systemd_machined_t)
