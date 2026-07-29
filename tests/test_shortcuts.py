@@ -176,7 +176,13 @@ class ShortcutExportTests(unittest.TestCase):
             applications_root=self.output,
         )
 
-        icon = self.output / "spaces" / "work-v1" / "icons" / "editor.png"
+        icon = (
+            self.output
+            / "spaces"
+            / "work-v1"
+            / "icons"
+            / f"{shortcuts.ICON_FILENAME_PREFIX}editor.png"
+        )
         with Image.open(icon) as image:
             self.assertEqual(image.size, (256, 256))
             self.assertEqual(image.mode, "RGBA")
@@ -219,6 +225,45 @@ class ShortcutExportTests(unittest.TestCase):
 
         shortcuts.remove("work", applications_root=self.output)
         self.assertFalse(current.exists())
+
+    def test_reconcile_notifies_host_only_when_export_changes(self) -> None:
+        source = self.system / "editor.desktop"
+        source.write_text(self.desktop(), encoding="utf-8")
+
+        with mock.patch.object(shortcuts.os, "utime") as notify:
+            shortcuts.reconcile(
+                "work",
+                self.rootfs,
+                "custom",
+                applications_root=self.output,
+            )
+            notify.assert_called_once_with(
+                self.output,
+                None,
+                follow_symlinks=False,
+            )
+
+            notify.reset_mock()
+            shortcuts.reconcile(
+                "work",
+                self.rootfs,
+                "custom",
+                applications_root=self.output,
+            )
+            notify.assert_not_called()
+
+            source.write_text(self.desktop("Changed"), encoding="utf-8")
+            shortcuts.reconcile(
+                "work",
+                self.rootfs,
+                "custom",
+                applications_root=self.output,
+            )
+            notify.assert_called_once_with(
+                self.output,
+                None,
+                follow_symlinks=False,
+            )
 
     def test_source_directory_cannot_escape_rootfs(self) -> None:
         outside = self.root / "outside"
