@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from spaces.distro import arch, fedora, get_driver, kali
+from spaces.distro import arch, fedora, get_driver, kali, ubuntu
 from spaces.distro.model import DistributionError
 from spaces.distro.pam import SPACES_PAM_BLOCK
 
@@ -21,8 +21,18 @@ class DistributionDriverTests(unittest.TestCase):
             arch.PACKAGES,
             fedora.PACKAGES,
             kali.PACKAGES,
+            ubuntu.PACKAGES,
         ):
             self.assertIn("file", packages)
+
+    def test_managed_distros_install_git(self) -> None:
+        for packages in (
+            arch.PACKAGES,
+            fedora.PACKAGES,
+            kali.PACKAGES,
+            ubuntu.PACKAGES,
+        ):
+            self.assertIn("git", packages)
 
     def test_drivers_are_registered_and_describe_metadata(self) -> None:
         self.assertIs(get_driver("arch"), arch.DISTRIBUTION)

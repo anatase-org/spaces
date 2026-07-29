@@ -14,6 +14,7 @@ from .pam import reconcile_pam_auth_update
 
 PACKAGES = (
     "openssh-client",
+    "git",
     "nano",
     "sudo",
     # auth

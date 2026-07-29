@@ -21,6 +21,7 @@ PACKAGES = (
     "dnf5",
     "passwd",
     "openssh-clients",
+    "git",
     "nano",
     "sudo",
     "dbus-tools",

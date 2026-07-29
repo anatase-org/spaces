@@ -19,6 +19,7 @@ from .pam import (
 PACKAGES = (
     "base",
     "openssh",
+    "git",
     "nano",
     "sudo",
     # auth
@@ -34,7 +35,7 @@ PACKAGES = (
     "xdg-desktop-portal",
     "xdg-desktop-portal-kde",
 )
-AUR_BUILD_PACKAGES = ("base-devel", "git", "go")
+AUR_BUILD_PACKAGES = ("base-devel", "go")
 YAY_REPOSITORY = "https://aur.archlinux.org/yay.git"
 BUILDER = "spaces-build"
 SYSTEM_AUTH = Path("etc/pam.d/system-auth")
