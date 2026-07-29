@@ -252,6 +252,7 @@ class LaunchTests(unittest.TestCase):
             "--machine=work",
             f"--bind={self.home}:/home",
             f"--bind={self.root_home}:/root",
+            *launch_module._unit_mask_bind_arguments(),
             "--boot",
             "--setenv=SYSTEMD_GETTY_AUTO=no",
             "--console=read-only",
@@ -651,112 +652,64 @@ class LaunchTests(unittest.TestCase):
         self.worker.join.assert_called()
         self.monitor.close.assert_called()
 
-    def test_rootfs_fixup_logs_conflict_and_launches(self) -> None:
-        self._write_info()
-        var_home = self.rootfs / "var" / "home"
-        var_home.mkdir(parents=True)
-        process = mock.Mock()
-        process.wait.return_value = 42
+    def test_unit_masks_are_launch_time_binds(self) -> None:
+        arguments = launch_module._unit_mask_bind_arguments()
 
-        with (
-            mock.patch.object(
-                launch_module.subprocess,
-                "Popen",
-                return_value=process,
-            ) as run,
-            mock.patch.object(launch_module.signal, "signal"),
-            self.assertLogs(launch_module.logger, level="ERROR") as logs,
-        ):
-            result = launch_module.launch("work")
+        self.assertEqual(
+            set(arguments),
+            {
+                f"--bind-ro=/dev/null:{destination}"
+                for destination in launch_module.MASKED_UNIT_DESTINATIONS
+            },
+        )
 
-        self.assertEqual(result, 42)
-        run.assert_called_once()
-        self.assertTrue(var_home.is_dir())
-        self.assertIn("the path exists and is not a symlink", logs.output[0])
+    def test_network_manager_units_are_masked(self) -> None:
+        units = {
+            "NetworkManager-config-initrd.service",
+            "NetworkManager-dispatcher.service",
+            "NetworkManager-initrd.service",
+            "NetworkManager-ovs.service",
+            "NetworkManager-wait-online-initrd.service",
+            "NetworkManager-wait-online.service",
+            "NetworkManager.service",
+            "nm-cloud-setup.service",
+            "nm-cloud-setup.timer",
+            "nm-priv-helper.service",
+        }
+        arguments = set(launch_module._unit_mask_bind_arguments())
+        for unit in units:
+            with self.subTest(unit=unit):
+                self.assertIn(
+                    f"--bind-ro=/dev/null:/etc/systemd/system/{unit}",
+                    arguments,
+                )
 
-    def test_rootfs_fixup_logs_os_error_and_launches(self) -> None:
-        self._write_info()
-        process = mock.Mock()
-        process.wait.return_value = 0
+    def test_bluetooth_units_are_masked(self) -> None:
+        expected = {
+            "--bind-ro=/dev/null:/etc/systemd/system/bluetooth-mesh.service",
+            "--bind-ro=/dev/null:/etc/systemd/system/bluetooth.service",
+            "--bind-ro=/dev/null:/etc/systemd/system/bluetooth.target",
+            "--bind-ro=/dev/null:/etc/systemd/system/dbus-org.bluez.service",
+            "--bind-ro=/dev/null:/etc/systemd/user/"
+            "dbus-org.bluez.obex.service",
+            "--bind-ro=/dev/null:/etc/systemd/user/obex.service",
+        }
+        self.assertLessEqual(
+            expected,
+            set(launch_module._unit_mask_bind_arguments()),
+        )
 
-        with (
-            mock.patch.object(
-                Path,
-                "symlink_to",
-                side_effect=PermissionError("not permitted"),
-            ),
-            mock.patch.object(
-                launch_module.subprocess,
-                "Popen",
-                return_value=process,
-            ) as run,
-            mock.patch.object(launch_module.signal, "signal"),
-            self.assertLogs(launch_module.logger, level="ERROR") as logs,
-        ):
-            result = launch_module.launch("work")
-
-        self.assertEqual(result, 0)
-        run.assert_called_once()
-        self.assertIn("not permitted", logs.output[0])
-
-    def test_rootfs_fixup_replaces_an_incorrect_symlink(self) -> None:
-        self._write_info()
-        var_home = self.rootfs / "var" / "home"
-        var_home.parent.mkdir()
-        var_home.symlink_to("/srv/home", target_is_directory=True)
-        process = mock.Mock()
-        process.wait.return_value = 0
-
-        with (
-            mock.patch.object(
-                launch_module.subprocess,
-                "Popen",
-                return_value=process,
-            ),
-            mock.patch.object(launch_module.signal, "signal"),
-        ):
-            launch_module.launch("work")
-
-        self.assertTrue(var_home.is_symlink())
-        self.assertEqual(os.readlink(var_home), "/home")
-
-    def test_rootfs_fixups_apply_each_configured_symlink(self) -> None:
-        symlinks = [
-            ("/var/home", "/home"),
-            ("/srv/spaces/data", "/data"),
-        ]
-
-        with mock.patch.object(launch_module, "SYMLINKS", symlinks):
-            launch_module._apply_rootfs_fixups(self.rootfs)
-
-        for link_name, target in symlinks:
-            link = self.rootfs / link_name.removeprefix("/")
-            self.assertTrue(link.is_symlink())
-            self.assertEqual(os.readlink(link), target)
-
-    def test_rootfs_fixups_mask_netplan_configure(self) -> None:
+    def test_rootfs_fixups_only_create_var_home_symlink(self) -> None:
         launch_module._apply_rootfs_fixups(self.rootfs)
 
-        mask = self.rootfs / "etc" / "systemd" / "system" / "netplan-configure.service"
-        self.assertTrue(mask.is_symlink())
-        self.assertEqual(os.readlink(mask), "/dev/null")
-
-    def test_rootfs_fixups_log_unexpected_error_and_continue(self) -> None:
-        symlinks = [
-            ("relative/path", "/invalid"),
-            ("/var/home", "/home"),
-        ]
-
-        with (
-            mock.patch.object(launch_module, "SYMLINKS", symlinks),
-            self.assertLogs(launch_module.logger, level="ERROR") as logs,
-        ):
-            launch_module._apply_rootfs_fixups(self.rootfs)
-
         var_home = self.rootfs / "var" / "home"
         self.assertTrue(var_home.is_symlink())
         self.assertEqual(os.readlink(var_home), "/home")
-        self.assertIn("relative/path", logs.output[0])
+        for destination in launch_module.MASKED_UNIT_DESTINATIONS:
+            with self.subTest(destination=destination):
+                self.assertFalse(
+                    (self.rootfs / destination.removeprefix("/")).exists()
+                )
 
     def test_rootfs_fixups_drop_ping_capability_when_sockets_are_enabled(
         self,

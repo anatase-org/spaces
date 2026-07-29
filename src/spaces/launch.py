@@ -53,12 +53,41 @@ BASE_DEVICE_ALLOW = (
     ("char-pts", "rw"),
     ("/dev/fuse", "rwm"),
 )
-SYMLINKS = [
-    # Ostree system weirdness
-    ("/var/home", "/home"),
-    # Services that should not run
-    ("/etc/systemd/system/netplan-configure.service", "/dev/null"),
-]
+ROOTFS_SYMLINKS = (("/var/home", "/home"),)
+MASKED_UNIT_DESTINATIONS = (
+    # Avoid messing with the network
+    "/etc/systemd/system/netplan-configure.service",
+    "/etc/systemd/system/NetworkManager-config-initrd.service",
+    "/etc/systemd/system/NetworkManager-dispatcher.service",
+    "/etc/systemd/system/NetworkManager-initrd.service",
+    "/etc/systemd/system/NetworkManager-ovs.service",
+    "/etc/systemd/system/NetworkManager-wait-online-initrd.service",
+    "/etc/systemd/system/NetworkManager-wait-online.service",
+    "/etc/systemd/system/NetworkManager.service",
+    "/etc/systemd/system/nm-cloud-setup.service",
+    "/etc/systemd/system/nm-cloud-setup.timer",
+    "/etc/systemd/system/nm-priv-helper.service",
+    # Avoid claiming host Bluetooth adapters.
+    "/etc/systemd/system/bluetooth-mesh.service",
+    "/etc/systemd/system/bluetooth.service",
+    "/etc/systemd/system/bluetooth.target",
+    "/etc/systemd/system/dbus-org.bluez.service",
+    "/etc/systemd/user/dbus-org.bluez.obex.service",
+    "/etc/systemd/user/obex.service",
+    # Guest audio daemons must not connect to and manage the forwarded host
+    # PipeWire instance. Applications use the forwarded sockets directly.
+    "/etc/systemd/user/filter-chain.service",
+    "/etc/systemd/user/pipewire-media-session.service",
+    "/etc/systemd/user/pipewire-pulse.service",
+    "/etc/systemd/user/pipewire-pulse.socket",
+    "/etc/systemd/user/pipewire-session-manager.service",
+    "/etc/systemd/user/pipewire.service",
+    "/etc/systemd/user/pipewire.socket",
+    "/etc/systemd/user/pulseaudio.service",
+    "/etc/systemd/user/pulseaudio.socket",
+    "/etc/systemd/user/wireplumber.service",
+    "/etc/systemd/user/wireplumber@.service",
+)
 KEPT_CAPS = (
     "CAP_CHOWN",
     "CAP_DAC_OVERRIDE",
@@ -218,9 +247,8 @@ def _drop_ping_capability(rootfs: Path) -> None:
 def _apply_rootfs_fixups(rootfs: Path) -> None:
     """Apply persistent compatibility fixups to a space rootfs."""
 
-    for fixup in SYMLINKS:
+    for link_name, target in ROOTFS_SYMLINKS:
         try:
-            link_name, target = fixup
             relative_link = Path(link_name).relative_to("/")
             parent = rootfs
             parent_is_safe = True
@@ -262,8 +290,8 @@ def _apply_rootfs_fixups(rootfs: Path) -> None:
         except Exception as error:
             logger.error(
                 _(
-                    "Could not apply rootfs symlink fixup {fixup}: {error}",
-                    fixup=fixup,
+                    "Could not apply rootfs symlink {link}: {error}",
+                    link=link_name,
                     error=error,
                 )
             )
@@ -865,11 +893,30 @@ def _bind_argument(mount: HomeMount) -> str:
     return _path_bind_argument(mount.source, mount.destination)
 
 
-def _path_bind_argument(source: Path, destination: str | PurePosixPath) -> str:
+def _path_bind_argument(
+    source: Path,
+    destination: str | PurePosixPath,
+    *,
+    read_only: bool = False,
+) -> str:
     def escape(value: str) -> str:
         return value.replace("\\", "\\\\").replace(":", "\\:")
 
-    return f"--bind={escape(str(source))}:{escape(str(destination))}"
+    option = "--bind-ro" if read_only else "--bind"
+    return f"{option}={escape(str(source))}:{escape(str(destination))}"
+
+
+def _unit_mask_bind_arguments() -> tuple[str, ...]:
+    """Mask guest units for this launch without changing the rootfs."""
+
+    return tuple(
+        _path_bind_argument(
+            Path("/dev/null"),
+            destination,
+            read_only=True,
+        )
+        for destination in MASKED_UNIT_DESTINATIONS
+    )
 
 
 def _set_device_policy(
@@ -1734,6 +1781,7 @@ def _command(
         f"--machine={space_name}",
         f"--bind={home}:/home",
         f"--bind={home / 'root'}:/root",
+        *_unit_mask_bind_arguments(),
         *authentication_binds,
         *(_bind_argument(mount) for mount in mounts),
         "--boot",
