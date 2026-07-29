@@ -83,6 +83,24 @@ class GraphicalSessionTests(unittest.TestCase):
             )
         )
 
+    def test_gamescope_and_gamemode_sessions_skip_desktop_integration(
+        self,
+    ) -> None:
+        for name, value in (
+            ("XDG_CURRENT_DESKTOP", "gamescope"),
+            ("XDG_SESSION_DESKTOP", "gamemode"),
+        ):
+            with self.subTest(name=name):
+                self.assertIsNone(
+                    session.select_graphical_session(
+                        (graphical(),),
+                        {
+                            "XDG_SESSION_ID": "2",
+                            name: value,
+                        },
+                    )
+                )
+
     def test_host_manager_environment_is_sanitized(self) -> None:
         completed = subprocess.CompletedProcess(
             [],
@@ -540,6 +558,32 @@ class DesktopControllerTests(unittest.TestCase):
         self.state_patch.stop()
         self.runtime_patch.stop()
         self.temporary.cleanup()
+
+    def test_gaming_session_disables_desktop_forwarding(self) -> None:
+        for name, value in (
+            ("XDG_CURRENT_DESKTOP", "gamescope"),
+            ("XDG_SESSION_DESKTOP", "gamemode"),
+        ):
+            with (
+                self.subTest(name=name),
+                mock.patch.object(
+                    session,
+                    "host_manager_environment",
+                    return_value={
+                        "XDG_SESSION_ID": "2",
+                        name: value,
+                    },
+                ),
+                mock.patch.object(self.controller, "deactivate") as deactivate,
+                mock.patch.object(session, "_plan") as plan,
+            ):
+                self.controller.reconcile(
+                    self.desktop_user,
+                    (graphical(),),
+                )
+
+            deactivate.assert_called_once_with(self.desktop_user)
+            plan.assert_not_called()
 
     def test_mount_pins_identity_and_is_read_only(self) -> None:
         source = self.root / "socket"

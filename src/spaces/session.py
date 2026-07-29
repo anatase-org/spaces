@@ -798,6 +798,12 @@ def select_graphical_session(
 ) -> LoginSession | None:
     """Select one unambiguous active local graphical user session."""
 
+    # Skip integration when in gamemode
+    if (
+        environment.get("XDG_CURRENT_DESKTOP") == "gamescope"
+        or environment.get("XDG_SESSION_DESKTOP") == "gamemode"
+    ):
+        return None
     manager_session = environment.get("XDG_SESSION_ID")
     if not manager_session:
         return None
