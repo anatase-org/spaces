@@ -1,0 +1,9 @@
+[Unit]
+Description=Start Spaces environment %I for the current user
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/pkexec /usr/bin/spaces.priv start %I
+
+[Install]
+WantedBy=default.target

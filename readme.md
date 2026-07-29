@@ -30,12 +30,18 @@ sudo systemctl enable --now spaces@<your-space>
 
 And it will start on boot. You may stop that service to poweroff your space. Once started, such as by launching applications, the service or entering a space, the space does not power down until you shutdown your computer/server. Idle detection may be added in the future.
 
-However, your user and its files will not be mounted on boot. Your user only appears once you login or use ssh and is lazily removed after you log out. If you want your folders to always be available, add:
+However, if your space relies on system services accessing your user data, this will not work, as your user and its files will not be mounted on boot.  This is done partly for security reasons, and partly to avoid edge cases with solutions such as systemd-homed.
+
+Alternatively, you may use the user service. This will start the space when you login, so that the first application you launch starts faster. As you are logged in, your user will be mounted when the space starts, eliminating timing issues with those system services. Once started, the space will remain active until poweroff, even if you log out.
 ```bash
-sudo systemctl loginctl enable-linger $USER
+systemctl --user enable --now spaces@<your-space>
 ```
 
-This is done partly for security reasons, and partly to avoid edge cases with solutions such as systemd-homed.
+You can also enable lingering for your user, which starts the user manager at
+boot without requiring an interactive login.
+```bash
+loginctl enable-linger
+```
 
 ## Security
 For security issues, email: security@anatase.org

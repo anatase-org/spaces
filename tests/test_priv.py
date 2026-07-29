@@ -630,6 +630,134 @@ class PrivilegedTests(unittest.TestCase):
             check=False,
         )
 
+    def test_start_validates_configured_user_and_starts_space(self) -> None:
+        info = core.create_info(
+            "work",
+            {"id": "custom"},
+            core.Identity(1000, 1000, Path("/home/alice")),
+            "basic",
+            [],
+        )
+        space = self.state_root / "work"
+        space.mkdir(parents=True)
+        priv._write_info(space, info)
+        with (
+            mock.patch.dict(os.environ, {"PKEXEC_UID": "1000"}, clear=True),
+            mock.patch.object(
+                priv,
+                "_ensure_space_started",
+                return_value=42,
+            ) as ensure_started,
+        ):
+            self.assertEqual(priv.start("work"), 42)
+
+        ensure_started.assert_called_once_with("work")
+
+    def test_start_succeeds_when_space_is_already_running(self) -> None:
+        info = core.create_info(
+            "work",
+            {"id": "custom"},
+            core.Identity(1000, 1000, Path("/home/alice")),
+            "basic",
+            [],
+        )
+        space = self.state_root / "work"
+        space.mkdir(parents=True)
+        priv._write_info(space, info)
+        available = subprocess.CompletedProcess([], 0)
+        with (
+            mock.patch.dict(os.environ, {"PKEXEC_UID": "1000"}, clear=True),
+            mock.patch.object(
+                priv.subprocess,
+                "run",
+                return_value=available,
+            ) as run,
+        ):
+            self.assertEqual(priv.start("work"), 0)
+
+        run.assert_called_once_with(
+            ["/usr/bin/machinectl", "--quiet", "show", "work"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    def test_start_propagates_system_service_failure(self) -> None:
+        info = core.create_info(
+            "work",
+            {"id": "custom"},
+            core.Identity(1000, 1000, Path("/home/alice")),
+            "basic",
+            [],
+        )
+        space = self.state_root / "work"
+        space.mkdir(parents=True)
+        priv._write_info(space, info)
+        unavailable = subprocess.CompletedProcess([], 1)
+        failed = subprocess.CompletedProcess([], 42)
+        with (
+            mock.patch.dict(os.environ, {"PKEXEC_UID": "1000"}, clear=True),
+            mock.patch.object(
+                priv.subprocess,
+                "run",
+                side_effect=[unavailable, failed],
+            ) as run,
+        ):
+            self.assertEqual(priv.start("work"), 42)
+
+        self.assertEqual(
+            run.call_args_list[-1],
+            mock.call(
+                [
+                    "/usr/bin/systemctl",
+                    "start",
+                    "spaces@work.service",
+                ],
+                check=False,
+            ),
+        )
+
+    def test_start_rejects_unconfigured_user_without_starting(self) -> None:
+        space = self.state_root / "ubuntu"
+        space.mkdir(parents=True)
+        priv._write_info(space, self.info)
+        with (
+            mock.patch.dict(os.environ, {"PKEXEC_UID": "1000"}, clear=True),
+            mock.patch.object(priv.subprocess, "run") as run,
+            self.assertRaises(core.SpacesError),
+        ):
+            priv.start("ubuntu")
+
+        run.assert_not_called()
+
+    def test_start_rejects_missing_or_invalid_space_without_starting(
+        self,
+    ) -> None:
+        mismatched = self.state_root / "work"
+        mismatched.mkdir(parents=True)
+        priv._write_info(mismatched, self.info)
+        invalid = self.state_root / "invalid"
+        invalid.mkdir()
+        (invalid / "info.json").write_text("{}\n", encoding="utf-8")
+
+        for name in ("../work", "missing", "work", "invalid"):
+            with (
+                self.subTest(name=name),
+                mock.patch.object(priv.subprocess, "run") as run,
+                self.assertRaises(core.SpacesError),
+            ):
+                priv.start(name)
+            run.assert_not_called()
+
+    def test_start_parser_dispatches_space(self) -> None:
+        with (
+            mock.patch.object(priv.os, "geteuid", return_value=0),
+            mock.patch.object(priv, "start", return_value=42) as start,
+        ):
+            self.assertEqual(priv.main(["start", "work"]), 42)
+
+        start.assert_called_once_with("work")
+
     def test_enter_validates_user_then_starts_and_runs_machinectl(self) -> None:
         info = core.create_info(
             "work",

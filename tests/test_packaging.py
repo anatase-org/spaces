@@ -41,7 +41,7 @@ class PackagingTests(unittest.TestCase):
         )
         self.assertNotIn("ubuntu", core_source.casefold())
 
-    def test_systemd_template_launches_unescaped_space_name(self) -> None:
+    def test_systemd_templates_launch_unescaped_space_name(self) -> None:
         service = ROOT / "data" / "spaces@.service"
         unit = configparser.ConfigParser(interpolation=None, strict=False)
         unit.read(service, encoding="utf-8")
@@ -71,14 +71,46 @@ class PackagingTests(unittest.TestCase):
             ["data/spaces@.service"],
         )
 
+        user_service = ROOT / "data" / "systemd" / "user" / "spaces@.service"
+        user_unit = configparser.ConfigParser(
+            interpolation=None,
+            strict=False,
+        )
+        user_unit.read(user_service, encoding="utf-8")
+        self.assertEqual(user_unit["Service"]["Type"], "oneshot")
+        self.assertEqual(
+            user_unit["Service"]["ExecStart"],
+            "/usr/bin/pkexec /usr/bin/spaces.priv start %I",
+        )
+        self.assertNotIn("RemainAfterExit", user_unit["Service"])
+        self.assertEqual(
+            user_unit["Install"]["WantedBy"],
+            "default.target",
+        )
+        self.assertEqual(
+            data_files["lib/systemd/user"],
+            ["data/systemd/user/spaces@.service"],
+        )
+
         manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8")
         self.assertIn("include data/spaces@.service", manifest)
+        self.assertIn(
+            "include data/systemd/user/spaces@.service",
+            manifest,
+        )
 
         spec = (ROOT / "spaces.spec").read_text(encoding="utf-8")
         self.assertIn("%{_unitdir}/spaces@.service", spec)
+        self.assertIn("%{_userunitdir}/spaces@.service", spec)
         self.assertIn("%systemd_post spaces@.service", spec)
         self.assertIn("%systemd_preun spaces@.service", spec)
         self.assertIn("%systemd_postun_with_restart spaces@.service", spec)
+        self.assertIn("%systemd_user_post spaces@.service", spec)
+        self.assertIn("%systemd_user_preun spaces@.service", spec)
+        self.assertIn(
+            "%systemd_user_postun_with_restart spaces@.service",
+            spec,
+        )
         self.assertIn("Requires:       systemd\n", spec)
         self.assertIn("Requires:       systemd-container\n", spec)
 
@@ -93,6 +125,7 @@ class PackagingTests(unittest.TestCase):
             "org.anatase.spaces.configure": ("configure", "auth_admin"),
             "org.anatase.spaces.delete": ("delete", "auth_admin"),
             "org.anatase.spaces.cp": ("cp", "auth_admin"),
+            "org.anatase.spaces.start": ("start", "yes"),
             "org.anatase.spaces.enter": ("enter", "yes"),
             "org.anatase.spaces.enter-as-user": (
                 "enter-as-user",

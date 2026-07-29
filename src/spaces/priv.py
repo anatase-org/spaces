@@ -230,6 +230,22 @@ def _ensure_space_started(name: str) -> int:
     ).returncode
 
 
+def start(name: str) -> int:
+    """Start a space for a configured initiating user."""
+
+    info = _space_info(name)
+    caller_uid = _caller_uid()
+    if str(caller_uid) not in info["permissions"]["users"]:
+        raise core.SpacesError(
+            _(
+                "User ID {uid} is not configured for space {space!r}.",
+                uid=caller_uid,
+                space=name,
+            )
+        )
+    return _ensure_space_started(name)
+
+
 def _machine_shell(
     user_name: str,
     space_name: str,
@@ -490,6 +506,8 @@ def build_parser() -> argparse.ArgumentParser:
     for command in ("create", "configure", "delete", "cp"):
         command_parser = subparsers.add_parser(command)
         command_parser.add_argument("payload")
+    start_parser = subparsers.add_parser("start")
+    start_parser.add_argument("space")
     launch_parser = subparsers.add_parser("launch")
     launch_parser.add_argument("space")
     enter_parser = subparsers.add_parser("enter")
@@ -514,6 +532,8 @@ def main(argv: list[str] | None = None) -> int:
             print(_("spaces.priv must run as root."), file=sys.stderr)
             return 1
         arguments = build_parser().parse_args(argv)
+        if arguments.command == "start":
+            return start(arguments.space)
         if arguments.command == "launch":
             return launch(arguments.space)
         if arguments.command == "enter":

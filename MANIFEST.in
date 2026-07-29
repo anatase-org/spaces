@@ -1,6 +1,7 @@
 recursive-include src/spaces/overlay *.png
 include data/org.anatase.spaces.policy
 include data/spaces@.service
+include data/systemd/user/spaces@.service
 recursive-include data/pam *
 recursive-include data/keys *
 recursive-include data/repos *

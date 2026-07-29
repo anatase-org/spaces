@@ -61,12 +61,15 @@ done
 
 %post
 %systemd_post spaces@.service
+%systemd_user_post spaces@.service
 
 %preun
 %systemd_preun spaces@.service
+%systemd_user_preun spaces@.service
 
 %postun
 %systemd_postun_with_restart spaces@.service
+%systemd_user_postun_with_restart spaces@.service
 
 %files
 %doc readme.md
@@ -99,3 +102,4 @@ done
 %{_datadir}/applications/spaces-*.desktop
 %{_datadir}/icons/hicolor/256x256/apps/spaces-*.png
 %{_unitdir}/spaces@.service
+%{_userunitdir}/spaces@.service

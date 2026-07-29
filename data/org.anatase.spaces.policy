@@ -54,6 +54,18 @@
     <annotate key="org.freedesktop.policykit.exec.argv1">cp</annotate>
   </action>
 
+  <action id="org.anatase.spaces.start">
+    <description>Start a Spaces environment for the current user</description>
+    <message>Starting a configured space is allowed without authentication</message>
+    <defaults>
+      <allow_any>yes</allow_any>
+      <allow_inactive>yes</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/spaces.priv</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">start</annotate>
+  </action>
+
   <action id="org.anatase.spaces.enter">
     <description>Enter a Spaces environment as the current user</description>
     <message>Entering a configured space is allowed without authentication</message>
