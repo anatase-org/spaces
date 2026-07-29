@@ -334,15 +334,27 @@ class PrivilegedTests(unittest.TestCase):
             priv.create(self.info)
         space = self.state_root / "ubuntu"
         (space / "rootfs" / "partial").write_text("remove", encoding="utf-8")
+        (space / "rootfs.fail").mkdir()
+        (space / "rootfs.fail" / "previous").write_text(
+            "remove",
+            encoding="utf-8",
+        )
         (space / "home" / "keep").write_text("preserve", encoding="utf-8")
         with mock.patch.object(ubuntu.subprocess, "run"):
             priv.create(self.info)
         self.assertFalse((space / "rootfs" / "partial").exists())
+        self.assertFalse((space / "rootfs.fail").exists())
         self.assertEqual(
             (space / "home" / "keep").read_text(encoding="utf-8"), "preserve"
         )
 
-    def test_bootstrap_failure_leaves_partial_space(self) -> None:
+    def test_bootstrap_failure_moves_rootfs_to_failed_path(self) -> None:
+        space = self.state_root / "ubuntu"
+        (space / "rootfs.fail").mkdir(parents=True)
+        (space / "rootfs.fail" / "previous").write_text(
+            "remove",
+            encoding="utf-8",
+        )
         error = subprocess.CalledProcessError(42, ["debootstrap"])
         with (
             mock.patch.object(
@@ -363,8 +375,9 @@ class PrivilegedTests(unittest.TestCase):
             self.assertRaises(subprocess.CalledProcessError),
         ):
             priv.create(self.info)
-        space = self.state_root / "ubuntu"
-        self.assertTrue((space / "rootfs").is_dir())
+        self.assertFalse((space / "rootfs").exists())
+        self.assertTrue((space / "rootfs.fail").is_dir())
+        self.assertFalse((space / "rootfs.fail" / "previous").exists())
         self.assertTrue((space / "home").is_dir())
         self.assertTrue((space / "info.json").is_file())
 

@@ -136,6 +136,22 @@ def _remove_rootfs(path: Path) -> None:
         shutil.rmtree(path)
 
 
+def _preserve_failed_rootfs(rootfs: Path, failed_rootfs: Path) -> None:
+    _assert_no_mounts(rootfs)
+    if rootfs.is_symlink() or not rootfs.is_dir():
+        raise core.SpacesError(
+            _("Cannot preserve unsafe failed rootfs: {rootfs}.", rootfs=rootfs)
+        )
+    if failed_rootfs.is_symlink() or failed_rootfs.exists():
+        raise core.SpacesError(
+            _(
+                "Failed rootfs destination already exists: {rootfs}.",
+                rootfs=failed_rootfs,
+            )
+        )
+    os.replace(rootfs, failed_rootfs)
+
+
 def _unescape_mount_path(value: str) -> str:
     for escaped, plain in (
         ("\\040", " "),
@@ -416,7 +432,11 @@ def create(info: dict[str, Any]) -> None:
         _root_owned_directory(home)
 
         rootfs = space / "rootfs"
+        failed_rootfs = space / "rootfs.fail"
+        _assert_no_mounts(rootfs)
+        _assert_no_mounts(failed_rootfs)
         _remove_rootfs(rootfs)
+        _remove_rootfs(failed_rootfs)
         _root_owned_directory(rootfs)
         _write_info(space, info)
 
@@ -430,8 +450,11 @@ def create(info: dict[str, Any]) -> None:
             )
         try:
             driver.bootstrap(distribution, rootfs)
-        except DistributionError as error:
-            raise core.SpacesError(str(error)) from error
+        except (Exception, KeyboardInterrupt) as error:
+            _preserve_failed_rootfs(rootfs, failed_rootfs)
+            if isinstance(error, DistributionError):
+                raise core.SpacesError(str(error)) from error
+            raise
 
 
 def configure(patch: dict[str, Any]) -> None:
@@ -590,8 +613,8 @@ def main(argv: list[str] | None = None) -> int:
     except subprocess.CalledProcessError as error:
         print(
             _(
-                "Bootstrap failed; the partial rootfs and info.json were "
-                "preserved for inspection or retry."
+                "Creation failed; any partial bootstrap was moved to "
+                "rootfs.fail and info.json was preserved."
             ),
             file=sys.stderr,
         )
