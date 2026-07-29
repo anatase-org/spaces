@@ -18,6 +18,10 @@ from spaces.tui import (
 
 
 class TuiTests(unittest.IsolatedAsyncioTestCase):
+    def test_permission_form_uses_textual_4_theme_variables(self) -> None:
+        self.assertNotIn("$ansi-foreground", PermissionForm.CSS)
+        self.assertIn("color: $foreground;", PermissionForm.CSS)
+
     async def test_initial_values_and_step_progress(self) -> None:
         app = PermissionForm(
             home=Path("/home/user"),

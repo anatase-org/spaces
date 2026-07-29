@@ -233,7 +233,7 @@ class PermissionForm(
     #home-folders > .selection-list--button-highlighted,
     #distribution-options > .selection-list--button,
     #distribution-options > .selection-list--button-highlighted {
-        color: $ansi-foreground;
+        color: $foreground;
         background: ansi_default;
         text-style: dim;
     }
@@ -253,7 +253,7 @@ class PermissionForm(
     }
     #home-folders > .option-list--option-highlighted,
     #distribution-options > .option-list--option-highlighted {
-        color: $ansi-foreground;
+        color: $foreground;
         background: $accent-muted;
     }
     #buttons {
