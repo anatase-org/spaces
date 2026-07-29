@@ -534,16 +534,50 @@ class PrivilegedTests(unittest.TestCase):
         (space / "home").mkdir()
         (space / "home" / "file").write_text("delete", encoding="utf-8")
 
-        priv.delete({"name": "work"})
+        with mock.patch.object(priv.subprocess, "run") as run:
+            priv.delete({"name": "work"})
 
         self.assertFalse(space.exists())
+        run.assert_called_once_with(
+            [
+                "/usr/bin/systemctl",
+                "stop",
+                "spaces@work.service",
+            ],
+            check=True,
+        )
 
     def test_delete_removes_shortcut_versions(self) -> None:
         space = self.state_root / "work"
         (space / "rootfs").mkdir(parents=True)
-        with mock.patch.object(shortcuts, "remove") as remove:
+        with (
+            mock.patch.object(priv.subprocess, "run"),
+            mock.patch.object(shortcuts, "remove") as remove,
+        ):
             priv.delete({"name": "work"})
         remove.assert_called_once_with("work")
+
+    def test_delete_stop_failure_preserves_space(self) -> None:
+        space = self.state_root / "work"
+        (space / "rootfs").mkdir(parents=True)
+        error = subprocess.CalledProcessError(
+            1,
+            [
+                "/usr/bin/systemctl",
+                "stop",
+                "spaces@work.service",
+            ],
+        )
+
+        with (
+            mock.patch.object(priv.subprocess, "run", side_effect=error),
+            mock.patch.object(shortcuts, "remove") as remove,
+            self.assertRaises(subprocess.CalledProcessError),
+        ):
+            priv.delete({"name": "work"})
+
+        self.assertTrue(space.is_dir())
+        remove.assert_not_called()
 
     def test_delete_rejects_symlink(self) -> None:
         outside = Path(self.temporary.name) / "outside"
@@ -562,6 +596,7 @@ class PrivilegedTests(unittest.TestCase):
         mountinfo = f"1 0 0:1 / {space}/rootfs/proc rw - proc proc rw\n"
 
         with (
+            mock.patch.object(priv.subprocess, "run"),
             mock.patch.object(Path, "read_text", return_value=mountinfo),
             self.assertRaises(core.SpacesError),
         ):

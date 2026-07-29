@@ -466,6 +466,10 @@ def delete(request: dict[str, Any]) -> None:
     space = core.STATE_ROOT / name
 
     with _space_lock(space):
+        subprocess.run(
+            [SYSTEMCTL, "stop", f"spaces@{name}.service"],
+            check=True,
+        )
         _assert_no_mounts(space)
         shortcuts.remove(name)
         shutil.rmtree(space)
