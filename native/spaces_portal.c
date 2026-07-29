@@ -12,6 +12,8 @@
 #define DBUS_NAME "org.freedesktop.DBus"
 #define DBUS_PATH "/org/freedesktop/DBus"
 #define INTERFACE_DIRECTORY "/usr/share/dbus-1/interfaces"
+#define RESTORE_DATA_VENDOR "Spaces"
+#define RESTORE_DATA_VERSION 1
 
 #if defined(__x86_64__) || defined(__aarch64__)
 typedef int (*main_function)(int, char **, char **);
@@ -275,15 +277,150 @@ static const char *mapped_session(Portal *portal, const char *guest_path)
     return session == NULL ? NULL : session->host_path;
 }
 
+static char *restore_token_from_data(GVariant *restore_data)
+{
+    const char *vendor;
+    guint version;
+    GVariant *wrapped;
+    GVariant *private_data;
+    char *token = NULL;
+
+    if (!g_variant_is_of_type(restore_data, G_VARIANT_TYPE("(suv)")))
+        return NULL;
+
+    g_variant_get(
+        restore_data, "(&su@v)", &vendor, &version, &wrapped
+    );
+    private_data = g_variant_get_variant(wrapped);
+    if (g_str_equal(vendor, RESTORE_DATA_VENDOR)
+        && version == RESTORE_DATA_VERSION
+        && g_variant_is_of_type(private_data, G_VARIANT_TYPE_STRING))
+        token = g_variant_dup_string(private_data, NULL);
+    g_variant_unref(private_data);
+    g_variant_unref(wrapped);
+    return token;
+}
+
+GVariant *portal_restore_options_to_host(GVariant *options)
+{
+    GVariantDict dictionary;
+    GVariant *restore_data;
+    char *restore_token = NULL;
+
+    restore_data = g_variant_lookup_value(options, "restore_data", NULL);
+    if (restore_data != NULL) {
+        restore_token = restore_token_from_data(restore_data);
+        g_variant_unref(restore_data);
+    }
+
+    g_variant_dict_init(&dictionary, options);
+    /*
+     * restore_data is private to a backend. The host public frontend accepts
+     * only its opaque public token, and data from another backend is ignored.
+     */
+    g_variant_dict_remove(&dictionary, "restore_data");
+    g_variant_dict_remove(&dictionary, "restore_token");
+    if (restore_token != NULL)
+        g_variant_dict_insert(
+            &dictionary, "restore_token", "s", restore_token
+        );
+    g_free(restore_token);
+    return g_variant_dict_end(&dictionary);
+}
+
+GVariant *portal_restore_results_to_backend(GVariant *results)
+{
+    GVariantDict dictionary;
+    const char *restore_token = NULL;
+
+    g_variant_lookup(
+        results, "restore_token", "&s", &restore_token
+    );
+    g_variant_dict_init(&dictionary, results);
+    /*
+     * The guest frontend will turn this backend-private value into its own
+     * one-shot public restore token. Keeping the host token inside the value
+     * makes the handoff stateless for this adapter.
+     */
+    g_variant_dict_remove(&dictionary, "restore_token");
+    if (restore_token != NULL) {
+        GVariant *private_data = g_variant_new_variant(
+            g_variant_new_string(restore_token)
+        );
+        GVariant *restore_data = g_variant_new(
+            "(su@v)",
+            RESTORE_DATA_VENDOR,
+            RESTORE_DATA_VERSION,
+            private_data
+        );
+
+        g_variant_dict_insert_value(
+            &dictionary, "restore_data", restore_data
+        );
+    }
+    return g_variant_dict_end(&dictionary);
+}
+
+static gboolean method_accepts_restore_data(
+    const char *interface_name,
+    const char *method_name
+)
+{
+    return (g_str_equal(
+                interface_name,
+                "org.freedesktop.impl.portal.ScreenCast"
+            )
+            && g_str_equal(method_name, "SelectSources"))
+        || (g_str_equal(
+                interface_name,
+                "org.freedesktop.impl.portal.RemoteDesktop"
+            )
+            && g_str_equal(method_name, "SelectDevices"))
+        || (g_str_equal(
+                interface_name,
+                "org.freedesktop.impl.portal.InputCapture"
+            )
+            && g_str_equal(method_name, "Start"));
+}
+
+static gboolean method_returns_restore_data(
+    const char *interface_name,
+    const char *method_name
+)
+{
+    return g_str_equal(method_name, "Start")
+        && (g_str_equal(
+                interface_name,
+                "org.freedesktop.impl.portal.ScreenCast"
+            )
+            || g_str_equal(
+                interface_name,
+                "org.freedesktop.impl.portal.RemoteDesktop"
+            )
+            || g_str_equal(
+                interface_name,
+                "org.freedesktop.impl.portal.InputCapture"
+            ));
+}
+
 static GVariant *options_with_tokens(
+    Pending *pending,
     GVariant *options,
     const char *request_token,
     const char *session_token
 )
 {
     GVariantDict dictionary;
+    GVariant *translated = NULL;
+    GVariant *updated;
 
-    g_variant_dict_init(&dictionary, options);
+    if (method_accepts_restore_data(
+            pending->interface_name, pending->method_name
+        ))
+        translated = portal_restore_options_to_host(options);
+    g_variant_dict_init(
+        &dictionary, translated == NULL ? options : translated
+    );
     if (request_token != NULL)
         g_variant_dict_insert(
             &dictionary, "handle_token", "s", request_token
@@ -292,7 +429,9 @@ static GVariant *options_with_tokens(
         g_variant_dict_insert(
             &dictionary, "session_handle_token", "s", session_token
         );
-    return g_variant_dict_end(&dictionary);
+    updated = g_variant_dict_end(&dictionary);
+    g_clear_pointer(&translated, g_variant_unref);
+    return updated;
 }
 
 static gboolean method_returns_request(GDBusMethodInfo *method)
@@ -386,7 +525,7 @@ static GVariant *build_host_parameters(
             child = g_variant_new_object_path(host_path);
         } else if (g_str_equal(argument->name, "options")) {
             GVariant *updated = options_with_tokens(
-                child, request_token, session_token
+                pending, child, request_token, session_token
             );
             g_variant_unref(child);
             child = updated;
@@ -402,7 +541,9 @@ static GVariant *build_host_parameters(
                 && g_str_equal(pending->method_name, "CreateMonitor")))) {
         g_variant_builder_add_value(
             &tuple,
-            options_with_tokens(empty_dict(), request_token, session_token)
+            options_with_tokens(
+                pending, empty_dict(), request_token, session_token
+            )
         );
     }
     g_free(request_token);
@@ -561,6 +702,15 @@ static void finish_pending(
     guint outputs = 0;
 
     if (response == 0) {
+        if (method_returns_restore_data(
+                pending->interface_name, pending->method_name
+            )) {
+            GVariant *translated =
+                portal_restore_results_to_backend(results);
+
+            g_variant_unref(results);
+            results = translated;
+        }
         GVariant *mapped = replace_session_result(
             portal, pending, results
         );

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import configparser
+import ctypes
 import hashlib
 import os
+import shlex
 import socket
 import stat
 import subprocess
@@ -464,6 +466,121 @@ class PortalNativeTests(unittest.TestCase):
                         os.kill(pid, 15)
                     except ProcessLookupError:
                         pass
+
+    def test_screen_cast_restore_data_round_trip_is_stateless(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            library_path = Path(temporary) / "spaces-portal-test.so"
+            pkg_config = subprocess.run(
+                ["pkg-config", "--cflags", "--libs", "gio-unix-2.0"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                [
+                    os.environ.get("CC", "cc"),
+                    "-shared",
+                    "-fPIC",
+                    "-std=gnu11",
+                    "-DSPACES_PORTAL_TEST",
+                    "-Wno-unused-function",
+                    "-o",
+                    str(library_path),
+                    str(ROOT / "native" / "spaces_portal.c"),
+                    *shlex.split(pkg_config.stdout),
+                ],
+                check=True,
+            )
+            library = ctypes.CDLL(str(library_path))
+            library.g_variant_parse.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_char_p,
+                ctypes.c_char_p,
+                ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_void_p),
+            ]
+            library.g_variant_parse.restype = ctypes.c_void_p
+            library.g_variant_ref_sink.argtypes = [ctypes.c_void_p]
+            library.g_variant_ref_sink.restype = ctypes.c_void_p
+            library.g_variant_print.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_int,
+            ]
+            library.g_variant_print.restype = ctypes.c_void_p
+            library.g_variant_unref.argtypes = [ctypes.c_void_p]
+            library.g_free.argtypes = [ctypes.c_void_p]
+            library.screen_cast_options_to_host.argtypes = [
+                ctypes.c_void_p
+            ]
+            library.screen_cast_options_to_host.restype = ctypes.c_void_p
+            library.screen_cast_results_to_backend.argtypes = [
+                ctypes.c_void_p
+            ]
+            library.screen_cast_results_to_backend.restype = ctypes.c_void_p
+
+            def parse(text: str) -> int:
+                error = ctypes.c_void_p()
+                variant = library.g_variant_parse(
+                    None,
+                    text.encode(),
+                    None,
+                    None,
+                    ctypes.byref(error),
+                )
+                self.assertFalse(error.value)
+                self.assertTrue(variant)
+                return variant
+
+            def render(variant: int) -> str:
+                printed = library.g_variant_print(variant, True)
+                self.assertTrue(printed)
+                try:
+                    return ctypes.string_at(printed).decode()
+                finally:
+                    library.g_free(printed)
+
+            host_results = parse(
+                "{'restore_token': <'host-token'>, "
+                "'streams': <@a(ua{sv}) []>}"
+            )
+            backend_results = library.g_variant_ref_sink(
+                library.screen_cast_results_to_backend(host_results)
+            )
+            backend_text = render(backend_results)
+            self.assertNotIn("restore_token", backend_text)
+            self.assertIn("restore_data", backend_text)
+            self.assertIn(
+                "('Spaces', uint32 1, <'host-token'>)",
+                backend_text,
+            )
+
+            host_options = library.g_variant_ref_sink(
+                library.screen_cast_options_to_host(backend_results)
+            )
+            host_text = render(host_options)
+            self.assertIn("'restore_token': <'host-token'>", host_text)
+            self.assertNotIn("restore_data", host_text)
+
+            foreign_options = parse(
+                "{'restore_data': "
+                "<('KDE', uint32 1, <'foreign-token'>)>, "
+                "'restore_token': <'injected-token'>}"
+            )
+            filtered_options = library.g_variant_ref_sink(
+                library.screen_cast_options_to_host(foreign_options)
+            )
+            filtered_text = render(filtered_options)
+            self.assertNotIn("restore_data", filtered_text)
+            self.assertNotIn("restore_token", filtered_text)
+
+            for variant in (
+                filtered_options,
+                foreign_options,
+                host_options,
+                backend_results,
+                host_results,
+            ):
+                library.g_variant_unref(variant)
 
 
 if __name__ == "__main__":
