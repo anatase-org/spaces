@@ -4,18 +4,17 @@ from __future__ import annotations
 
 import contextlib
 import stat
-import subprocess
 from pathlib import Path
 from typing import Iterator
 
 from .. import _
 from .model import DistributionError
+from .mounts import mounted_api_filesystems
 from .pam import atomic_write, safe_directory
 
 
 GUEST_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 POLICY_RC_D = Path("usr/sbin/policy-rc.d")
-PROC = Path("proc")
 POLICY_RC_D_CONTENT = b"#!/bin/sh\nexit 101\n"
 
 
@@ -76,35 +75,13 @@ def prepared_chroot(
             distribution=distribution_name,
         ),
     )
-    proc = _ensure_directory(
-        rootfs,
-        PROC,
-        _("{distribution} proc", distribution=distribution_name),
-    )
     atomic_write(policy_path, POLICY_RC_D_CONTENT, 0o755)
-    mounted = False
     try:
-        subprocess.run(
-            [
-                "mount",
-                "--types",
-                "proc",
-                "--options",
-                "nosuid,noexec,nodev",
-                "proc",
-                str(proc),
-            ],
-            check=True,
-        )
-        mounted = True
-        yield
+        with mounted_api_filesystems(rootfs, distribution_name):
+            yield
     finally:
-        try:
-            if mounted:
-                subprocess.run(["umount", str(proc)], check=True)
-        finally:
-            if previous_policy is None:
-                policy_path.unlink(missing_ok=True)
-            else:
-                content, mode = previous_policy
-                atomic_write(policy_path, content, mode)
+        if previous_policy is None:
+            policy_path.unlink(missing_ok=True)
+        else:
+            content, mode = previous_policy
+            atomic_write(policy_path, content, mode)

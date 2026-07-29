@@ -93,6 +93,18 @@ class PrivilegedTests(unittest.TestCase):
                     check=True,
                 ),
                 mock.call(
+                    [
+                        "mount",
+                        "--types",
+                        "sysfs",
+                        "--options",
+                        "ro,nosuid,noexec,nodev",
+                        "sysfs",
+                        str(space / "rootfs" / "sys"),
+                    ],
+                    check=True,
+                ),
+                mock.call(
                     ubuntu.chroot_command(
                         space / "rootfs",
                         "apt-get",
@@ -102,7 +114,14 @@ class PrivilegedTests(unittest.TestCase):
                 ),
             ]
         )
-        self.assertEqual(run.call_count, 6)
+        self.assertEqual(run.call_count, 8)
+        self.assertEqual(
+            run.call_args_list[-2],
+            mock.call(
+                ["umount", str(space / "rootfs" / "sys")],
+                check=True,
+            ),
+        )
         self.assertEqual(
             run.call_args,
             mock.call(

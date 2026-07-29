@@ -149,12 +149,64 @@ class DistributionDriverTests(unittest.TestCase):
 
     def test_fedora_bootstrap_uses_driver_command(self) -> None:
         metadata = {"id": "fedora", "version": "44"}
-        with mock.patch.object(fedora.subprocess, "run") as run:
-            fedora.DISTRIBUTION.bootstrap(metadata, Path("/rootfs"))
-        run.assert_called_once_with(
-            fedora.DISTRIBUTION.command(metadata, Path("/rootfs")),
-            check=True,
+        with tempfile.TemporaryDirectory() as temporary:
+            rootfs = Path(temporary) / "rootfs"
+            rootfs.mkdir()
+            with mock.patch.object(fedora.subprocess, "run") as run:
+                fedora.DISTRIBUTION.bootstrap(metadata, rootfs)
+        self.assertEqual(
+            [call.args[0] for call in run.call_args_list],
+            [
+                [
+                    "mount",
+                    "--types",
+                    "proc",
+                    "--options",
+                    "nosuid,noexec,nodev",
+                    "proc",
+                    str(rootfs / "proc"),
+                ],
+                [
+                    "mount",
+                    "--types",
+                    "sysfs",
+                    "--options",
+                    "ro,nosuid,noexec,nodev",
+                    "sysfs",
+                    str(rootfs / "sys"),
+                ],
+                fedora.DISTRIBUTION.command(metadata, rootfs),
+                ["umount", str(rootfs / "sys")],
+                ["umount", str(rootfs / "proc")],
+            ],
         )
+        self.assertTrue(
+            all(call.kwargs == {"check": True} for call in run.call_args_list)
+        )
+
+    def test_fedora_bootstrap_unmounts_api_filesystems_after_failure(self) -> None:
+        metadata = {"id": "fedora", "version": "44"}
+        with tempfile.TemporaryDirectory() as temporary:
+            rootfs = Path(temporary) / "rootfs"
+            rootfs.mkdir()
+            commands: list[list[str]] = []
+
+            def run(command: list[str], *, check: bool) -> subprocess.CompletedProcess:
+                commands.append(command)
+                if command[0] == "dnf5":
+                    raise subprocess.CalledProcessError(1, command)
+                return subprocess.CompletedProcess(command, 0)
+
+            with (
+                mock.patch.object(fedora.subprocess, "run", side_effect=run),
+                self.assertRaises(subprocess.CalledProcessError),
+            ):
+                fedora.DISTRIBUTION.bootstrap(metadata, rootfs)
+
+        self.assertEqual(commands[-2:], [
+            ["umount", str(rootfs / "sys")],
+            ["umount", str(rootfs / "proc")],
+        ])
 
     def test_arch_bootstrap_honors_yay_opt_out(self) -> None:
         with (
@@ -283,14 +335,27 @@ class DistributionDriverTests(unittest.TestCase):
             )
             self.assertEqual(
                 commands[2],
+                [
+                    "mount",
+                    "--types",
+                    "sysfs",
+                    "--options",
+                    "ro,nosuid,noexec,nodev",
+                    "sysfs",
+                    str(rootfs / "sys"),
+                ],
+            )
+            self.assertEqual(
+                commands[3],
                 kali._chroot_command(rootfs, "apt-get", "update"),
             )
-            self.assertIn("--no-install-recommends", commands[3])
-            self.assertIn("kwallet6", commands[3])
-            self.assertIn("libqca-qt6-plugins", commands[3])
-            self.assertIn("qt6-wayland", commands[3])
-            self.assertEqual(commands[4][-2:], ["--yes", "kali-linux-default"])
-            self.assertEqual(commands[5], ["umount", str(rootfs / "proc")])
+            self.assertIn("--no-install-recommends", commands[4])
+            self.assertIn("kwallet6", commands[4])
+            self.assertIn("libqca-qt6-plugins", commands[4])
+            self.assertIn("qt6-wayland", commands[4])
+            self.assertEqual(commands[5][-2:], ["--yes", "kali-linux-default"])
+            self.assertEqual(commands[6], ["umount", str(rootfs / "sys")])
+            self.assertEqual(commands[7], ["umount", str(rootfs / "proc")])
             self.assertFalse((rootfs / kali.POLICY_RC_D).exists())
             self.assertEqual(
                 (
@@ -329,7 +394,10 @@ class DistributionDriverTests(unittest.TestCase):
             ):
                 kali.DISTRIBUTION.bootstrap({"id": "kali"}, rootfs)
 
-            self.assertEqual(commands[-1], ["umount", str(rootfs / "proc")])
+            self.assertEqual(commands[-2:], [
+                ["umount", str(rootfs / "sys")],
+                ["umount", str(rootfs / "proc")],
+            ])
             self.assertFalse((rootfs / kali.POLICY_RC_D).exists())
 
 
