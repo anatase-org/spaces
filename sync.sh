@@ -106,6 +106,7 @@ scp "$rpm_path" "$remote_host:"
 echo "Installing $rpm_name on $remote_host..."
 ssh -t "$remote_host" "sudo rpm-ostree usroverlay || true
 sudo dnf5 install -y ~/$rpm_name &&
+sudo systemctl try-reload-or-restart polkit.service &&
 sudo systemctl stop 'spaces@*'"
 
 echo "Spaces is ready on $remote_host."
