@@ -5,5 +5,7 @@ recursive-include data/pam *
 recursive-include data/keys *
 recursive-include data/repos *
 recursive-include data/portal *
+recursive-include data/applications *.desktop
+recursive-include data/icons *.png
 recursive-include native Makefile *.c *.h *.py
 recursive-include tests *.py

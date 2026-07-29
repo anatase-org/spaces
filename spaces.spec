@@ -51,6 +51,13 @@ Spaces provide a chroot-like sandboxing environment for you to access your favor
 %make_install -C native LIBEXECDIR=/usr/lib/spaces
 install -Dm644 data/pam/spaces.system-auth \
   %{buildroot}%{_sysconfdir}/pam.d/spaces
+for distro in arch fedora ubuntu; do
+  install -Dm644 "data/applications/spaces-${distro}.desktop" \
+    "%{buildroot}%{_datadir}/applications/spaces-${distro}.desktop"
+  install -Dm644 \
+    "data/icons/hicolor/256x256/apps/spaces-${distro}.png" \
+    "%{buildroot}%{_datadir}/icons/hicolor/256x256/apps/spaces-${distro}.png"
+done
 
 %post
 %systemd_post spaces@.service
@@ -86,4 +93,6 @@ install -Dm644 data/pam/spaces.system-auth \
 /usr/lib/spaces/guest/spaces-session-launcher
 %dir %{_datadir}/spaces/portal
 %{_datadir}/spaces/portal/*
+%{_datadir}/applications/spaces-*.desktop
+%{_datadir}/icons/hicolor/256x256/apps/spaces-*.png
 %{_unitdir}/spaces@.service

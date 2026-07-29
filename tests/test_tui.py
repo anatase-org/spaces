@@ -448,6 +448,76 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertFalse(app.query_one("#select", Button).disabled)
 
+    async def test_missing_step_is_prepended(self) -> None:
+        app = PermissionForm(
+            home=Path("/home/user"),
+            folders=["Projects"],
+            network="basic",
+            selected_home=[],
+            administrator=True,
+            include_system=True,
+            distribution_title="",
+            distribution_description="",
+            distribution_options=[],
+            distribution_value=None,
+            missing=True,
+            space_name="ubuntu",
+        )
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            self.assertEqual(
+                app.steps,
+                [
+                    "missing",
+                    "system",
+                    "devices",
+                    "host-authentication",
+                    "shortcuts",
+                    "user",
+                    "desktop",
+                    "administrator",
+                ],
+            )
+            self.assertEqual(
+                str(app.query_one("#missing-step Static").render()),
+                "Space ubuntu does not exist. It must be created "
+                "before you can enter it.",
+            )
+            self.assertEqual(
+                str(app.query_one("#step-title").render()),
+                "Space does not exist (1/8)",
+            )
+            self.assertTrue(app.query_one("#select", Button).disabled)
+            self.assertTrue(app.query_one("#next", Button).has_focus)
+            await pilot.press("space")
+            self.assertEqual(app.step_index, 0)
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertEqual(
+                str(app.query_one("#step-title").render()),
+                "System permissions (2/8)",
+            )
+            self.assertFalse(app.query_one("#select", Button).disabled)
+
+    async def test_override_warning_takes_precedence_over_missing(self) -> None:
+        app = PermissionForm(
+            home=Path("/home/user"),
+            folders=[],
+            network="basic",
+            selected_home=[],
+            include_system=False,
+            distribution_title="",
+            distribution_description="",
+            distribution_options=[],
+            distribution_value=None,
+            override=True,
+            missing=True,
+        )
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            self.assertEqual(app.steps[0], "override")
+            self.assertNotIn("missing", app.steps)
+
     def test_name_prompt_runs_inline(self) -> None:
         with mock.patch.object(NamePrompt, "run", return_value="work") as run:
             self.assertEqual(ask_custom_name(), "work")

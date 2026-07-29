@@ -53,6 +53,13 @@ package() {
   /usr/bin/python -m installer --destdir="$pkgdir" dist/*.whl
   make -C native DESTDIR="$pkgdir" install
   install -Dm644 data/pam/spaces.system-auth "$pkgdir/etc/pam.d/spaces"
+  for distro in arch fedora ubuntu; do
+    install -Dm644 "data/applications/spaces-$distro.desktop" \
+      "$pkgdir/usr/share/applications/spaces-$distro.desktop"
+    install -Dm644 \
+      "data/icons/hicolor/256x256/apps/spaces-$distro.png" \
+      "$pkgdir/usr/share/icons/hicolor/256x256/apps/spaces-$distro.png"
+  done
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   install -Dm644 readme.md "$pkgdir/usr/share/doc/$pkgname/readme.md"
 }

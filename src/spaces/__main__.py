@@ -232,7 +232,7 @@ def _invoke_raw_helper(operation: str, arguments: list[str]) -> int:
     return completed.returncode
 
 
-def _create(distro_id: str) -> int:
+def _create(distro_id: str, *, missing: bool = False) -> int:
     driver = get_driver(distro_id)
     if driver is None:
         print(
@@ -254,9 +254,14 @@ def _create(distro_id: str) -> int:
         name = driver.default_name
 
     target = core.STATE_ROOT / name
-    override = target.exists() or target.is_symlink()
+    target_present = target.exists() or target.is_symlink()
+    rootfs = target / "rootfs"
+    rootfs_present = rootfs.exists() or rootfs.is_symlink()
+    override = target_present and (not missing or rootfs_present)
 
-    existing_info = core.load_info(target / "info.json") if override else None
+    existing_info = (
+        core.load_info(target / "info.json") if target_present else None
+    )
     (
         network,
         devices,
@@ -303,6 +308,8 @@ def _create(distro_id: str) -> int:
         distribution_values=distribution_values,
         submit_label=_("Create"),
         override=override,
+        missing=missing and not override,
+        space_name=name,
     )
     if result is None:
         return 130
@@ -480,6 +487,26 @@ def _enter(
     graphical: bool = False,
 ) -> int:
     core.validate_space_name(space)
+    target = core.STATE_ROOT / space
+    info_path = target / "info.json"
+    target_missing = not target.exists() and not target.is_symlink()
+    info_missing = (
+        not target.is_symlink()
+        and target.is_dir()
+        and not info_path.exists()
+        and not info_path.is_symlink()
+    )
+    driver = get_driver(space)
+    if (
+        (target_missing or info_missing)
+        and _has_controlling_terminal()
+        and driver is not None
+        and driver.default_name == space
+    ):
+        return_code = _create(space, missing=True)
+        if return_code != 0:
+            return return_code
+
     user_name: str | None = None
     if enter_user is None:
         identity = core.initiating_identity()

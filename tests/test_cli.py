@@ -192,6 +192,7 @@ class CliTests(unittest.TestCase):
             wizard.call_args.kwargs["administrator_group"],
             "sudo",
         )
+        self.assertFalse(wizard.call_args.kwargs["missing"])
         self.assertTrue(
             payload["permissions"]["users"]["1000"]["permissions"][
                 "administrator"
@@ -205,6 +206,52 @@ class CliTests(unittest.TestCase):
             payload["permissions"]["system"]["devices"],
             "basic",
         )
+
+    def test_create_from_enter_marks_space_as_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary) / "home"
+            home.mkdir()
+            identity = core.Identity(1000, 1000, home)
+            with (
+                mock.patch.object(core, "STATE_ROOT", Path(temporary) / "state"),
+                mock.patch.object(
+                    core, "initiating_identity", return_value=identity
+                ),
+                mock.patch.object(
+                    cli, "run_permission_wizard", return_value=None
+                ) as wizard,
+                mock.patch.object(cli, "_invoke_helper") as invoke,
+            ):
+                self.assertEqual(cli._create("ubuntu", missing=True), 130)
+
+        self.assertTrue(wizard.call_args.kwargs["missing"])
+        self.assertFalse(wizard.call_args.kwargs["override"])
+        self.assertEqual(wizard.call_args.kwargs["space_name"], "ubuntu")
+        invoke.assert_not_called()
+
+    def test_create_from_enter_replaces_partial_rootfs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            (state / "kali" / "rootfs").mkdir(parents=True)
+            home = Path(temporary) / "home"
+            home.mkdir()
+            identity = core.Identity(1000, 1000, home)
+            with (
+                mock.patch.object(core, "STATE_ROOT", state),
+                mock.patch.object(
+                    core, "initiating_identity", return_value=identity
+                ),
+                mock.patch.object(
+                    cli, "run_permission_wizard", return_value=None
+                ) as wizard,
+                mock.patch.object(cli, "_invoke_helper") as invoke,
+            ):
+                self.assertEqual(cli._create("kali", missing=True), 130)
+
+        self.assertTrue(wizard.call_args.kwargs["override"])
+        self.assertFalse(wizard.call_args.kwargs["missing"])
+        self.assertEqual(wizard.call_args.kwargs["space_name"], "kali")
+        invoke.assert_not_called()
 
     def test_create_arch_builds_options_payload(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -702,6 +749,205 @@ class CliTests(unittest.TestCase):
             "enter",
             ["alice@work"],
         )
+
+    def test_enter_creates_missing_fixed_distribution_then_enters(self) -> None:
+        identity = core.Identity(1000, 1000, Path("/home/alice"))
+        for distribution in ("arch", "fedora", "ubuntu", "kali"):
+            with (
+                self.subTest(distribution=distribution),
+                tempfile.TemporaryDirectory() as temporary,
+                mock.patch.object(core, "STATE_ROOT", Path(temporary)),
+                mock.patch.object(
+                    cli, "_has_controlling_terminal", return_value=True
+                ),
+                mock.patch.object(cli, "_create", return_value=0) as create,
+                mock.patch.object(
+                    core, "initiating_identity", return_value=identity
+                ),
+                mock.patch.object(
+                    cli.pwd,
+                    "getpwuid",
+                    return_value=mock.Mock(pw_name="alice"),
+                ),
+                mock.patch.object(
+                    cli, "_invoke_raw_helper", return_value=0
+                ) as invoke,
+            ):
+                self.assertEqual(cli.main(["enter", distribution]), 0)
+
+            create.assert_called_once_with(distribution, missing=True)
+            invoke.assert_called_once_with(
+                "enter",
+                [f"alice@{distribution}"],
+            )
+
+    def test_enter_after_creation_preserves_options_and_command(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            mock.patch.object(core, "STATE_ROOT", Path(temporary)),
+            mock.patch.object(
+                cli, "_has_controlling_terminal", return_value=True
+            ),
+            mock.patch.object(cli, "_create", return_value=0) as create,
+            mock.patch.object(
+                cli, "_invoke_raw_helper", return_value=0
+            ) as invoke,
+        ):
+            self.assertEqual(
+                cli.main(
+                    [
+                        "enter",
+                        "--root",
+                        "--graphical",
+                        "arch",
+                        "--",
+                        "printf",
+                        "%s",
+                        "$HOME",
+                    ]
+                ),
+                0,
+            )
+
+        create.assert_called_once_with("arch", missing=True)
+        invoke.assert_called_once_with(
+            "enter-as-user",
+            [
+                "root",
+                "arch",
+                "--",
+                "printf",
+                "%s",
+                "$HOME",
+            ],
+        )
+
+    def test_enter_creates_partial_space_with_missing_info(self) -> None:
+        identity = core.Identity(1000, 1000, Path("/home/alice"))
+        for rootfs_present in (False, True):
+            with (
+                self.subTest(rootfs_present=rootfs_present),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                state = Path(temporary)
+                target = state / "ubuntu"
+                target.mkdir()
+                if rootfs_present:
+                    (target / "rootfs").mkdir()
+                with (
+                    mock.patch.object(core, "STATE_ROOT", state),
+                    mock.patch.object(
+                        cli,
+                        "_has_controlling_terminal",
+                        return_value=True,
+                    ),
+                    mock.patch.object(
+                        cli, "_create", return_value=0
+                    ) as create,
+                    mock.patch.object(
+                        core,
+                        "initiating_identity",
+                        return_value=identity,
+                    ),
+                    mock.patch.object(
+                        cli.pwd,
+                        "getpwuid",
+                        return_value=mock.Mock(pw_name="alice"),
+                    ),
+                    mock.patch.object(
+                        cli, "_invoke_raw_helper", return_value=0
+                    ) as invoke,
+                ):
+                    self.assertEqual(cli.main(["enter", "ubuntu"]), 0)
+
+            create.assert_called_once_with("ubuntu", missing=True)
+            invoke.assert_called_once_with(
+                "enter",
+                ["alice@ubuntu"],
+            )
+
+    def test_cancelled_missing_space_creation_does_not_enter(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            mock.patch.object(core, "STATE_ROOT", Path(temporary)),
+            mock.patch.object(
+                cli, "_has_controlling_terminal", return_value=True
+            ),
+            mock.patch.object(cli, "_create", return_value=130) as create,
+            mock.patch.object(
+                cli, "_invoke_raw_helper"
+            ) as invoke,
+        ):
+            self.assertEqual(cli.main(["enter", "ubuntu"]), 130)
+
+        create.assert_called_once_with("ubuntu", missing=True)
+        invoke.assert_not_called()
+
+    def test_missing_space_auto_create_requires_tty_and_fixed_name(
+        self,
+    ) -> None:
+        identity = core.Identity(1000, 1000, Path("/home/alice"))
+        cases = (
+            ("arch", False, None),
+            ("work", True, None),
+            ("custom", True, None),
+            ("arch", True, "metadata"),
+            ("arch", True, "space-symlink"),
+            ("arch", True, "info-symlink"),
+        )
+        for space, terminal, target_kind in cases:
+            with (
+                self.subTest(
+                    space=space,
+                    terminal=terminal,
+                    target_kind=target_kind,
+                ),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                state = Path(temporary)
+                target = state / space
+                if target_kind == "metadata":
+                    target.mkdir()
+                    (target / "info.json").write_text(
+                        "{}",
+                        encoding="utf-8",
+                    )
+                elif target_kind == "space-symlink":
+                    target.symlink_to(state / "missing-target")
+                elif target_kind == "info-symlink":
+                    target.mkdir()
+                    (target / "info.json").symlink_to(
+                        state / "missing-info"
+                    )
+                with (
+                    mock.patch.object(core, "STATE_ROOT", state),
+                    mock.patch.object(
+                        cli,
+                        "_has_controlling_terminal",
+                        return_value=terminal,
+                    ),
+                    mock.patch.object(cli, "_create") as create,
+                    mock.patch.object(
+                        core,
+                        "initiating_identity",
+                        return_value=identity,
+                    ),
+                    mock.patch.object(
+                        cli.pwd,
+                        "getpwuid",
+                        return_value=mock.Mock(pw_name="alice"),
+                    ),
+                    mock.patch.object(
+                        cli, "_invoke_raw_helper", return_value=1
+                    ) as invoke,
+                ):
+                    self.assertEqual(cli.main(["enter", space]), 1)
+
+            create.assert_not_called()
+            invoke.assert_called_once_with(
+                "enter",
+                [f"alice@{space}"],
+            )
 
     def test_enter_never_sends_terminal_session_data_to_helper(self) -> None:
         identity = core.Identity(1000, 1000, Path("/home/alice"))

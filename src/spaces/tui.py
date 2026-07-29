@@ -338,6 +338,8 @@ class PermissionForm(
         administrator_group: str = "wheel",
         submit_label: str = _("Create"),
         override: bool = False,
+        missing: bool = False,
+        space_name: str = "",
     ) -> None:
         super().__init__(ansi_color=True)
         self.home = home
@@ -367,8 +369,14 @@ class PermissionForm(
         self.distribution_multiple = distribution_multiple
         self.distribution_values = set(distribution_values or [])
         self.submit_label = submit_label
+        self.space_name = space_name
+        notice_steps: list[str] = []
+        if override:
+            notice_steps.append("override")
+        elif missing:
+            notice_steps.append("missing")
         self.steps = (
-            (["override"] if override else [])
+            notice_steps
             + (
                 ["system", "devices", "host-authentication", "shortcuts"]
                 if include_system
@@ -388,6 +396,16 @@ class PermissionForm(
                         _(
                             "The existing space will be overwritten. "
                             "Its home data will be preserved."
+                        ),
+                        classes="description",
+                    )
+            if "missing" in self.steps:
+                with Vertical(id="missing-step", classes="step"):
+                    yield Static(
+                        _(
+                            "Space {space} does not exist. It must be created "
+                            "before you can enter it.",
+                            space=self.space_name,
                         ),
                         classes="description",
                     )
@@ -602,6 +620,7 @@ class PermissionForm(
 
         titles = {
             "override": _("Space already exists"),
+            "missing": _("Space does not exist"),
             "system": _("System permissions"),
             "devices": _("Device permissions"),
             "host-authentication": _("Host authentication permissions"),
@@ -632,7 +651,7 @@ class PermissionForm(
         )
         next_button.refresh(layout=True)
         select_button = self.query_one("#select", Button)
-        select_button.disabled = current == "override"
+        select_button.disabled = current in {"override", "missing"}
         focus_targets = {
             "system": "#network",
             "devices": "#devices",
@@ -647,7 +666,7 @@ class PermissionForm(
                 else "#distribution-option"
             ),
         }
-        if current == "override":
+        if current in {"override", "missing"}:
             next_button.focus()
             return
         focus_target = self.query_one(focus_targets[current])
@@ -661,7 +680,7 @@ class PermissionForm(
         """Select or toggle the highlighted option on the current step."""
 
         current = self.steps[self.step_index]
-        if current == "override":
+        if current in {"override", "missing"}:
             return
         if current == "user":
             self.query_one(

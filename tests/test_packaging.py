@@ -10,7 +10,7 @@ import unittest
 import xml.etree.ElementTree as ElementTree
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageChops
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -143,6 +143,104 @@ class PackagingTests(unittest.TestCase):
         self.assertIn(
             "/usr/bin/python -m unittest discover -s tests -v", pkgbuild
         )
+
+    def test_distribution_launchers_are_packaged(self) -> None:
+        spec = (ROOT / "spaces.spec").read_text(encoding="utf-8")
+        pkgbuild = (ROOT / "pkg" / "PKGBUILD").read_text(encoding="utf-8")
+        manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8")
+        self.assertIn("recursive-include data/applications *.desktop", manifest)
+        self.assertIn("recursive-include data/icons *.png", manifest)
+        self.assertIn(
+            "%{_datadir}/applications/spaces-*.desktop",
+            spec,
+        )
+        self.assertIn(
+            "%{_datadir}/icons/hicolor/256x256/apps/spaces-*.png",
+            spec,
+        )
+        self.assertIn(
+            "data/applications/spaces-${distro}.desktop",
+            spec,
+        )
+        self.assertIn(
+            "data/icons/hicolor/256x256/apps/spaces-${distro}.png",
+            spec,
+        )
+        self.assertIn(
+            "data/applications/spaces-$distro.desktop",
+            pkgbuild,
+        )
+        self.assertIn(
+            "data/icons/hicolor/256x256/apps/spaces-$distro.png",
+            pkgbuild,
+        )
+
+        expected_names = {
+            "arch": "Space (Arch)",
+            "fedora": "Space (Fedora)",
+            "ubuntu": "Space (Ubuntu)",
+        }
+        icon_hashes: set[bytes] = set()
+        for distribution, name in expected_names.items():
+            desktop_path = (
+                ROOT
+                / "data"
+                / "applications"
+                / f"spaces-{distribution}.desktop"
+            )
+            desktop = configparser.ConfigParser(interpolation=None)
+            desktop.read(desktop_path, encoding="utf-8")
+            entry = desktop["Desktop Entry"]
+            self.assertEqual(entry["Type"], "Application")
+            self.assertEqual(entry["Name"], name)
+            self.assertEqual(entry["TryExec"], "/usr/bin/spaces")
+            self.assertEqual(
+                entry["Exec"],
+                f"/usr/bin/spaces enter {distribution}",
+            )
+            self.assertEqual(entry["Icon"], f"spaces-{distribution}")
+            self.assertTrue(entry.getboolean("Terminal"))
+            self.assertEqual(entry["Categories"], "Development;")
+
+            icon_path = (
+                ROOT
+                / "data"
+                / "icons"
+                / "hicolor"
+                / "256x256"
+                / "apps"
+                / f"spaces-{distribution}.png"
+            )
+            distribution_path = (
+                ROOT / "art" / "distros" / f"{distribution}.png"
+            )
+            with (
+                Image.open(icon_path) as icon_source,
+                Image.open(distribution_path) as distribution_source,
+            ):
+                self.assertEqual(icon_source.mode, "RGBA")
+                icon = icon_source.convert("RGBA")
+                distribution_icon = distribution_source.convert("RGBA")
+            self.assertEqual(icon.size, (256, 256))
+            self.assertEqual(icon.getpixel((0, 0))[3], 0)
+            self.assertEqual(icon.getpixel((255, 255))[3], 0)
+
+            expected_distribution = Image.new("RGBA", icon.size)
+            expected_distribution.alpha_composite(
+                distribution_icon,
+                (
+                    (icon.width - distribution_icon.width) // 2,
+                    (icon.height - distribution_icon.height) // 2,
+                ),
+            )
+            difference = ImageChops.difference(icon, expected_distribution)
+            badge_bounds = difference.getbbox()
+            self.assertIsNotNone(badge_bounds)
+            assert badge_bounds is not None
+            self.assertGreaterEqual(badge_bounds[0], 146)
+            self.assertGreaterEqual(badge_bounds[1], 146)
+            icon_hashes.add(icon.tobytes())
+        self.assertEqual(len(icon_hashes), len(expected_names))
 
     def test_native_authentication_assets_are_packaged_per_architecture(
         self,
