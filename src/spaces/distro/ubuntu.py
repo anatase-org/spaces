@@ -49,6 +49,7 @@ RELEASES = {
     "noble": _("Noble (24.04)"),
     "resolute": _("Resolute (26.04)"),
 }
+DEBOOTSTRAP_SCRIPT = "gutsy"
 
 
 def _configure_apt_sources(rootfs: Path, release: str) -> None:
@@ -105,6 +106,8 @@ class UbuntuDistribution(Distribution):
             "debootstrap",
             release,
             str(rootfs),
+            "",
+            DEBOOTSTRAP_SCRIPT,
         ]
 
     def bootstrap(self, metadata: Mapping[str, Any], rootfs: Path) -> None:

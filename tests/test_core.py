@@ -32,6 +32,8 @@ class CoreTests(unittest.TestCase):
                 "debootstrap",
                 "noble",
                 "/rootfs",
+                "",
+                "gutsy",
             ],
         )
         self.assertIn("pkexec", ubuntu.PACKAGES)

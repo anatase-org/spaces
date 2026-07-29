@@ -75,6 +75,8 @@ class PrivilegedTests(unittest.TestCase):
                         "debootstrap",
                         "resolute",
                         str(space / "rootfs"),
+                        "",
+                        "gutsy",
                     ],
                     check=True,
                 ),
