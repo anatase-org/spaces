@@ -56,6 +56,7 @@ spaces = ["overlay/*.png"]
 "share/spaces/repos" = ["data/repos/fedora.repo"]
 "lib/systemd/system" = ["data/spaces@.service"]
 "share/spaces/portal/dbus-1/services" = [
+  "data/portal/dbus-1/services/org.freedesktop.FileManager1.service",
   "data/portal/dbus-1/services/org.freedesktop.impl.portal.desktop.spaces.service",
   "data/portal/dbus-1/services/org.freedesktop.secrets.service",
   "data/portal/dbus-1/services/org.kde.secretservicecompat.service",

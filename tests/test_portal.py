@@ -5,6 +5,7 @@ import ctypes
 import hashlib
 import hmac
 import os
+import signal
 import shlex
 import socket
 import stat
@@ -38,7 +39,6 @@ HOST_INTERFACES = {
 }
 SPACE_INTERFACES = {
     "Access",
-    "AppChooser",
     "Background",
     "DynamicLauncher",
     "FileChooser",
@@ -65,6 +65,10 @@ class PortalConfigurationTests(unittest.TestCase):
                 preferred[f"org.freedesktop.impl.portal.{name}"],
                 "spaces",
             )
+        self.assertEqual(
+            preferred["org.freedesktop.impl.portal.AppChooser"],
+            "spaces",
+        )
         for name in SPACE_INTERFACES:
             self.assertEqual(
                 preferred[f"org.freedesktop.impl.portal.{name}"],
@@ -85,7 +89,7 @@ class PortalConfigurationTests(unittest.TestCase):
             for value in descriptor["portal"]["Interfaces"].split(";")
             if value
         }
-        self.assertEqual(advertised, HOST_INTERFACES)
+        self.assertEqual(advertised, HOST_INTERFACES | {"AppChooser"})
         self.assertEqual(descriptor["portal"]["UseIn"], "Spaces")
 
     def test_proxy_policy_allows_only_selected_host_portals(self) -> None:
@@ -97,6 +101,28 @@ class PortalConfigurationTests(unittest.TestCase):
             self.assertNotIn(f"org.freedesktop.portal.{name}.*", policy)
         self.assertNotIn("org.freedesktop.portal.*=*", policy)
         self.assertNotIn("--talk=", policy)
+        self.assertIn(
+            "org.freedesktop.portal.OpenURI.OpenURI", policy
+        )
+        self.assertIn(
+            "org.freedesktop.portal.OpenURI.SchemeSupported", policy
+        )
+        self.assertNotIn(
+            "org.freedesktop.portal.OpenURI.OpenFile", policy
+        )
+        self.assertNotIn(
+            "org.freedesktop.portal.OpenURI.OpenDirectory", policy
+        )
+
+        broker_policy = "\n".join(
+            session._portal_policy_arguments(
+                "org.anatase.Spaces.Open.stest"
+            )
+        )
+        self.assertIn("org.anatase.Spaces.Open1.OpenFile", broker_policy)
+        self.assertIn(
+            "org.anatase.Spaces.Open1.OpenDirectory", broker_policy
+        )
 
     def test_backend_activation_restarts_after_transient_host_failure(
         self,
@@ -341,7 +367,13 @@ class PortalNativeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         subprocess.run(
-            ["make", "-C", str(ROOT / "native"), "spaces-portal"],
+            [
+                "make",
+                "-C",
+                str(ROOT / "native"),
+                "spaces-portal",
+                "spaces-open-broker",
+            ],
             check=True,
             stdout=subprocess.DEVNULL,
         )
@@ -448,10 +480,32 @@ class PortalNativeTests(unittest.TestCase):
                         f"org.freedesktop.impl.portal.{name}",
                         introspection,
                     )
+                self.assertIn(
+                    "org.freedesktop.impl.portal.AppChooser",
+                    introspection,
+                )
                 self.assertNotIn(
                     "org.freedesktop.impl.portal.FileChooser",
                     introspection,
                 )
+                file_manager = subprocess.run(
+                    [
+                        "gdbus",
+                        "introspect",
+                        "--address",
+                        guest_address,
+                        "--dest",
+                        "org.freedesktop.impl.portal.desktop.spaces",
+                        "--object-path",
+                        "/org/freedesktop/FileManager1",
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout
+                self.assertIn("ShowItems", file_manager)
+                self.assertIn("ShowFolders", file_manager)
+                self.assertIn("ShowItemProperties", file_manager)
 
                 denied = subprocess.run(
                     [
@@ -498,6 +552,109 @@ class PortalNativeTests(unittest.TestCase):
                         os.kill(pid, 15)
                     except ProcessLookupError:
                         pass
+
+    def test_broker_rejects_traversal_and_identity_mismatch(self) -> None:
+        try:
+            import gi
+
+            gi.require_version("Gio", "2.0")
+            from gi.repository import Gio, GLib
+        except ImportError:
+            self.skipTest("PyGObject is unavailable")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            address, bus_pid = self._bus(root / "bus")
+            base = root / "base"
+            nested = root / "nested"
+            (base / "nested").mkdir(parents=True)
+            nested.mkdir()
+            (base / "a").write_text("base", encoding="utf-8")
+            (base / "nested" / "a").write_text(
+                "shadowed", encoding="utf-8"
+            )
+            (nested / "a").write_text("nested", encoding="utf-8")
+            base_fd = os.open(base, os.O_PATH)
+            nested_fd = os.open(nested, os.O_PATH)
+            ready_read, ready_write = os.pipe()
+            broker = subprocess.Popen(
+                [
+                    ROOT / "native" / "spaces-open-broker",
+                    "--name",
+                    "org.anatase.Spaces.Open.stest",
+                    "--ready-fd",
+                    str(ready_write),
+                    "--map",
+                    "/guest",
+                    str(base_fd),
+                    "--map",
+                    "/guest/nested",
+                    str(nested_fd),
+                ],
+                env={
+                    **os.environ,
+                    "DBUS_SESSION_BUS_ADDRESS": address,
+                },
+                pass_fds=(base_fd, nested_fd, ready_write),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            os.close(base_fd)
+            os.close(nested_fd)
+            os.close(ready_write)
+            try:
+                self.assertEqual(os.read(ready_read, 1), b"1")
+                connection = Gio.DBusConnection.new_for_address_sync(
+                    address,
+                    Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT
+                    | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION,
+                    None,
+                    None,
+                )
+
+                def call(path: str, proof: Path) -> str:
+                    proof_fd = os.open(proof, os.O_RDONLY)
+                    descriptors = Gio.UnixFDList.new()
+                    handle = descriptors.append(proof_fd)
+                    os.close(proof_fd)
+                    try:
+                        connection.call_with_unix_fd_list_sync(
+                            "org.anatase.Spaces.Open.stest",
+                            "/org/anatase/Spaces/Open",
+                            "org.anatase.Spaces.Open1",
+                            "OpenFile",
+                            GLib.Variant(
+                                "(shbs)", (path, handle, False, "")
+                            ),
+                            GLib.VariantType.new("(u)"),
+                            Gio.DBusCallFlags.NONE,
+                            2000,
+                            descriptors,
+                            None,
+                        )
+                    except GLib.Error as error:
+                        return str(error)
+                    self.fail("broker call unexpectedly succeeded")
+
+                mismatch = call("/guest/a", nested / "a")
+                self.assertIn(
+                    "proof does not identify the mapped object", mismatch
+                )
+                traversal = call("/guest/../a", base / "a")
+                self.assertIn("no active host mapping", traversal)
+                longest = call("/guest/nested/a", nested / "a")
+                self.assertNotIn("proof does not identify", longest)
+                self.assertNotIn("no active host mapping", longest)
+                connection.close_sync(None)
+            finally:
+                os.close(ready_read)
+                if broker.poll() is None:
+                    broker.terminate()
+                broker.wait(timeout=2)
+                try:
+                    os.kill(bus_pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
 
     def test_host_portal_restore_data_round_trip_is_stateless(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

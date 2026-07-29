@@ -32,15 +32,21 @@ MACHINECTL = "/usr/bin/machinectl"
 SYSTEMCTL = "/usr/bin/systemctl"
 SYSTEMD_RUN = "/usr/bin/systemd-run"
 XDG_DBUS_PROXY = "/usr/bin/xdg-dbus-proxy"
+OPEN_BROKER = "/usr/lib/spaces/spaces-open-broker"
 RUNTIME_ROOT = Path("/run/spaces")
 DESKTOP_ROOT = PurePosixPath("/run/spaces/desktop")
 ENVIRONMENT_DIRECTORY = "env"
 PORTAL_SOCKET_NAME = "bus"
 PORTAL_READY_TIMEOUT = 5.0
+MAX_MIME_INDEX_SIZE = 8 * 1024 * 1024
 LOCAL_DISPLAY_PATTERN = re.compile(
     r"^(?:(?:unix)/)?:(?P<number>[0-9]+)(?:\.[0-9]+)?$"
 )
 SOCKET_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
+MIME_TYPE_PATTERN = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*/"
+    r"[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*$"
+)
 STATUS_STATES = frozenset({"active", "inactive", "pending"})
 
 # Do not add DBUS_SESSION_BUS_ADDRESS, XDG_RUNTIME_DIR, or XDG_SESSION_ID here.
@@ -59,7 +65,6 @@ DESKTOP_ENVIRONMENT = frozenset(
         "GTK_IM_MODULE",
         "GTK_THEME",
         "KDE_APPLICATIONS_AS_SCOPE",
-        "KDE_FULL_SESSION",
         "KDE_SESSION_UID",
         "KDE_SESSION_VERSION",
         "LANG",
@@ -91,6 +96,7 @@ DESKTOP_ENVIRONMENT = frozenset(
         "QT_STYLE_OVERRIDE",
         "QT_WAYLAND_DISABLE_WINDOWDECORATION",
         "SDL_VIDEODRIVER",
+        "SPACES_OPEN_BROKER",
         "SPACES_NAME",
         "WAYLAND_DISPLAY",
         "XAUTHORITY",
@@ -130,6 +136,15 @@ HOST_PORTAL_INTERFACES = (
     "Secret",
     "Settings",
     "Wallpaper",
+)
+OPEN_DESKTOP_ID = "spaces-open.desktop"
+OPEN_SCHEMES = (
+    "http",
+    "https",
+    "ftp",
+    "mailto",
+    "webcal",
+    "calendar",
 )
 PORTAL_DATA_ROOT = Path("/usr/share/spaces/portal")
 PORTAL_DATA_BINDS = (
@@ -173,6 +188,7 @@ class DesktopUser(Protocol):
     gid: int
     name: str
     host_home: Path
+    space_home: Path
     guest_home: PurePosixPath
     desktop: bool
 
@@ -198,12 +214,23 @@ class DesktopBind:
     inode: int
 
 
+@dataclass(frozen=True, order=True)
+class OpenPathMapping:
+    """A guest path prefix and the host directory containing its contents."""
+
+    destination: str
+    source: Path
+
+
 @dataclass(frozen=True)
 class DesktopPlan:
     session_id: str
     binds: tuple[DesktopBind, ...]
     environment: dict[str, str]
     generated_root: Path | None = None
+    open_mappings: tuple[OpenPathMapping, ...] = ()
+    mime_sources: tuple[tuple[Path, Path], ...] = ()
+    open_data_root: Path | None = None
 
 
 class DesktopSetupError(Exception):
@@ -228,6 +255,8 @@ class PortalProxy:
     process: subprocess.Popen[bytes]
     control_fd: int
     socket_path: Path
+    broker_process: subprocess.Popen[bytes] | None = None
+    broker_name: str | None = None
 
     def close(self) -> None:
         if self.control_fd >= 0:
@@ -242,6 +271,15 @@ class PortalProxy:
             except subprocess.TimeoutExpired:
                 self.process.kill()
                 self.process.wait()
+        if self.broker_process is not None:
+            if self.broker_process.poll() is None:
+                self.broker_process.send_signal(signal.SIGTERM)
+                try:
+                    self.broker_process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    self.broker_process.kill()
+                    self.broker_process.wait()
+            self.broker_process = None
 
 
 def prepare_user_paths(
@@ -440,7 +478,7 @@ def portal_bind_arguments(rootfs: Path) -> tuple[str, ...]:
     )
 
 
-def _portal_policy_arguments() -> list[str]:
+def _portal_policy_arguments(broker_name: str | None = None) -> list[str]:
     name = "org.freedesktop.portal.Desktop"
     desktop = "/org/freedesktop/portal/desktop"
     arguments = [
@@ -450,7 +488,28 @@ def _portal_policy_arguments() -> list[str]:
             f"Introspect@{desktop}"
         ),
         f"--call={name}=org.freedesktop.DBus.Properties.*@{desktop}",
+        (
+            f"--call={name}=org.freedesktop.portal.OpenURI."
+            f"OpenURI@{desktop}"
+        ),
+        (
+            f"--call={name}=org.freedesktop.portal.OpenURI."
+            f"SchemeSupported@{desktop}"
+        ),
     ]
+    if broker_name is not None:
+        arguments.extend(
+            (
+                (
+                    f"--call={broker_name}=org.anatase.Spaces.Open1."
+                    f"OpenFile@/org/anatase/Spaces/Open"
+                ),
+                (
+                    f"--call={broker_name}=org.anatase.Spaces.Open1."
+                    f"OpenDirectory@/org/anatase/Spaces/Open"
+                ),
+            )
+        )
     for interface in HOST_PORTAL_INTERFACES:
         arguments.append(
             f"--call={name}=org.freedesktop.portal.{interface}.*@{desktop}"
@@ -469,6 +528,131 @@ def _portal_policy_arguments() -> list[str]:
             f"--broadcast={name}=org.freedesktop.portal.{interface}.*@{subtree}"
         )
     return arguments
+
+
+def _broker_name(space_name: str, uid: int, session_id: str) -> str:
+    identity = f"{space_name}\0{uid}\0{session_id}".encode("utf-8")
+    generation = hashlib.sha256(identity).hexdigest()[:24]
+    return f"org.anatase.Spaces.Open.s{generation}"
+
+
+def _open_mapping_descriptors(
+    plan: DesktopPlan,
+    rootfs: Path,
+    space_home: Path,
+) -> tuple[list[int], list[str]]:
+    mappings = [
+        OpenPathMapping("/", rootfs),
+        OpenPathMapping("/home", space_home),
+        OpenPathMapping("/root", space_home / "root"),
+        *plan.open_mappings,
+    ]
+    for binding in plan.binds:
+        try:
+            metadata = binding.source.stat()
+        except OSError:
+            continue
+        if stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode):
+            mappings.append(
+                OpenPathMapping(binding.destination, binding.source)
+            )
+    # Later entries replace an identical guest prefix. Longest-prefix
+    # selection happens in the broker.
+    by_destination = {mapping.destination: mapping for mapping in mappings}
+    descriptors: list[int] = []
+    arguments: list[str] = []
+    try:
+        for mapping in sorted(by_destination.values()):
+            descriptor = os.open(
+                mapping.source,
+                os.O_PATH | os.O_CLOEXEC | os.O_NOFOLLOW,
+            )
+            metadata = os.fstat(descriptor)
+            if not (
+                stat.S_ISDIR(metadata.st_mode)
+                or stat.S_ISREG(metadata.st_mode)
+            ):
+                os.close(descriptor)
+                raise core.SpacesError(
+                    _(
+                        "Open mapping has an unsupported source type: {path}.",
+                        path=mapping.source,
+                    )
+                )
+            descriptors.append(descriptor)
+            arguments.extend(
+                ("--map", mapping.destination, str(descriptor))
+            )
+    except Exception:
+        for descriptor in descriptors:
+            os.close(descriptor)
+        raise
+    return descriptors, arguments
+
+
+def _start_open_broker(
+    space_name: str,
+    user: DesktopUser,
+    session_id: str,
+    plan: DesktopPlan,
+    rootfs: Path,
+    space_home: Path,
+) -> tuple[subprocess.Popen[bytes], str]:
+    name = _broker_name(space_name, user.uid, session_id)
+    descriptors, mapping_arguments = _open_mapping_descriptors(
+        plan, rootfs, space_home
+    )
+    ready_read, ready_write = os.pipe2(os.O_CLOEXEC | os.O_NONBLOCK)
+    command = [
+        OPEN_BROKER,
+        "--name",
+        name,
+        "--ready-fd",
+        str(ready_write),
+        *mapping_arguments,
+    ]
+    try:
+        process = subprocess.Popen(
+            command,
+            env={
+                "DBUS_SESSION_BUS_ADDRESS": f"unix:path=/run/user/{user.uid}/bus",
+                "LANG": "C.UTF-8",
+                "PATH": "/usr/bin",
+                "XDG_RUNTIME_DIR": f"/run/user/{user.uid}",
+            },
+            user=user.uid,
+            group=user.gid,
+            pass_fds=(*descriptors, ready_write),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        os.close(ready_read)
+        os.close(ready_write)
+        raise
+    finally:
+        for descriptor in descriptors:
+            os.close(descriptor)
+    os.close(ready_write)
+    poller = select.poll()
+    poller.register(ready_read, select.POLLIN | select.POLLHUP | select.POLLERR)
+    try:
+        events = poller.poll(round(PORTAL_READY_TIMEOUT * 1000))
+        ready = os.read(ready_read, 1) if events else b""
+        if not ready or process.poll() is not None:
+            raise core.SpacesError(_("Timed out starting the host open broker."))
+        return process, name
+    except Exception:
+        if process.poll() is None:
+            process.terminate()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        raise
+    finally:
+        os.close(ready_read)
 
 
 def _prepare_portal_directory(space_name: str, user: DesktopUser) -> Path:
@@ -500,6 +684,9 @@ def start_portal_proxy(
     space_name: str,
     user: DesktopUser,
     session_id: str,
+    plan: DesktopPlan | None = None,
+    rootfs: Path | None = None,
+    space_home: Path | None = None,
 ) -> tuple[PortalProxy, DesktopBind]:
     """Start a filtered host bus in an app-scoped user systemd unit."""
 
@@ -511,6 +698,19 @@ def start_portal_proxy(
     )
     control_read, control_write = os.pipe2(os.O_CLOEXEC | os.O_NONBLOCK)
     address = f"unix:path=/run/user/{user.uid}/bus"
+    broker_process: subprocess.Popen[bytes] | None = None
+    broker_name: str | None = None
+    if plan is not None:
+        if rootfs is None or space_home is None:
+            raise ValueError("rootfs and space_home are required with a plan")
+        broker_process, broker_name = _start_open_broker(
+            space_name,
+            user,
+            session_id,
+            plan,
+            rootfs,
+            space_home,
+        )
     command = [
         SYSTEMD_RUN,
         "--user",
@@ -522,7 +722,7 @@ def start_portal_proxy(
         address,
         str(socket_path),
         f"--fd={control_write}",
-        *_portal_policy_arguments(),
+        *_portal_policy_arguments(broker_name),
     ]
     try:
         process = subprocess.Popen(
@@ -542,9 +742,22 @@ def start_portal_proxy(
     except Exception:
         os.close(control_read)
         os.close(control_write)
+        if broker_process is not None:
+            broker_process.terminate()
+            try:
+                broker_process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                broker_process.kill()
+                broker_process.wait()
         raise
     os.close(control_write)
-    proxy = PortalProxy(process, control_read, socket_path)
+    proxy = PortalProxy(
+        process,
+        control_read,
+        socket_path,
+        broker_process,
+        broker_name,
+    )
     poller = select.poll()
     poller.register(control_read, select.POLLIN | select.POLLHUP | select.POLLERR)
     try:
@@ -673,11 +886,120 @@ def _validated_source(
     return resolved, metadata
 
 
+def _mime_types(
+    sources: tuple[tuple[Path, Path], ...],
+) -> tuple[str, ...]:
+    """Return the registered guest MIME types from shared-mime-info indexes."""
+
+    discovered = {
+        "inode/directory",
+        *(f"x-scheme-handler/{scheme}" for scheme in OPEN_SCHEMES),
+    }
+    for source, allowed_root in sources:
+        descriptor = -1
+        try:
+            descriptor = os.open(
+                source, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+            )
+            metadata = os.fstat(descriptor)
+            opened = Path(
+                os.readlink(f"/proc/self/fd/{descriptor}")
+            ).resolve(strict=True)
+            root = allowed_root.resolve(strict=True)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_size > MAX_MIME_INDEX_SIZE
+                or not (opened == root or opened.is_relative_to(root))
+            ):
+                continue
+            with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
+                descriptor = -1
+                lines = stream.read().splitlines()
+        except (OSError, RuntimeError, UnicodeError):
+            continue
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        for line in lines:
+            mime_type = line.strip()
+            if (
+                mime_type
+                and not mime_type.startswith("#")
+                and MIME_TYPE_PATTERN.fullmatch(mime_type)
+            ):
+                discovered.add(mime_type)
+    return tuple(sorted(discovered))
+
+
+def _replace_text(path: Path, contents: str, mode: int = 0o644) -> None:
+    path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(contents)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _write_open_data(
+    data_root: Path,
+    mime_sources: tuple[tuple[Path, Path], ...],
+) -> bool:
+    """Refresh the generated handler metadata, returning whether it changed."""
+
+    mime_types = _mime_types(mime_sources)
+    applications = data_root / "applications"
+    desktop = applications / OPEN_DESKTOP_ID
+    mimeapps = applications / "mimeapps.list"
+    mime_list = ";".join(mime_types) + ";"
+    desktop_contents = (
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        "Name=Open on Host\n"
+        "NoDisplay=true\n"
+        "Terminal=false\n"
+        "Exec=/run/spaces-host/bin/spaces-open %u\n"
+        f"MimeType={mime_list}\n"
+    )
+    associations = "".join(
+        f"{mime_type}={OPEN_DESKTOP_ID};\n" for mime_type in mime_types
+    )
+    mimeapps_contents = (
+        "[Default Applications]\n"
+        f"{associations}"
+        "\n[Added Associations]\n"
+        f"{associations}"
+    )
+    changed = False
+    for path, contents in (
+        (desktop, desktop_contents),
+        (mimeapps, mimeapps_contents),
+    ):
+        try:
+            current = path.read_text(encoding="utf-8")
+        except (FileNotFoundError, OSError, UnicodeError):
+            current = None
+        if current != contents:
+            _replace_text(path, contents)
+            changed = True
+    return changed
+
+
 def _plan(
     user: DesktopUser,
     selected: LoginSession,
     source_environment: dict[str, str],
     generated_root: Path,
+    *,
+    rootfs: Path | None = None,
+    open_mappings: tuple[OpenPathMapping, ...] = (),
 ) -> DesktopPlan:
     host_user = pwd.getpwuid(user.uid)
     runtime = Path(f"/run/user/{user.uid}")
@@ -923,10 +1245,51 @@ def _plan(
         ):
             environment["FONTCONFIG_FILE"] = str(root / "fonts.conf")
 
-    if data_roots:
-        environment["XDG_DATA_DIRS"] = ":".join(
-            [*data_roots, "/usr/local/share", "/usr/share"]
+    open_data_root = generated_root / "open-data"
+    space_home = getattr(user, "space_home", None)
+    mime_sources: list[tuple[Path, Path]] = []
+    if rootfs is not None:
+        mime_sources.extend(
+            (
+                (rootfs / "usr/share/mime/types", rootfs),
+                (rootfs / "usr/local/share/mime/types", rootfs),
+            )
         )
+    if space_home is not None:
+        guest_types = str(
+            user.guest_home / ".local" / "share" / "mime" / "types"
+        )
+        active = [
+            mapping
+            for mapping in open_mappings
+            if guest_types == mapping.destination
+            or guest_types.startswith(mapping.destination.rstrip("/") + "/")
+        ]
+        if active:
+            mapping = max(active, key=lambda item: len(item.destination))
+            relative = guest_types[len(mapping.destination) :].lstrip("/")
+            mime_sources.append(
+                (mapping.source / relative, mapping.source)
+            )
+        else:
+            mime_sources.append(
+                (
+                    space_home / ".local/share/mime/types",
+                    space_home,
+                )
+            )
+    _write_open_data(open_data_root, tuple(mime_sources))
+    add(
+        open_data_root,
+        root / "open-data",
+        roots=(generated_root,),
+        kinds=(stat.S_IFDIR,),
+        require_access=False,
+    )
+    environment["XDG_DATA_DIRS"] = ":".join(
+        [str(root / "open-data"), *data_roots, "/usr/local/share", "/usr/share"]
+    )
+    if data_roots:
         environment["XCURSOR_PATH"] = ":".join(
             [
                 *(f"{item}/icons" for item in data_roots),
@@ -949,6 +1312,9 @@ def _plan(
         binds=tuple(sorted(binds)),
         environment=environment,
         generated_root=generated_root if generated_root.exists() else None,
+        open_mappings=open_mappings,
+        mime_sources=tuple(mime_sources),
+        open_data_root=open_data_root,
     )
 
 
@@ -1211,6 +1577,8 @@ class DesktopController:
     ) -> None:
         self.space_name = space_name
         self.users = {user.uid: user for user in users}
+        self.rootfs = core.STATE_ROOT / space_name / "rootfs"
+        self.space_home = core.STATE_ROOT / space_name / "home"
         self.portals_enabled = portals_enabled
         self.active: dict[int, _ActiveDesktop] = {}
         self.destination_users: dict[str, set[int]] = {}
@@ -1220,6 +1588,7 @@ class DesktopController:
         self,
         user: DesktopUser,
         sessions: tuple[LoginSession, ...],
+        open_mappings: tuple[OpenPathMapping, ...] = (),
     ) -> None:
         if not user.desktop or user.uid == 0:
             if user.uid in self.active:
@@ -1231,7 +1600,11 @@ class DesktopController:
         if selected is None:
             self.deactivate(user)
             return
-        if current is not None and current.plan.session_id == selected.session_id:
+        if (
+            current is not None
+            and current.plan.session_id == selected.session_id
+            and current.plan.open_mappings == open_mappings
+        ):
             self._repair_portal(user, current)
             return
 
@@ -1249,8 +1622,18 @@ class DesktopController:
         )
         previous = current
         try:
-            plan = _plan(user, selected, environment, generated)
+            plan = _plan(
+                user,
+                selected,
+                environment,
+                generated,
+                rootfs=self.rootfs,
+                open_mappings=open_mappings,
+            )
             plan.environment["SPACES_NAME"] = self.space_name
+            plan.environment["SPACES_OPEN_BROKER"] = _broker_name(
+                self.space_name, user.uid, selected.session_id
+            )
         except Exception as error:
             self._remove_generated(
                 DesktopPlan(selected.session_id, (), {}, generated)
@@ -1305,6 +1688,17 @@ class DesktopController:
     def reconcile_portals(self) -> None:
         """Retry portal-only failures without rebuilding desktop forwarding."""
 
+        for current in self.active.values():
+            if (
+                current.plan.open_data_root is not None
+                and _write_open_data(
+                    current.plan.open_data_root,
+                    current.plan.mime_sources,
+                )
+            ):
+                logger.info(
+                    _("Refreshed guest MIME defaults for {space}.", space=self.space_name)
+                )
         if not self.portals_enabled:
             return
         for uid, current in tuple(self.active.items()):
@@ -1343,6 +1737,9 @@ class DesktopController:
                         self.space_name,
                         user,
                         plan.session_id,
+                        plan,
+                        self.rootfs,
+                        self.space_home,
                     )
                     self._mount(user.uid, portal_binding)
                     mounted.append(portal_binding)
@@ -1404,6 +1801,10 @@ class DesktopController:
             current.portal is not None
             and current.portal_binding is not None
             and current.portal.process.poll() is None
+            and (
+                current.portal.broker_process is None
+                or current.portal.broker_process.poll() is None
+            )
         ):
             try:
                 metadata = current.portal.socket_path.lstat()
@@ -1447,6 +1848,9 @@ class DesktopController:
                 self.space_name,
                 user,
                 current.plan.session_id,
+                current.plan,
+                self.rootfs,
+                self.space_home,
             )
             self._mount(user.uid, binding)
         except Exception as error:
@@ -1503,6 +1907,12 @@ class DesktopController:
             return
         try:
             (root / "fonts.conf").unlink(missing_ok=True)
+            if plan.open_data_root is not None:
+                applications = plan.open_data_root / "applications"
+                (applications / OPEN_DESKTOP_ID).unlink(missing_ok=True)
+                (applications / "mimeapps.list").unlink(missing_ok=True)
+                applications.rmdir()
+                plan.open_data_root.rmdir()
             root.rmdir()
             root.parent.rmdir()
         except OSError:

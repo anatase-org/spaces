@@ -45,6 +45,7 @@ def user(root: Path, *, desktop: bool = True, uid: int | None = None) -> object:
         gid=os.getgid(),
         name=pwd.getpwuid(os.getuid()).pw_name,
         host_home=home,
+        space_home=root / "space-home",
         guest_home=PurePosixPath(f"/home/{pwd.getpwuid(os.getuid()).pw_name}"),
         desktop=desktop,
     )
@@ -207,6 +208,9 @@ class DesktopPathTests(unittest.TestCase):
                     f"unix:/run/user/{desktop_user.uid}/pulse/native"
                 ),
                 "QT_SCALE_FACTOR": "1.5",
+                "KDE_FULL_SESSION": "true",
+                "KDE_SESSION_VERSION": "6",
+                "XDG_CURRENT_DESKTOP": "KDE",
             }
             with (
                 mock.patch.object(
@@ -235,8 +239,12 @@ class DesktopPathTests(unittest.TestCase):
                 f"unix:{destination_root}/pulse/native",
             )
             self.assertEqual(plan.environment["QT_SCALE_FACTOR"], "1.5")
+            self.assertNotIn("KDE_FULL_SESSION", plan.environment)
             self.assertEqual(
-                plan.environment["XDG_CURRENT_DESKTOP"], "Spaces"
+                plan.environment["KDE_SESSION_VERSION"], "6"
+            )
+            self.assertEqual(
+                plan.environment["XDG_CURRENT_DESKTOP"], "Spaces:KDE"
             )
             self.assertEqual(
                 plan.environment["XDG_CONFIG_DIRS"],
@@ -246,11 +254,168 @@ class DesktopPathTests(unittest.TestCase):
             self.assertNotIn("XDG_RUNTIME_DIR", plan.environment)
             self.assertNotIn("XDG_SESSION_ID", plan.environment)
             self.assertTrue(
+                plan.environment["XDG_DATA_DIRS"].startswith(
+                    f"{destination_root}/open-data:"
+                )
+            )
+            self.assertTrue(
                 all(
                     binding.destination.startswith(destination_root)
                     for binding in plan.binds
                 )
             )
+
+    def test_generated_open_defaults_cover_mime_types_and_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            system_types = root / "rootfs/usr/share/mime/types"
+            user_types = root / "home/.local/share/mime/types"
+            system_types.parent.mkdir(parents=True)
+            user_types.parent.mkdir(parents=True)
+            system_types.write_text(
+                "text/plain\napplication/pdf\n", encoding="utf-8"
+            )
+            user_types.write_text("image/x-test\n", encoding="utf-8")
+            outside = root / "outside-types"
+            outside.write_text("application/x-escaped\n", encoding="utf-8")
+            escaped = root / "home/.local/share/mime/escaped"
+            escaped.symlink_to(outside)
+            data_root = root / "generated/open-data"
+
+            self.assertTrue(
+                session._write_open_data(
+                    data_root,
+                    (
+                        (system_types, root),
+                        (user_types, root),
+                        (escaped, escaped.parent),
+                    ),
+                )
+            )
+            desktop = (
+                data_root / "applications" / session.OPEN_DESKTOP_ID
+            ).read_text(encoding="utf-8")
+            defaults = (
+                data_root / "applications" / "mimeapps.list"
+            ).read_text(encoding="utf-8")
+            self.assertIn("NoDisplay=true", desktop)
+            self.assertIn(
+                "Exec=/run/spaces-host/bin/spaces-open %u", desktop
+            )
+            self.assertNotIn("application/x-escaped", defaults)
+            for mime_type in (
+                "text/plain",
+                "application/pdf",
+                "image/x-test",
+                "inode/directory",
+                "x-scheme-handler/http",
+                "x-scheme-handler/calendar",
+            ):
+                self.assertIn(
+                    f"{mime_type}={session.OPEN_DESKTOP_ID};", defaults
+                )
+
+            self.assertFalse(
+                session._write_open_data(
+                    data_root,
+                    ((system_types, root), (user_types, root)),
+                )
+            )
+            system_types.write_text(
+                "text/plain\napplication/pdf\napplication/x-new\n",
+                encoding="utf-8",
+            )
+            self.assertTrue(
+                session._write_open_data(
+                    data_root,
+                    ((system_types, root), (user_types, root)),
+                )
+            )
+            self.assertIn(
+                f"application/x-new={session.OPEN_DESKTOP_ID};",
+                (data_root / "applications" / "mimeapps.list").read_text(
+                    encoding="utf-8"
+                ),
+            )
+
+    def test_open_mappings_are_pinned_and_reject_symlink_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            rootfs = root / "rootfs"
+            space_home = root / "home"
+            forwarded = root / "forwarded"
+            for directory in (
+                rootfs,
+                space_home / "root",
+                forwarded,
+            ):
+                directory.mkdir(parents=True)
+            mapped_file = root / "kdeglobals"
+            mapped_file.write_text("[KDE]\n", encoding="utf-8")
+            metadata = mapped_file.stat()
+            plan = session.DesktopPlan(
+                "2",
+                (
+                    session.DesktopBind(
+                        "/home/alice/.config/kdeglobals",
+                        mapped_file,
+                        metadata.st_dev,
+                        metadata.st_ino,
+                    ),
+                ),
+                {},
+                open_mappings=(
+                    session.OpenPathMapping(
+                        "/home/alice/Projects", forwarded
+                    ),
+                ),
+            )
+
+            descriptors, arguments = session._open_mapping_descriptors(
+                plan, rootfs, space_home
+            )
+            try:
+                destinations = {
+                    arguments[index + 1]
+                    for index, value in enumerate(arguments)
+                    if value == "--map"
+                }
+                self.assertEqual(
+                    destinations,
+                    {
+                        "/",
+                        "/home",
+                        "/root",
+                        "/home/alice/Projects",
+                        "/home/alice/.config/kdeglobals",
+                    },
+                )
+                self.assertTrue(
+                    all(
+                        os.fstat(descriptor).st_ino
+                        for descriptor in descriptors
+                    )
+                )
+            finally:
+                for descriptor in descriptors:
+                    os.close(descriptor)
+
+            escaped = root / "escaped"
+            escaped.symlink_to(forwarded, target_is_directory=True)
+            unsafe = session.DesktopPlan(
+                "2",
+                (),
+                {},
+                open_mappings=(
+                    session.OpenPathMapping(
+                        "/home/alice/Escaped", escaped
+                    ),
+                ),
+            )
+            with self.assertRaises(core.SpacesError):
+                session._open_mapping_descriptors(
+                    unsafe, rootfs, space_home
+                )
 
     def test_remote_x11_display_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

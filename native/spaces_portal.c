@@ -15,6 +15,8 @@
 #define DESKTOP_PATH "/org/freedesktop/portal/desktop"
 #define HOST_NAME "org.freedesktop.portal.Desktop"
 #define BACKEND_NAME "org.freedesktop.impl.portal.desktop.spaces"
+#define FILE_MANAGER_NAME "org.freedesktop.FileManager1"
+#define FILE_MANAGER_PATH "/org/freedesktop/FileManager1"
 #define DBUS_NAME "org.freedesktop.DBus"
 #define DBUS_PATH "/org/freedesktop/DBus"
 #define INTERFACE_DIRECTORY "/usr/share/dbus-1/interfaces"
@@ -22,6 +24,44 @@
 #define RESTORE_DATA_VERSION 1
 #define SECRET_MAXIMUM 4096
 #define SECRET_SIZE 64
+
+static const char app_chooser_xml[] =
+    "<node>"
+    " <interface name='org.freedesktop.impl.portal.AppChooser'>"
+    "  <method name='ChooseApplication'>"
+    "   <arg type='o' direction='in'/>"
+    "   <arg type='s' direction='in'/>"
+    "   <arg type='s' direction='in'/>"
+    "   <arg type='as' direction='in'/>"
+    "   <arg type='a{sv}' direction='in'/>"
+    "   <arg type='u' direction='out'/>"
+    "   <arg type='a{sv}' direction='out'/>"
+    "  </method>"
+    "  <method name='UpdateChoices'>"
+    "   <arg type='o' direction='in'/>"
+    "   <arg type='as' direction='in'/>"
+    "  </method>"
+    "  <property name='version' type='u' access='read'/>"
+    " </interface>"
+    "</node>";
+
+static const char file_manager_xml[] =
+    "<node>"
+    " <interface name='" FILE_MANAGER_NAME "'>"
+    "  <method name='ShowItems'>"
+    "   <arg type='as' direction='in'/>"
+    "   <arg type='s' direction='in'/>"
+    "  </method>"
+    "  <method name='ShowFolders'>"
+    "   <arg type='as' direction='in'/>"
+    "   <arg type='s' direction='in'/>"
+    "  </method>"
+    "  <method name='ShowItemProperties'>"
+    "   <arg type='as' direction='in'/>"
+    "   <arg type='s' direction='in'/>"
+    "  </method>"
+    " </interface>"
+    "</node>";
 
 #if defined(__x86_64__) || defined(__aarch64__)
 typedef int (*main_function)(int, char **, char **);
@@ -58,13 +98,13 @@ int __wrap___libc_start_main(
 #endif
 
 static const char *backend_names[] = {
-    "Account", "Clipboard", "Email", "GlobalShortcuts", "Inhibit",
+    "Account", "AppChooser", "Clipboard", "Email", "GlobalShortcuts", "Inhibit",
     "InputCapture", "Notification", "Print", "RemoteDesktop",
     "ScreenCast", "Screenshot", "Secret", "Settings", "Wallpaper",
 };
 
 static const guint backend_versions[] = {
-    1, 1, 4, 2, 3, 2, 2, 4, 2, 6, 3, 1, 1, 1,
+    1, 2, 1, 4, 2, 3, 2, 2, 4, 2, 6, 3, 1, 1, 1,
 };
 
 typedef struct {
@@ -1046,6 +1086,11 @@ static GVariant *backend_property(
         }
         return NULL;
     }
+    if (g_str_equal(
+            interface_name, "org.freedesktop.impl.portal.AppChooser"
+        )
+        && g_str_equal(property_name, "version"))
+        return g_variant_ref_sink(g_variant_new_uint32(2));
     suffix = interface_name + strlen("org.freedesktop.impl.portal.");
     host_interface = g_strconcat("org.freedesktop.portal.", suffix, NULL);
     reply = g_dbus_connection_call_sync(
@@ -1070,6 +1115,160 @@ static GVariant *backend_property(
         );
     }
     return value;
+}
+
+static char *chooser_id(const char *desktop_id)
+{
+    gsize size;
+
+    if (desktop_id == NULL)
+        return NULL;
+    size = strlen(desktop_id);
+    if (size > strlen(".desktop")
+        && g_str_has_suffix(desktop_id, ".desktop"))
+        return g_strndup(desktop_id, size - strlen(".desktop"));
+    return g_strdup(desktop_id);
+}
+
+static gboolean choice_is_available(GVariant *choices, const char *choice)
+{
+    GVariantIter iterator;
+    const char *available;
+
+    g_variant_iter_init(&iterator, choices);
+    while (g_variant_iter_next(&iterator, "&s", &available)) {
+        char *normalized = chooser_id(available);
+        gboolean matches = g_str_equal(available, choice)
+            || g_str_equal(normalized, choice);
+
+        g_free(normalized);
+        if (matches)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+static gboolean delegate_app_chooser(
+    Portal *portal,
+    const char *method_name,
+    GVariant *parameters,
+    GDBusMethodInvocation *invocation
+)
+{
+    GVariant *reply;
+    GError *error = NULL;
+    const GVariantType *reply_type = g_str_equal(
+        method_name, "ChooseApplication"
+    )
+        ? G_VARIANT_TYPE("(ua{sv})") : G_VARIANT_TYPE_UNIT;
+
+    reply = g_dbus_connection_call_sync(
+        portal->guest, "org.freedesktop.impl.portal.desktop.kde",
+        DESKTOP_PATH, "org.freedesktop.impl.portal.AppChooser",
+        method_name, parameters, reply_type, G_DBUS_CALL_FLAGS_NONE,
+        -1, NULL, &error
+    );
+    if (reply == NULL) {
+        g_clear_error(&error);
+        return FALSE;
+    }
+    g_dbus_method_invocation_return_value(invocation, reply);
+    g_variant_unref(reply);
+    return TRUE;
+}
+
+static void app_chooser_call(
+    Portal *portal,
+    const char *sender,
+    const char *method_name,
+    GVariant *parameters,
+    GDBusMethodInvocation *invocation
+)
+{
+    GError *error = NULL;
+    GVariant *choices;
+    GVariant *options;
+    GVariantBuilder results;
+    GVariantIter iterator;
+    GAppInfo *application = NULL;
+    const char *content_type = NULL;
+    const char *uri = NULL;
+    const char *activation_token = NULL;
+    const char *first = NULL;
+    char *choice = NULL;
+
+    if (!caller_is_portal(portal, sender, FALSE, &error)) {
+        g_clear_error(&error);
+        return_access_denied(invocation);
+        return;
+    }
+    if (g_str_equal(method_name, "UpdateChoices")) {
+        if (!delegate_app_chooser(
+                portal, method_name, parameters, invocation
+            ))
+            g_dbus_method_invocation_return_value(invocation, NULL);
+        return;
+    }
+    choices = g_variant_get_child_value(parameters, 3);
+    options = g_variant_get_child_value(parameters, 4);
+    g_variant_lookup(options, "content_type", "&s", &content_type);
+    g_variant_lookup(options, "uri", "&s", &uri);
+    g_variant_lookup(options, "activation_token", "&s", &activation_token);
+    if (content_type != NULL)
+        application = g_app_info_get_default_for_type(
+            content_type, FALSE
+        );
+    if (application == NULL && uri != NULL) {
+        GUri *parsed = g_uri_parse(
+            uri, G_URI_FLAGS_PARSE_RELAXED, NULL
+        );
+
+        if (parsed != NULL && g_uri_get_scheme(parsed) != NULL)
+            application = g_app_info_get_default_for_uri_scheme(
+                g_uri_get_scheme(parsed)
+            );
+        if (parsed != NULL)
+            g_uri_unref(parsed);
+    }
+    if (application != NULL)
+        choice = chooser_id(g_app_info_get_id(application));
+    if (choice != NULL && !choice_is_available(choices, choice))
+        g_clear_pointer(&choice, g_free);
+    if (choice == NULL
+        && delegate_app_chooser(
+            portal, method_name, parameters, invocation
+        ))
+        goto out;
+    if (choice == NULL) {
+        g_variant_iter_init(&iterator, choices);
+        if (g_variant_iter_next(&iterator, "&s", &first))
+            choice = chooser_id(first);
+    }
+    g_variant_builder_init(&results, G_VARIANT_TYPE_VARDICT);
+    if (choice != NULL) {
+        g_variant_builder_add(
+            &results, "{sv}", "choice", g_variant_new_string(choice)
+        );
+        if (activation_token != NULL)
+            g_variant_builder_add(
+                &results, "{sv}", "activation_token",
+                g_variant_new_string(activation_token)
+            );
+        g_dbus_method_invocation_return_value(
+            invocation,
+            g_variant_new("(u@a{sv})", 0U, g_variant_builder_end(&results))
+        );
+    } else {
+        g_dbus_method_invocation_return_value(
+            invocation,
+            g_variant_new("(u@a{sv})", 2U, g_variant_builder_end(&results))
+        );
+    }
+out:
+    g_clear_object(&application);
+    g_free(choice);
+    g_variant_unref(options);
+    g_variant_unref(choices);
 }
 
 static void backend_method_call(
@@ -1103,6 +1302,14 @@ static void backend_method_call(
 
     (void)connection;
     (void)object_path;
+    if (g_str_equal(
+            interface_name, "org.freedesktop.impl.portal.AppChooser"
+        )) {
+        app_chooser_call(
+            portal, sender, method_name, parameters, invocation
+        );
+        return;
+    }
     if (!caller_is_portal(portal, sender, FALSE, &error)) {
         g_clear_error(&error);
         return_access_denied(invocation);
@@ -1431,13 +1638,138 @@ static GDBusNodeInfo *introspect_host(Portal *portal)
     return node;
 }
 
+typedef struct {
+    GDBusMethodInvocation *invocation;
+    guint pending;
+    GError *error;
+} FileManagerCall;
+
+static void finish_file_manager_call(FileManagerCall *call)
+{
+    if (call->pending != 0)
+        return;
+    if (call->error != NULL)
+        g_dbus_method_invocation_return_gerror(
+            call->invocation, call->error
+        );
+    else
+        g_dbus_method_invocation_return_value(call->invocation, NULL);
+    g_clear_error(&call->error);
+    g_object_unref(call->invocation);
+    g_free(call);
+}
+
+static void file_manager_open_done(
+    GObject *source,
+    GAsyncResult *result,
+    gpointer user_data
+)
+{
+    FileManagerCall *call = user_data;
+    GError *error = NULL;
+
+    if (!g_subprocess_wait_check_finish(
+            G_SUBPROCESS(source), result, &error
+        )) {
+        if (call->error == NULL)
+            call->error = error;
+        else
+            g_clear_error(&error);
+    }
+    call->pending--;
+    finish_file_manager_call(call);
+}
+
+static void file_manager_call(
+    GDBusConnection *connection,
+    const char *sender,
+    const char *object_path,
+    const char *interface_name,
+    const char *method_name,
+    GVariant *parameters,
+    GDBusMethodInvocation *invocation,
+    gpointer user_data
+)
+{
+    GVariant *uris;
+    GVariantIter iterator;
+    const char *uri;
+    const char *mode;
+    const char *startup_id;
+    GError *error = NULL;
+    FileManagerCall *call;
+    GSubprocessLauncher *launcher;
+
+    (void)connection;
+    (void)sender;
+    (void)object_path;
+    (void)interface_name;
+    (void)user_data;
+    if (g_str_equal(method_name, "ShowItemProperties")) {
+        g_dbus_method_invocation_return_error(
+            invocation, G_DBUS_ERROR, G_DBUS_ERROR_NOT_SUPPORTED,
+            "File property dialogs are not supported"
+        );
+        return;
+    }
+    mode = g_str_equal(method_name, "ShowFolders")
+        ? "--folder" : "--directory";
+    g_variant_get_child(parameters, 1, "&s", &startup_id);
+    launcher = g_subprocess_launcher_new(
+        G_SUBPROCESS_FLAGS_STDOUT_SILENCE
+            | G_SUBPROCESS_FLAGS_STDERR_SILENCE
+    );
+    if (startup_id != NULL && *startup_id != '\0')
+        g_subprocess_launcher_setenv(
+            launcher, "XDG_ACTIVATION_TOKEN", startup_id, TRUE
+        );
+    call = g_new0(FileManagerCall, 1);
+    call->invocation = g_object_ref(invocation);
+    uris = g_variant_get_child_value(parameters, 0);
+    g_variant_iter_init(&iterator, uris);
+    while (g_variant_iter_next(&iterator, "&s", &uri)) {
+        const char *arguments[] = {
+            "/run/spaces-host/bin/spaces-open",
+            mode,
+            uri,
+            NULL,
+        };
+        GSubprocess *process = g_subprocess_launcher_spawnv(
+            launcher, arguments, &error
+        );
+
+        if (process == NULL) {
+            if (call->error == NULL)
+                call->error = error;
+            else
+                g_clear_error(&error);
+            continue;
+        }
+        call->pending++;
+        g_subprocess_wait_check_async(
+            process, NULL, file_manager_open_done, call
+        );
+        g_object_unref(process);
+    }
+    g_object_unref(launcher);
+    g_variant_unref(uris);
+    finish_file_manager_call(call);
+}
+
+static const GDBusInterfaceVTable file_manager_vtable = {
+    .method_call = file_manager_call,
+};
+
 static gboolean register_interfaces(Portal *portal)
 {
     GDBusNodeInfo *backend;
+    GDBusNodeInfo *chooser;
+    GDBusNodeInfo *file_manager;
     GDBusNodeInfo *public;
     GError *error = NULL;
     guint index;
     guint count = 0;
+    guint registration;
 
     backend = g_dbus_node_info_new_for_xml(portal_backend_xml, &error);
     if (backend == NULL) {
@@ -1446,6 +1778,20 @@ static gboolean register_interfaces(Portal *portal)
         return FALSE;
     }
     g_ptr_array_add(portal->node_infos, backend);
+    chooser = g_dbus_node_info_new_for_xml(app_chooser_xml, &error);
+    if (chooser == NULL) {
+        g_printerr("spaces-portal: %s\n", error->message);
+        g_clear_error(&error);
+        return FALSE;
+    }
+    g_ptr_array_add(portal->node_infos, chooser);
+    file_manager = g_dbus_node_info_new_for_xml(file_manager_xml, &error);
+    if (file_manager == NULL) {
+        g_printerr("spaces-portal: %s\n", error->message);
+        g_clear_error(&error);
+        return FALSE;
+    }
+    g_ptr_array_add(portal->node_infos, file_manager);
 
     public = introspect_host(portal);
     if (public != NULL) {
@@ -1477,21 +1823,23 @@ static gboolean register_interfaces(Portal *portal)
         GDBusInterfaceInfo *public_interface;
         char *backend_name;
         char *public_name;
-        guint registration;
-
         backend_name = g_strconcat(
             "org.freedesktop.impl.portal.", backend_names[index], NULL
         );
         public_name = g_strconcat(
             "org.freedesktop.portal.", backend_names[index], NULL
         );
-        backend_interface = g_dbus_node_info_lookup_interface(
-            backend, backend_name
-        );
+        backend_interface = g_str_equal(
+            backend_names[index], "AppChooser"
+        )
+            ? g_dbus_node_info_lookup_interface(chooser, backend_name)
+            : g_dbus_node_info_lookup_interface(backend, backend_name);
         public_interface = find_interface(portal, public_name);
         g_free(backend_name);
         g_free(public_name);
-        if (backend_interface == NULL || public_interface == NULL)
+        if (backend_interface == NULL
+            || (public_interface == NULL
+                && !g_str_equal(backend_names[index], "AppChooser")))
             continue;
         registration = g_dbus_connection_register_object(
             portal->guest, DESKTOP_PATH, backend_interface,
@@ -1505,6 +1853,16 @@ static gboolean register_interfaces(Portal *portal)
         g_array_append_val(portal->registrations, registration);
         count++;
     }
+    registration = g_dbus_connection_register_object(
+        portal->guest, FILE_MANAGER_PATH, file_manager->interfaces[0],
+        &file_manager_vtable, portal, NULL, &error
+    );
+    if (registration == 0) {
+        g_printerr("spaces-portal: %s\n", error->message);
+        g_clear_error(&error);
+        return FALSE;
+    }
+    g_array_append_val(portal->registrations, registration);
     return count > 0;
 }
 
@@ -1587,6 +1945,7 @@ int main(void)
     const char *space_name;
     guint host_watcher;
     guint owner;
+    guint file_manager_owner;
 
     signal(SIGPIPE, SIG_IGN);
     space_name = g_getenv("SPACES_NAME");
@@ -1664,7 +2023,14 @@ int main(void)
             | G_BUS_NAME_OWNER_FLAGS_REPLACE,
         NULL, name_lost, &portal, NULL
     );
+    file_manager_owner = g_bus_own_name_on_connection(
+        portal.guest, FILE_MANAGER_NAME,
+        G_BUS_NAME_OWNER_FLAGS_ALLOW_REPLACEMENT
+            | G_BUS_NAME_OWNER_FLAGS_REPLACE,
+        NULL, name_lost, &portal, NULL
+    );
     g_main_loop_run(portal.loop);
+    g_bus_unown_name(file_manager_owner);
     g_bus_unown_name(owner);
     g_bus_unwatch_name(host_watcher);
     g_main_loop_unref(portal.loop);

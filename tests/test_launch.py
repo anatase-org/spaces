@@ -1596,7 +1596,7 @@ class LoginAndMountWorkerTests(unittest.TestCase):
         worker._reconcile()
 
         worker._desktop.reconcile.assert_called_once_with(
-            user, (graphical,)
+            user, (graphical,), ()
         )
 
     def test_worker_rate_limits_monitor_reconciliation(self) -> None:
@@ -1627,7 +1627,7 @@ class LoginAndMountWorkerTests(unittest.TestCase):
             rate_wait.call_args.args[0],
             launch_module.LOGIN_RECONCILE_INTERVAL_SECONDS - 0.01,
         )
-        worker._desktop.reconcile.assert_called_once_with(user, ())
+        worker._desktop.reconcile.assert_called_once_with(user, (), ())
 
     def test_lingering_keeps_mount_until_user_is_closing(self) -> None:
         user = self._user(1000)

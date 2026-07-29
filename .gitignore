@@ -14,3 +14,5 @@ pkg/
 /native/spaces-session-launcher
 /native/spaces-secret-helper
 /native/spaces-portal
+/native/spaces-open
+/native/spaces-open-broker

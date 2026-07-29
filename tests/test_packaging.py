@@ -262,6 +262,8 @@ class PackagingTests(unittest.TestCase):
         for name in (
             "pam_spaces.so",
             "spaces-portal",
+            "spaces-open",
+            "spaces-open-broker",
             "spaces-secret-helper",
             "spaces-pam-worker",
             "spaces-session-launcher",
@@ -274,6 +276,8 @@ class PackagingTests(unittest.TestCase):
             spec,
         )
         self.assertIn("/usr/lib/spaces/guest/spaces-portal", spec)
+        self.assertIn("/usr/lib/spaces/guest/spaces-open", spec)
+        self.assertIn("/usr/lib/spaces/spaces-open-broker", spec)
         self.assertIn(
             "/usr/lib/spaces/guest/spaces-secret-helper", spec
         )

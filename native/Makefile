@@ -12,7 +12,7 @@ TARGET_ARCH ?= $(shell uname -m)
 .PHONY: all check-guest-abi clean install
 
 all: pam_spaces.so spaces-pam-worker spaces-session-launcher spaces-portal \
-	spaces-secret-helper
+	spaces-secret-helper spaces-open spaces-open-broker
 
 pam_spaces.so: pam_spaces.c protocol.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -shared -o $@ pam_spaces.c \
@@ -40,12 +40,25 @@ spaces-secret-helper: spaces_secret_helper.c
 		-Wl,--wrap=__libc_start_main \
 		$$(pkg-config --libs gio-unix-2.0)
 
+spaces-open: spaces_open.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) \
+		$$(pkg-config --cflags gio-unix-2.0) \
+		-o $@ spaces_open.c $(LDFLAGS) \
+		-Wl,--wrap=__libc_start_main \
+		$$(pkg-config --libs gio-unix-2.0)
+
+spaces-open-broker: spaces_open_broker.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) \
+		$$(pkg-config --cflags gio-unix-2.0) \
+		-o $@ spaces_open_broker.c $(LDFLAGS) \
+		$$(pkg-config --libs gio-unix-2.0)
+
 check-guest-abi: all
 	$(PYTHON) check_guest_abi.py --target $(TARGET_ARCH) \
 		--glibc-max 2.17 \
 		--guest pam_spaces.so spaces-session-launcher spaces-portal \
-			spaces-secret-helper \
-		--host spaces-pam-worker
+			spaces-secret-helper spaces-open \
+		--host spaces-pam-worker spaces-open-broker
 
 install: check-guest-abi
 	install -Dm755 pam_spaces.so \
@@ -58,7 +71,11 @@ install: check-guest-abi
 		$(DESTDIR)$(GUESTDIR)/spaces-portal
 	install -Dm755 spaces-secret-helper \
 		$(DESTDIR)$(GUESTDIR)/spaces-secret-helper
+	install -Dm755 spaces-open \
+		$(DESTDIR)$(GUESTDIR)/spaces-open
+	install -Dm755 spaces-open-broker \
+		$(DESTDIR)$(LIBEXECDIR)/spaces-open-broker
 
 clean:
 	rm -f pam_spaces.so spaces-pam-worker spaces-session-launcher \
-		spaces-portal spaces-secret-helper
+		spaces-portal spaces-secret-helper spaces-open spaces-open-broker

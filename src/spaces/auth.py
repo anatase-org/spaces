@@ -32,6 +32,7 @@ GUEST_NATIVE = f"{GUEST_RUNTIME}/bin"
 GUEST_BINARIES = (
     "pam_spaces.so",
     "spaces-portal",
+    "spaces-open",
     "spaces-secret-helper",
     "spaces-session-launcher",
 )

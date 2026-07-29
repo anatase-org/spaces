@@ -1484,6 +1484,16 @@ class _MountWorker:
                 self._desktop.reconcile(
                     user,
                     snapshot.sessions(user.uid),
+                    tuple(
+                        sorted(
+                            session.OpenPathMapping(
+                                mount.destination,
+                                mount.source,
+                            )
+                            for mount in self._mounted
+                            if mount.uid == user.uid
+                        )
+                    ),
                 )
             except session.DesktopSetupError as error:
                 logger.warning(
