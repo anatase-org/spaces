@@ -58,6 +58,8 @@ install -Dm644 data/pam/spaces.system-auth \
   %{buildroot}%{_sysconfdir}/pam.d/spaces
 install -Dm644 selinux/spaces.pp \
   %{buildroot}%{_datadir}/selinux/packages/spaces.pp
+install -d -m0755 \
+  %{buildroot}%{_prefix}/local/share/applications/spaces
 for distro in arch fedora ubuntu; do
   install -Dm644 "data/applications/spaces-${distro}.desktop" \
     "%{buildroot}%{_datadir}/applications/spaces-${distro}.desktop"
@@ -69,7 +71,8 @@ done
 %post
 %selinux_modules_install %{_datadir}/selinux/packages/spaces.pp
 restorecon -RF %{_bindir}/spaces.priv %{_localstatedir}/lib/spaces \
-  %{_rundir}/spaces 2>/dev/null || :
+  %{_rundir}/spaces %{_prefix}/local/share/applications/spaces \
+  2>/dev/null || :
 %systemd_post spaces@.service
 %systemd_user_post spaces@.service
 
@@ -113,5 +116,6 @@ restorecon -RF %{_bindir}/spaces.priv %{_localstatedir}/lib/spaces \
 %{_datadir}/spaces/portal/*
 %{_datadir}/applications/spaces-*.desktop
 %{_datadir}/icons/hicolor/256x256/apps/spaces-*.png
+%dir %{_prefix}/local/share/applications/spaces
 %{_unitdir}/spaces@.service
 %{_userunitdir}/spaces@.service

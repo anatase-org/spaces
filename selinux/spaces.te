@@ -19,6 +19,9 @@ term_pty(spaces_apifs_file_t)
 type spaces_var_run_t;
 files_pid_file(spaces_var_run_t)
 
+type spaces_shortcut_t;
+files_type(spaces_shortcut_t)
+
 # The host-side supervisor is a container runtime, while the nspawn payload
 # gets a separate, MCS-constrained container domain.
 container_runtime_domain_template(spaces)
@@ -55,6 +58,11 @@ manage_sock_files_pattern(spaces_t, spaces_file_t, spaces_file_t)
 manage_chr_files_pattern(spaces_t, spaces_file_t, spaces_file_t)
 manage_blk_files_pattern(spaces_t, spaces_file_t, spaces_file_t)
 files_var_lib_filetrans(spaces_t, spaces_file_t, dir, "spaces")
+
+# Exported desktop entries are the only host /usr content Spaces may modify.
+manage_dirs_pattern(spaces_t, spaces_shortcut_t, spaces_shortcut_t)
+manage_files_pattern(spaces_t, spaces_shortcut_t, spaces_shortcut_t)
+manage_lnk_files_pattern(spaces_t, spaces_shortcut_t, spaces_shortcut_t)
 
 manage_dirs_pattern(spaces_t, spaces_var_run_t, spaces_var_run_t)
 manage_files_pattern(spaces_t, spaces_var_run_t, spaces_var_run_t)
@@ -182,6 +190,7 @@ allow spaces_container_t hugetlbfs_t:filesystem { mount unmount };
 allow spaces_container_t mtrr_device_t:file mounton;
 allow spaces_container_t proc_t:filesystem remount;
 allow spaces_container_t sysctl_t:file mounton;
+allow spaces_container_t tmpfs_t:file map;
 manage_fifo_files_pattern(spaces_container_t, tmpfs_t, tmpfs_t)
 allow spaces_t domain:system status;
 

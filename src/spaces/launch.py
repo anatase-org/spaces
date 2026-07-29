@@ -91,6 +91,9 @@ MASKED_UNIT_DESTINATIONS = (
     "/etc/systemd/user/pulseaudio.socket",
     "/etc/systemd/user/wireplumber.service",
     "/etc/systemd/user/wireplumber@.service",
+    # PrivateNetwork makes rtkit mount another sysfs instance. Avoid granting
+    # the whole guest permission to mount host sysfs for this redundant daemon.
+    "/etc/systemd/system/rtkit-daemon.service",
 )
 KEPT_CAPS = (
     "CAP_CHOWN",

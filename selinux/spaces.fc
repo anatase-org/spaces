@@ -3,3 +3,5 @@
 /var/lib/spaces(/.*)?		gen_context(system_u:object_r:spaces_file_t,s0)
 
 /run/spaces(/.*)?		gen_context(system_u:object_r:spaces_var_run_t,s0)
+
+/usr/local/share/applications/spaces(/.*)?	gen_context(system_u:object_r:spaces_shortcut_t,s0)

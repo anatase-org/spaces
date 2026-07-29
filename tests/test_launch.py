@@ -886,6 +886,12 @@ class LaunchTests(unittest.TestCase):
             set(launch_module._unit_mask_bind_arguments()),
         )
 
+    def test_rtkit_is_masked_without_granting_guest_sysfs_mounts(self) -> None:
+        self.assertIn(
+            "--bind-ro=/dev/null:/etc/systemd/system/rtkit-daemon.service",
+            launch_module._unit_mask_bind_arguments(),
+        )
+
     def test_rootfs_fixups_only_create_var_home_symlink(self) -> None:
         launch_module._apply_rootfs_fixups(self.rootfs)
 

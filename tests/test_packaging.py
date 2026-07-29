@@ -124,10 +124,21 @@ class PackagingTests(unittest.TestCase):
             "%{_localstatedir}/lib/spaces",
             spec,
         )
+        self.assertIn(
+            "%{_prefix}/local/share/applications/spaces",
+            spec,
+        )
         self.assertIn("selinux/spaces.pp", spec)
         self.assertTrue((ROOT / "selinux" / "spaces.te").is_file())
         self.assertTrue((ROOT / "selinux" / "spaces.fc").is_file())
         self.assertTrue((ROOT / "selinux" / "spaces.if").is_file())
+        file_contexts = (ROOT / "selinux" / "spaces.fc").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "/usr/local/share/applications/spaces(/.*)?",
+            file_contexts,
+        )
 
     def test_polkit_policy_scopes_authorization_by_operation(self) -> None:
         policy = ROOT / "data" / "org.anatase.spaces.policy"
