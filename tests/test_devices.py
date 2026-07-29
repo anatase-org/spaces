@@ -59,6 +59,7 @@ class DeviceDiscoveryTests(unittest.TestCase):
             str,
             tuple[str, int, int, int, devices.DeviceMetadata],
         ],
+        aliases: dict[str, str] | None = None,
     ) -> tuple[devices.DeviceNode, ...]:
         fake_stats: dict[Path, SimpleNamespace] = {}
         metadata_by_number: dict[tuple[str, int], devices.DeviceMetadata] = {}
@@ -80,6 +81,10 @@ class DeviceDiscoveryTests(unittest.TestCase):
                 st_gid=gid,
             )
             metadata_by_number[(kind, device_number)] = device_metadata
+        for relative, target in (aliases or {}).items():
+            path = self.device_root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.symlink_to(target)
 
         def lstat(path: Path) -> object:
             return fake_stats.get(path, self.original_lstat(path))
@@ -255,6 +260,57 @@ class DeviceDiscoveryTests(unittest.TestCase):
             },
         )
 
+    def test_full_includes_security_and_storage_but_leaves_api_dev_managed(
+        self,
+    ) -> None:
+        definitions = {
+            "console": ("c", 5, 1, 0, metadata()),
+            "pts/7": ("c", 136, 7, 100, metadata()),
+            "tpm0": (
+                "c",
+                10,
+                224,
+                100,
+                metadata(subsystems=("tpm",)),
+            ),
+            "input/event0": (
+                "c",
+                13,
+                64,
+                100,
+                metadata(properties=("ID_INPUT_KEYBOARD",)),
+            ),
+            "sda": ("b", 8, 0, 6, metadata(subsystems=("block",))),
+            "dm-0": ("b", 253, 0, 6, metadata(subsystems=("block",))),
+        }
+
+        discovered = self._discover(
+            "full",
+            definitions,
+            aliases={
+                "mapper/cryptroot": "../dm-0",
+                "outside": "/dev/null",
+            },
+        )
+        found = {str(item.destination) for item in discovered}
+
+        self.assertEqual(
+            found,
+            {
+                "/dev/dm-0",
+                "/dev/input/event0",
+                "/dev/mapper/cryptroot",
+                "/dev/sda",
+                "/dev/tpm0",
+            },
+        )
+        alias = next(
+            item
+            for item in discovered
+            if str(item.destination) == "/dev/mapper/cryptroot"
+        )
+        self.assertEqual(alias.source, self.device_root / "dm-0")
+
     def test_discovery_does_not_follow_device_symlinks(self) -> None:
         target = self.device_root / "target"
         target.touch()
@@ -349,7 +405,7 @@ class DevicePolicyTests(unittest.TestCase):
         )
         self.assertEqual(
             launch._device_bind_arguments("full", (filtered,)),
-            ("--bind=/dev",),
+            ("--bind=/dev/snd/a\\:b:/dev/snd/a\\:b",),
         )
 
 

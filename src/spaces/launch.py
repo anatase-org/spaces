@@ -1751,8 +1751,6 @@ def _device_bind_arguments(
     level: str,
     nodes: Iterable[devices.DeviceNode],
 ) -> tuple[str, ...]:
-    if level == "full":
-        return ("--bind=/dev",)
     return tuple(
         _path_bind_argument(node.source, node.destination)
         for node in sorted(nodes)
@@ -1915,7 +1913,7 @@ def launch(space_name: str) -> int:
             authentication.start()
             authentication_binds += authentication_runtime.bind_arguments
         initial_devices: tuple[devices.DeviceNode, ...] = ()
-        if device_level in {"basic", "admin"}:
+        if device_level in {"basic", "admin", "full"}:
             device_udev = devices.Udev()
             device_monitor = device_udev.monitor()
             initial_devices = devices.discover(

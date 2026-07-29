@@ -18,6 +18,20 @@ from .core import SpacesError
 
 
 DEV_ROOT = Path("/dev")
+NSPAWN_MANAGED_DIRECTORIES = frozenset({"mqueue", "pts", "shm"})
+NSPAWN_MANAGED_DEVICES = frozenset(
+    {
+        PurePosixPath("/dev/console"),
+        PurePosixPath("/dev/full"),
+        PurePosixPath("/dev/kmsg"),
+        PurePosixPath("/dev/null"),
+        PurePosixPath("/dev/ptmx"),
+        PurePosixPath("/dev/random"),
+        PurePosixPath("/dev/tty"),
+        PurePosixPath("/dev/urandom"),
+        PurePosixPath("/dev/zero"),
+    }
+)
 VIDEO_SUBSYSTEMS = frozenset(
     {"cec", "drm", "dvb", "graphics", "media", "video4linux"}
 )
@@ -296,19 +310,22 @@ def discover(
     device_root: Path = DEV_ROOT,
     metadata_reader: MetadataReader | None = None,
 ) -> tuple[DeviceNode, ...]:
-    """Return canonical device nodes permitted by a filtered access level."""
+    """Return host device paths permitted by the selected access level."""
 
-    if level not in {"basic", "admin"}:
+    if level not in {"basic", "admin", "full"}:
         return ()
+    resolved_device_root = device_root.resolve(strict=True)
     owned_udev: Udev | None = None
-    if metadata_reader is None:
+    if metadata_reader is None and level != "full":
         owned_udev = Udev()
         metadata_reader = owned_udev.metadata
     try:
-        try:
-            video_gid = grp.getgrnam("video").gr_gid
-        except KeyError:
-            video_gid = None
+        video_gid: int | None = None
+        if level == "basic":
+            try:
+                video_gid = grp.getgrnam("video").gr_gid
+            except KeyError:
+                pass
         nodes: list[DeviceNode] = []
         for parent, directories, files in os.walk(
             device_root, followlinks=False
@@ -317,7 +334,14 @@ def discover(
             directories[:] = [
                 name
                 for name in directories
-                if not (parent_path / name).is_symlink()
+                if (
+                    not (parent_path / name).is_symlink()
+                    and not (
+                        level == "full"
+                        and parent_path == device_root
+                        and name in NSPAWN_MANAGED_DIRECTORIES
+                    )
+                )
             ]
             for name in files:
                 source = parent_path / name
@@ -325,6 +349,16 @@ def discover(
                     metadata_stat = source.lstat()
                 except OSError:
                     continue
+                bind_source = source
+                if stat.S_ISLNK(metadata_stat.st_mode):
+                    if level != "full":
+                        continue
+                    try:
+                        bind_source = source.resolve(strict=True)
+                        bind_source.relative_to(resolved_device_root)
+                        metadata_stat = bind_source.lstat()
+                    except (OSError, RuntimeError, ValueError):
+                        continue
                 if stat.S_ISCHR(metadata_stat.st_mode):
                     kind = "c"
                 elif stat.S_ISBLK(metadata_stat.st_mode):
@@ -336,25 +370,29 @@ def discover(
                 except ValueError:
                     continue
                 destination = PurePosixPath("/dev", *relative.parts)
-                metadata = metadata_reader(kind, metadata_stat.st_rdev)
-                if _is_security_device(destination, metadata):
-                    continue
-                if level == "basic" and (
-                    _is_capture_device(metadata)
-                    or not (
-                        "uaccess" in metadata.tags
-                        or (
-                            video_gid is not None
-                            and metadata_stat.st_gid == video_gid
+                if level != "full":
+                    assert metadata_reader is not None
+                    metadata = metadata_reader(kind, metadata_stat.st_rdev)
+                    if _is_security_device(destination, metadata):
+                        continue
+                    if level == "basic" and (
+                        _is_capture_device(metadata)
+                        or not (
+                            "uaccess" in metadata.tags
+                            or (
+                                video_gid is not None
+                                and metadata_stat.st_gid == video_gid
+                            )
+                            or bool(metadata.subsystems & VIDEO_SUBSYSTEMS)
                         )
-                        or bool(metadata.subsystems & VIDEO_SUBSYSTEMS)
-                    )
-                ):
+                    ):
+                        continue
+                elif destination in NSPAWN_MANAGED_DEVICES:
                     continue
                 nodes.append(
                     DeviceNode(
                         destination=destination,
-                        source=source,
+                        source=bind_source,
                         kind=kind,
                         major=os.major(metadata_stat.st_rdev),
                         minor=os.minor(metadata_stat.st_rdev),

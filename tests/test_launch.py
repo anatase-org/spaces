@@ -480,13 +480,41 @@ class LaunchTests(unittest.TestCase):
             ],
         )
 
-    def test_full_devices_bind_dev_and_use_unrestricted_policy(self) -> None:
+    def test_full_devices_bind_all_nodes_and_use_unrestricted_policy(
+        self,
+    ) -> None:
         self._write_info(devices="full")
         process = mock.Mock()
         process.wait.return_value = 0
+        device_udev = mock.Mock()
+        device_monitor = mock.Mock()
+        device_udev.monitor.return_value = device_monitor
+        device_worker = mock.Mock()
+        discovered = launch_module.devices.DeviceNode(
+            destination=launch_module.PurePosixPath("/dev/nvme0n1"),
+            source=Path("/dev/nvme0n1"),
+            kind="b",
+            major=259,
+            minor=0,
+        )
         self.device_policy.reset_mock()
 
         with (
+            mock.patch.object(
+                launch_module.devices,
+                "Udev",
+                return_value=device_udev,
+            ),
+            mock.patch.object(
+                launch_module.devices,
+                "discover",
+                return_value=(discovered,),
+            ),
+            mock.patch.object(
+                launch_module,
+                "_DeviceWorker",
+                return_value=device_worker,
+            ),
             mock.patch.object(
                 launch_module.subprocess,
                 "Popen",
@@ -496,14 +524,22 @@ class LaunchTests(unittest.TestCase):
         ):
             self.assertEqual(launch_module.launch("work"), 0)
 
-        self.assertIn("--bind=/dev", popen.call_args.args[0])
+        self.assertNotIn("--bind=/dev", popen.call_args.args[0])
+        self.assertIn(
+            "--bind=/dev/nvme0n1:/dev/nvme0n1",
+            popen.call_args.args[0],
+        )
         self.assertEqual(
             self.device_policy.call_args_list,
             [
-                mock.call("work", "full", ()),
+                mock.call("work", "full", (discovered,)),
                 mock.call("work", "disabled"),
             ],
         )
+        device_worker.start.assert_called_once_with()
+        device_worker.attach.assert_called_once_with(process)
+        device_worker.stop.assert_called_once_with()
+        device_worker.join.assert_called_once_with()
 
     def test_missing_devices_defaults_to_basic_and_starts_monitor_first(
         self,
