@@ -46,7 +46,14 @@ spaces = ["overlay/*.png"]
   "data/pam/spaces.common-auth",
   "data/pam/spaces.system-auth",
   "data/pam/spaces.ubuntu",
+  "data/pam/spaces.kali",
 ]
+"share/spaces/keys" = [
+  "data/keys/RPM-GPG-KEY-fedora-44-primary",
+  "data/keys/kali-archive-key.asc",
+  "data/keys/kali-archive-key.gpg.base64",
+]
+"share/spaces/repos" = ["data/repos/fedora.repo"]
 "lib/systemd/system" = ["data/spaces@.service"]
 "share/spaces/portal/dbus-1/services" = [
   "data/portal/dbus-1/services/org.freedesktop.impl.portal.desktop.spaces.service",

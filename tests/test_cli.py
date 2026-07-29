@@ -136,8 +136,9 @@ class CliTests(unittest.TestCase):
 
         run.assert_called_once_with(command, check=False)
 
-    def test_known_unimplemented_distribution(self) -> None:
-        self.assertEqual(cli.main(["create", "arch"]), 2)
+    def test_all_parser_distributions_have_drivers(self) -> None:
+        for distribution_id in ("arch", "fedora", "ubuntu", "kali", "custom"):
+            self.assertIsNotNone(cli.get_driver(distribution_id))
 
     def test_keyboard_interrupt_returns_130(self) -> None:
         with (
@@ -203,6 +204,92 @@ class CliTests(unittest.TestCase):
         self.assertEqual(
             payload["permissions"]["system"]["devices"],
             "basic",
+        )
+
+    def test_create_arch_builds_options_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary) / "home"
+            home.mkdir()
+            identity = core.Identity(1000, 1000, home)
+            with (
+                mock.patch.object(core, "STATE_ROOT", Path(temporary) / "state"),
+                mock.patch.object(core, "initiating_identity", return_value=identity),
+                mock.patch.object(
+                    cli,
+                    "run_permission_wizard",
+                    return_value={
+                        "network": "basic",
+                        "home": [],
+                        "distribution_options": [],
+                    },
+                ) as wizard,
+                mock.patch.object(cli, "_invoke_helper", return_value=0) as invoke,
+            ):
+                self.assertEqual(cli.main(["create", "arch"]), 0)
+
+        self.assertTrue(wizard.call_args.kwargs["distribution_multiple"])
+        self.assertEqual(wizard.call_args.kwargs["distribution_values"], ["yay"])
+        self.assertEqual(
+            invoke.call_args.args[1]["distribution"],
+            {"id": "arch", "options": []},
+        )
+
+    def test_rebuilding_arch_persists_selected_options(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            home = Path(temporary) / "home"
+            home.mkdir()
+            identity = core.Identity(1000, 1000, home)
+            info = core.create_info(
+                "arch",
+                {"id": "arch", "options": []},
+                identity,
+                "basic",
+                [],
+            )
+            info_path = state / "arch" / "info.json"
+            info_path.parent.mkdir(parents=True)
+            info_path.write_text(json.dumps(info), encoding="utf-8")
+            with (
+                mock.patch.object(core, "STATE_ROOT", state),
+                mock.patch.object(core, "initiating_identity", return_value=identity),
+                mock.patch.object(
+                    cli,
+                    "run_permission_wizard",
+                    return_value={
+                        "network": "basic",
+                        "home": [],
+                        "distribution_options": [],
+                    },
+                ) as wizard,
+                mock.patch.object(cli, "_invoke_helper", return_value=0),
+            ):
+                self.assertEqual(cli.main(["create", "arch"]), 0)
+
+        self.assertEqual(wizard.call_args.kwargs["distribution_values"], [])
+
+    def test_create_kali_has_no_distribution_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary) / "home"
+            home.mkdir()
+            identity = core.Identity(1000, 1000, home)
+            with (
+                mock.patch.object(core, "STATE_ROOT", Path(temporary) / "state"),
+                mock.patch.object(core, "initiating_identity", return_value=identity),
+                mock.patch.object(
+                    cli,
+                    "run_permission_wizard",
+                    return_value={"network": "basic", "home": []},
+                ) as wizard,
+                mock.patch.object(cli, "_invoke_helper", return_value=0) as invoke,
+            ):
+                self.assertEqual(cli.main(["create", "kali"]), 0)
+
+        self.assertEqual(wizard.call_args.kwargs["distribution_options"], [])
+        self.assertFalse(wizard.call_args.kwargs["distribution_multiple"])
+        self.assertEqual(
+            invoke.call_args.args[1]["distribution"],
+            {"id": "kali"},
         )
 
     def test_create_custom_uses_prompted_name(self) -> None:

@@ -2,6 +2,8 @@ recursive-include src/spaces/overlay *.png
 include data/org.anatase.spaces.policy
 include data/spaces@.service
 recursive-include data/pam *
+recursive-include data/keys *
+recursive-include data/repos *
 recursive-include data/portal *
 recursive-include native Makefile *.c *.h *.py
 recursive-include tests *.py

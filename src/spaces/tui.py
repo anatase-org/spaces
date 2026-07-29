@@ -229,22 +229,29 @@ class PermissionForm(
         scrollbar-corner-color: ansi_default;
     }
     #home-folders > .selection-list--button,
-    #home-folders > .selection-list--button-highlighted {
+    #home-folders > .selection-list--button-highlighted,
+    #distribution-options > .selection-list--button,
+    #distribution-options > .selection-list--button-highlighted {
         color: $ansi-foreground;
         background: ansi_default;
         text-style: dim;
     }
     #home-folders > .selection-list--button-selected,
-    #home-folders > .selection-list--button-selected-highlighted {
+    #home-folders > .selection-list--button-selected-highlighted,
+    #distribution-options > .selection-list--button-selected,
+    #distribution-options > .selection-list--button-selected-highlighted {
         color: $accent;
         background: ansi_default;
         text-style: bold not dim;
     }
     #home-folders > .selection-list--button-highlighted,
-    #home-folders > .selection-list--button-selected-highlighted {
+    #home-folders > .selection-list--button-selected-highlighted,
+    #distribution-options > .selection-list--button-highlighted,
+    #distribution-options > .selection-list--button-selected-highlighted {
         background: $accent-muted;
     }
-    #home-folders > .option-list--option-highlighted {
+    #home-folders > .option-list--option-highlighted,
+    #distribution-options > .option-list--option-highlighted {
         color: $ansi-foreground;
         background: $accent-muted;
     }
@@ -324,6 +331,8 @@ class PermissionForm(
         distribution_description: str,
         distribution_options: list[tuple[str, str]],
         distribution_value: str | None,
+        distribution_multiple: bool = False,
+        distribution_values: list[str] | None = None,
         administrator: bool = True,
         desktop: bool = True,
         administrator_group: str = "wheel",
@@ -355,6 +364,8 @@ class PermissionForm(
         self.distribution_description = distribution_description
         self.distribution_options = distribution_options
         self.distribution_value = distribution_value
+        self.distribution_multiple = distribution_multiple
+        self.distribution_values = set(distribution_values or [])
         self.submit_label = submit_label
         self.steps = (
             (["override"] if override else [])
@@ -529,13 +540,29 @@ class PermissionForm(
                     yield Static(
                         self.distribution_description, classes="description"
                     )
-                    with RadioSet(id="distribution-option"):
-                        for label, value in self.distribution_options:
-                            yield CleanRadioButton(
-                                label,
-                                value=value == self.distribution_value,
-                                id=f"option-{value}",
-                            )
+                    if self.distribution_multiple:
+                        yield FolderSelectionList(
+                            *[
+                                Selection(
+                                    label,
+                                    value,
+                                    value in self.distribution_values,
+                                    id=f"option-{index}",
+                                )
+                                for index, (label, value) in enumerate(
+                                    self.distribution_options
+                                )
+                            ],
+                            id="distribution-options",
+                        )
+                    else:
+                        with RadioSet(id="distribution-option"):
+                            for label, value in self.distribution_options:
+                                yield CleanRadioButton(
+                                    label,
+                                    value=value == self.distribution_value,
+                                    id=f"option-{value}",
+                                )
             with Horizontal(id="buttons"):
                 yield Button(
                     Content.from_text(_("Cancel") + " [ESC]", markup=False),
@@ -614,7 +641,11 @@ class PermissionForm(
             "user": "#home-folders",
             "desktop": "#desktop",
             "administrator": "#administrator",
-            "distribution": "#distribution-option",
+            "distribution": (
+                "#distribution-options"
+                if self.distribution_multiple
+                else "#distribution-option"
+            ),
         }
         if current == "override":
             next_button.focus()
@@ -635,6 +666,10 @@ class PermissionForm(
         if current == "user":
             self.query_one(
                 "#home-folders", FolderSelectionList
+            ).action_select()
+        elif current == "distribution" and self.distribution_multiple:
+            self.query_one(
+                "#distribution-options", FolderSelectionList
             ).action_select()
         else:
             targets = {
@@ -704,9 +739,17 @@ class PermissionForm(
                 "shortcuts-",
             ) == "true"
         if self.distribution_options:
-            result["distribution_option"] = self._radio_value(
-                self.query_one("#distribution-option", RadioSet), "option-"
-            )
+            if self.distribution_multiple:
+                result["distribution_options"] = list(
+                    self.query_one(
+                        "#distribution-options",
+                        FolderSelectionList,
+                    ).selected
+                )
+            else:
+                result["distribution_option"] = self._radio_value(
+                    self.query_one("#distribution-option", RadioSet), "option-"
+                )
         return result
 
     def on_button_pressed(self, event: Button.Pressed) -> None:

@@ -110,6 +110,7 @@ CONFIG_DIRECTORIES = ("gtk-3.0", "gtk-4.0", "fontconfig")
 CONFIG_FILES = ("kdeglobals",)
 POLKIT_AGENTS = (
     "/usr/libexec/polkit-kde-authentication-agent-1",
+    "/usr/libexec/kf6/polkit-kde-authentication-agent-1",
     "/usr/lib/polkit-kde-authentication-agent-1",
 )
 POLKIT_AGENT_GLOB = "usr/lib/*/libexec/polkit-kde-authentication-agent-1"

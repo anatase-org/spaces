@@ -79,16 +79,43 @@ class PrivilegedTests(unittest.TestCase):
                 ),
                 mock.call(
                     [
-                        "chroot",
-                        str(space / "rootfs"),
+                        "mount",
+                        "--types",
+                        "proc",
+                        "--options",
+                        "nosuid,noexec,nodev",
+                        "proc",
+                        str(space / "rootfs" / "proc"),
+                    ],
+                    check=True,
+                ),
+                mock.call(
+                    ubuntu.chroot_command(
+                        space / "rootfs",
                         "apt-get",
                         "update",
-                    ],
+                    ),
                     check=True,
                 ),
             ]
         )
-        self.assertEqual(run.call_count, 4)
+        self.assertEqual(run.call_count, 6)
+        self.assertEqual(
+            run.call_args,
+            mock.call(
+                ["umount", str(space / "rootfs" / "proc")],
+                check=True,
+            ),
+        )
+        self.assertFalse(
+            (
+                space
+                / "rootfs"
+                / "usr"
+                / "sbin"
+                / "policy-rc.d"
+            ).exists()
+        )
         self.assertEqual(
             (
                 space

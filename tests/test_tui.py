@@ -287,6 +287,41 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                 "back",
             )
 
+    async def test_arch_distribution_options_are_checkboxes(self) -> None:
+        app = PermissionForm(
+            home=Path("/home/user"),
+            folders=["Projects"],
+            network="basic",
+            selected_home=[],
+            administrator=True,
+            include_system=False,
+            distribution_title="Arch options",
+            distribution_description="Choose optional software.",
+            distribution_options=[
+                ("yay — AUR helper (built from community source)", "yay"),
+            ],
+            distribution_value=None,
+            distribution_multiple=True,
+            distribution_values=["yay"],
+            submit_label="Create",
+        )
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            for _ in range(3):
+                await pilot.press("enter")
+                await pilot.pause()
+            options = app.query_one(
+                "#distribution-options",
+                FolderSelectionList,
+            )
+            self.assertEqual(options.selected, ["yay"])
+            self.assertEqual(app._result()["distribution_options"], ["yay"])
+            self.assertEqual(len(app.query("#distribution-option")), 0)
+            await pilot.press("space")
+            await pilot.pause()
+            self.assertEqual(options.selected, [])
+            self.assertEqual(app._result()["distribution_options"], [])
+
     async def test_user_only_omits_system_controls(self) -> None:
         app = PermissionForm(
             home=Path("/home/user"),

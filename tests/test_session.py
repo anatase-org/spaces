@@ -560,6 +560,22 @@ class DesktopControllerTests(unittest.TestCase):
 
 
 class PolkitAgentTests(unittest.TestCase):
+    def test_recognizes_fedora_kf6_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            rootfs = Path(temporary)
+            agent = (
+                rootfs
+                / "usr/libexec/kf6"
+                / "polkit-kde-authentication-agent-1"
+            )
+            agent.parent.mkdir(parents=True)
+            agent.write_text("#!/bin/sh\n", encoding="utf-8")
+            agent.chmod(0o755)
+            self.assertEqual(
+                session.polkit_agent(rootfs),
+                "/usr/libexec/kf6/polkit-kde-authentication-agent-1",
+            )
+
     def test_recognizes_ubuntu_multiarch_agent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             rootfs = Path(temporary)

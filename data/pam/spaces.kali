@@ -1,0 +1,8 @@
+Name: Spaces host authentication
+Default: yes
+Priority: 1024
+Auth-Type: Primary
+Auth:
+	[success=end open_err=ignore default=die]	/run/spaces-host/bin/pam_spaces.so
+Auth-Initial:
+	[success=end open_err=ignore default=die]	/run/spaces-host/bin/pam_spaces.so

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import base64
 import configparser
+import shutil
+import subprocess
+import tempfile
 import tomllib
 import unittest
 import xml.etree.ElementTree as ElementTree
@@ -21,7 +25,12 @@ class PackagingTests(unittest.TestCase):
         package_data = project["tool"]["setuptools"]["package-data"]["spaces"]
         self.assertIn("Pillow>=11.0", project["project"]["dependencies"])
         self.assertNotIn("distro/*.toml", package_data)
-        self.assertTrue((ROOT / "src" / "spaces" / "distro" / "ubuntu.py").is_file())
+        for distribution in ("arch", "fedora", "kali", "ubuntu"):
+            self.assertTrue(
+                (
+                    ROOT / "src" / "spaces" / "distro" / f"{distribution}.py"
+                ).is_file()
+            )
         self.assertFalse(
             (ROOT / "src" / "spaces" / "distro" / "ubuntu.toml").exists()
         )
@@ -127,6 +136,9 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("'python-textual'", pkgbuild)
         self.assertIn("'python-pillow'", pkgbuild)
         self.assertIn("'ubuntu-keyring'", pkgbuild)
+        self.assertIn("'debootstrap'", pkgbuild)
+        self.assertIn("'dnf5'", pkgbuild)
+        self.assertIn("'arch-install-scripts'", pkgbuild)
         self.assertIn("'systemd'", pkgbuild)
         self.assertIn(
             "/usr/bin/python -m unittest discover -s tests -v", pkgbuild
@@ -141,6 +153,10 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("%make_build -C native", spec)
         self.assertIn("%{_sysconfdir}/pam.d/spaces", spec)
         self.assertIn("%{_datadir}/spaces/pam/spaces.ubuntu", spec)
+        self.assertIn("%{_datadir}/spaces/pam/spaces.kali", spec)
+        self.assertIn("Requires:       dnf5", spec)
+        self.assertIn("Requires:       debootstrap", spec)
+        self.assertIn("Requires:       arch-install-scripts", spec)
 
         makefile = (ROOT / "native" / "Makefile").read_text(encoding="utf-8")
         self.assertIn("install: check-guest-abi", makefile)
@@ -194,6 +210,59 @@ class PackagingTests(unittest.TestCase):
         )
         pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         self.assertIn('"data/pam/spaces.ubuntu"', pyproject)
+        self.assertIn('"data/pam/spaces.kali"', pyproject)
+        self.assertIn('"data/repos/fedora.repo"', pyproject)
+        self.assertIn(
+            '"data/keys/RPM-GPG-KEY-fedora-44-primary"',
+            pyproject,
+        )
+        self.assertIn(
+            '"data/keys/kali-archive-key.gpg.base64"',
+            pyproject,
+        )
+
+    def test_packaged_bootstrap_keys_have_expected_fingerprints(self) -> None:
+        if shutil.which("gpg") is None:
+            self.skipTest("gpg is required to inspect packaged keys")
+
+        def fingerprints(path: Path) -> set[str]:
+            completed = subprocess.run(
+                [
+                    "gpg",
+                    "--batch",
+                    "--with-colons",
+                    "--show-keys",
+                    str(path),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            return {
+                fields[9]
+                for line in completed.stdout.splitlines()
+                if (fields := line.split(":"))[0] == "fpr"
+            }
+
+        fedora_key = (
+            ROOT / "data" / "keys" / "RPM-GPG-KEY-fedora-44-primary"
+        )
+        kali_key = ROOT / "data" / "keys" / "kali-archive-key.asc"
+        encoded_kali_key = (
+            ROOT / "data" / "keys" / "kali-archive-key.gpg.base64"
+        )
+        self.assertIn(
+            "36F612DCF27F7D1A48A835E4DBFCF71C6D9F90A6",
+            fingerprints(fedora_key),
+        )
+        expected_kali = "827C8569F2518CC677FECA1AED65462EC8D5E4C5"
+        self.assertIn(expected_kali, fingerprints(kali_key))
+        with tempfile.TemporaryDirectory() as temporary:
+            binary_key = Path(temporary) / "kali.gpg"
+            binary_key.write_bytes(
+                base64.b64decode(encoded_kali_key.read_bytes())
+            )
+            self.assertIn(expected_kali, fingerprints(binary_key))
 
     def test_distro_overlays_are_packaged_at_export_resolution(self) -> None:
         for name in ("arch", "fedora", "kali", "ubuntu"):

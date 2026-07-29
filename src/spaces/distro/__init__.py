@@ -8,7 +8,10 @@ from .model import Distribution, DistributionError
 
 KNOWN_IDS = ("arch", "fedora", "ubuntu", "kali", "custom")
 _DRIVERS = {
+    "arch": "spaces.distro.arch",
+    "fedora": "spaces.distro.fedora",
     "ubuntu": "spaces.distro.ubuntu",
+    "kali": "spaces.distro.kali",
     "custom": "spaces.distro.custom",
 }
 

@@ -7,7 +7,7 @@
 </p>
 
 # Spaces
-Spaces provide a chroot-like sandboxing environment for you to access your favorite distributions: Arch, Fedora, and Ubuntu. A simple permission system ensures your local files and credentials remain secure, even if your space is compromised. Spaces are constructed directly using packages from your chosen distribution repositories with signature enforcement. No container middleman or surprises.
+Spaces provide a chroot-like sandboxing environment for you to access your favorite distributions: Arch, Fedora, Kali, and Ubuntu. A simple permission system ensures your local files and credentials remain secure, even if your space is compromised. Spaces are constructed directly using packages from your chosen distribution repositories with signature enforcement. No container middleman or surprises.
 
 ## About
 
@@ -16,7 +16,7 @@ Spaces is a "simple" wrapper around `systemd-nspawn` that makes it easier to use
 To use, type in your terminal:
 
 ```bash
-spaces enter ubuntu # or fedora or arch
+spaces enter ubuntu # or fedora, arch, or kali
 ```
 
 And follow the graphical prompts. After the space initializes, you will face a familiar terminal. Except, this time, it is a real Ubuntu system you can do anything you want in. Install packages, add custom services, use docker, install vs code, your dev toolchains, browsers, etc.

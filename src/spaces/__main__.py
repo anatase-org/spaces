@@ -272,7 +272,16 @@ def _create(distro_id: str) -> int:
         existing_info.get("distribution") if existing_info else None
     )
     distribution_options = driver.choices()
-    distribution_value = driver.selected_option(existing_distribution)
+    distribution_value = (
+        None
+        if driver.multiple_options
+        else driver.selected_option(existing_distribution)
+    )
+    distribution_values = (
+        driver.selected_options(existing_distribution)
+        if driver.multiple_options
+        else []
+    )
     folders = core.discover_home_folders(identity.home)
     result = run_permission_wizard(
         home=identity.home,
@@ -290,6 +299,8 @@ def _create(distro_id: str) -> int:
         distribution_description=driver.configuration_description,
         distribution_options=distribution_options,
         distribution_value=distribution_value,
+        distribution_multiple=driver.multiple_options,
+        distribution_values=distribution_values,
         submit_label=_("Create"),
         override=override,
     )
@@ -297,7 +308,12 @@ def _create(distro_id: str) -> int:
         return 130
 
     try:
-        distribution = driver.metadata(result.get("distribution_option"))
+        selection = (
+            result.get("distribution_options", [])
+            if driver.multiple_options
+            else result.get("distribution_option")
+        )
+        distribution = driver.metadata(selection)
     except DistributionError as error:
         raise core.SpacesError(str(error)) from error
     info = core.create_info(

@@ -28,13 +28,15 @@ Requires:       polkit
 Requires:       pam
 Requires:       debootstrap
 Requires:       ubuntu-keyring
+Requires:       dnf5
+Requires:       arch-install-scripts
 Requires:       systemd
 Requires:       systemd-container
 Requires:       glib2
 Requires:       xdg-dbus-proxy
 
 %description
-Spaces provide a chroot-like sandboxing environment for you to access your favorite distributions: Arch, Fedora, and Ubuntu. A simple permission system ensures your local files and credentials remain secure, even if your space is compromised. Spaces are constructed directly using packages from your chosen distribution repositories with signature enforcement. No container middleman or surprises.
+Spaces provide a chroot-like sandboxing environment for you to access your favorite distributions: Arch, Fedora, Kali, and Ubuntu. A simple permission system ensures your local files and credentials remain secure, even if your space is compromised. Spaces are constructed directly using packages from your chosen distribution repositories with signature enforcement. No container middleman or surprises.
 
 %prep
 %autosetup -n %{name}-%{version}
@@ -65,7 +67,16 @@ install -Dm644 data/pam/spaces.system-auth \
 %{_bindir}/%{name}*
 %{python3_sitelib}/%{name}*
 %{_datadir}/polkit-1/actions/org.anatase.spaces.policy
+%dir %{_datadir}/spaces
+%dir %{_datadir}/spaces/pam
+%{_datadir}/spaces/pam/spaces.common-auth
+%{_datadir}/spaces/pam/spaces.system-auth
 %{_datadir}/spaces/pam/spaces.ubuntu
+%{_datadir}/spaces/pam/spaces.kali
+%dir %{_datadir}/spaces/keys
+%{_datadir}/spaces/keys/*
+%dir %{_datadir}/spaces/repos
+%{_datadir}/spaces/repos/*
 %config(noreplace) %{_sysconfdir}/pam.d/spaces
 %dir /usr/lib/spaces
 /usr/lib/spaces/spaces-pam-worker
