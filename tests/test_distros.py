@@ -64,6 +64,7 @@ class DistributionDriverTests(unittest.TestCase):
             "--releasever=44",
         ])
         self.assertIn("--setopt=install_weak_deps=False", command)
+        self.assertIn("--setopt=tsflags=nocontexts", command)
         self.assertIn(
             "--setopt=reposdir=/usr/share/spaces/repos",
             command,

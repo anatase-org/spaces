@@ -197,6 +197,7 @@ class FedoraDistribution(Distribution):
             f"--installroot={rootfs}",
             f"--releasever={version}",
             "--setopt=install_weak_deps=False",
+            "--setopt=tsflags=nocontexts",
             f"--setopt=reposdir={HOST_REPOSITORY_DIRECTORY}",
             "install",
             *PACKAGES,
