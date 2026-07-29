@@ -161,6 +161,8 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                     "Development — required for Docker; adds "
                     "CAP_AUDIT_CONTROL, CAP_AUDIT_WRITE, CAP_PERFMON, "
                     "CAP_BPF, and perf_event_open",
+                    "System Administrator — Development plus /sys is "
+                    "writeable",
                 ],
             )
             await pilot.press("enter")

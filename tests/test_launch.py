@@ -349,33 +349,42 @@ class LaunchTests(unittest.TestCase):
                     )
 
     def test_development_kernel_capabilities_extend_launch(self) -> None:
-        arguments = launch_module._command(
-            "work",
-            self.rootfs,
-            self.home,
-            "basic",
-            "development",
-        )
+        for level in ("development", "admin"):
+            with self.subTest(level=level):
+                arguments = launch_module._command(
+                    "work",
+                    self.rootfs,
+                    self.home,
+                    "basic",
+                    level,
+                )
 
-        self.assertIn("--system-call-filter=perf_event_open", arguments)
-        capability_argument = next(
-            argument
-            for argument in arguments
-            if argument.startswith("--capability=")
-        )
-        self.assertTrue(
-            capability_argument.endswith(
-                "CAP_AUDIT_CONTROL,CAP_AUDIT_WRITE,CAP_PERFMON,CAP_BPF"
-            ),
-            capability_argument,
-        )
-        dropped_capability_argument = next(
-            argument
-            for argument in arguments
-            if argument.startswith("--drop-capability=")
-        )
-        self.assertNotIn("CAP_AUDIT_CONTROL", dropped_capability_argument)
-        self.assertNotIn("CAP_AUDIT_WRITE", dropped_capability_argument)
+                self.assertIn("--system-call-filter=perf_event_open", arguments)
+                capability_argument = next(
+                    argument
+                    for argument in arguments
+                    if argument.startswith("--capability=")
+                )
+                self.assertTrue(
+                    capability_argument.endswith(
+                        "CAP_AUDIT_CONTROL,CAP_AUDIT_WRITE,"
+                        "CAP_PERFMON,CAP_BPF"
+                    ),
+                    capability_argument,
+                )
+                dropped_capability_argument = next(
+                    argument
+                    for argument in arguments
+                    if argument.startswith("--drop-capability=")
+                )
+                self.assertNotIn(
+                    "CAP_AUDIT_CONTROL",
+                    dropped_capability_argument,
+                )
+                self.assertNotIn(
+                    "CAP_AUDIT_WRITE",
+                    dropped_capability_argument,
+                )
 
         basic_arguments = launch_module._command(
             "work",
@@ -404,6 +413,26 @@ class LaunchTests(unittest.TestCase):
         self.assertIn(
             "CAP_AUDIT_WRITE",
             basic_dropped_capability_argument,
+        )
+
+    def test_system_administrator_makes_api_vfs_writeable(self) -> None:
+        self._write_info(kernel_capabilities="admin")
+        process = mock.Mock()
+        process.wait.return_value = 0
+
+        with (
+            mock.patch.object(
+                launch_module.subprocess,
+                "Popen",
+                return_value=process,
+            ) as run,
+            mock.patch.object(launch_module.signal, "signal"),
+        ):
+            self.assertEqual(launch_module.launch("work"), 0)
+
+        self.assertEqual(
+            run.call_args.kwargs["env"][launch_module.API_VFS_WRITABLE],
+            "yes",
         )
 
     def test_enabled_authentication_starts_service_and_adds_exact_binds(

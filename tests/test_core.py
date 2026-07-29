@@ -488,11 +488,11 @@ class CoreTests(unittest.TestCase):
             identity,
             "basic",
             [],
-            kernel_capabilities="development",
+            kernel_capabilities="admin",
         )
         self.assertEqual(
             core.defaults_from_info(info, identity)[1],
-            "development",
+            "admin",
         )
 
         del info["permissions"]["system"]["kernel_capabilities"]

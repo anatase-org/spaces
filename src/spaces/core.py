@@ -19,7 +19,11 @@ STATE_ROOT = Path("/var/lib/spaces")
 KNOWN_DISTRIBUTIONS = KNOWN_IDS
 RESERVED_NAMES = frozenset(KNOWN_DISTRIBUTIONS)
 NETWORK_LEVELS = ("basic", "advanced", "admin")
-KERNEL_CAPABILITY_LEVELS = ("basic", "development")
+KERNEL_CAPABILITY_LEVELS = (
+    "basic",
+    "development",
+    "admin",
+)
 DEVICE_LEVELS = ("disabled", "basic", "admin", "full")
 DEFAULT_HOME_FOLDERS = ("Projects", "Downloads")
 SPACE_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")

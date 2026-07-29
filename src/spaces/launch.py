@@ -127,14 +127,16 @@ NETWORK_CAPS = {
         "CAP_NET_ADMIN",
     ),
 }
+DEVELOPMENT_KERNEL_CAPS = (
+    "CAP_AUDIT_CONTROL",
+    "CAP_AUDIT_WRITE",
+    "CAP_PERFMON",
+    "CAP_BPF",
+)
 KERNEL_CAPS = {
     "basic": (),
-    "development": (
-        "CAP_AUDIT_CONTROL",
-        "CAP_AUDIT_WRITE",
-        "CAP_PERFMON",
-        "CAP_BPF",
-    ),
+    "development": DEVELOPMENT_KERNEL_CAPS,
+    "admin": DEVELOPMENT_KERNEL_CAPS,
 }
 
 
@@ -1813,7 +1815,7 @@ def _command(
         "--resolv-conf=bind-host",
         *(
             ("--system-call-filter=perf_event_open",)
-            if kernel_capabilities == "development"
+            if kernel_caps
             else ()
         ),
         f"--drop-capability={','.join(dropped_caps)}",
@@ -1839,7 +1841,9 @@ def launch(space_name: str) -> int:
     shortcut_export = info["permissions"]["system"].get("shortcuts", True)
     environment = os.environ.copy()
     environment.pop(API_VFS_WRITABLE, None)
-    if network == "admin":
+    if kernel_capabilities == "admin":
+        environment[API_VFS_WRITABLE] = "yes"
+    elif network == "admin":
         environment[API_VFS_WRITABLE] = "network"
 
     _apply_rootfs_fixups(rootfs)

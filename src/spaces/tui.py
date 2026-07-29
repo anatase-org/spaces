@@ -310,6 +310,9 @@ class PermissionForm(
             "Development — required for Docker; adds CAP_AUDIT_CONTROL, "
             "CAP_AUDIT_WRITE, CAP_PERFMON, CAP_BPF, and perf_event_open"
         ),
+        "admin": _(
+            "System Administrator — Development plus /sys is writeable"
+        ),
     }
     DEVICE_LABELS = {
         "disabled": _("Disabled — no host devices"),
