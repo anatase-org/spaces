@@ -168,7 +168,7 @@ class PackagingTests(unittest.TestCase):
         )
         self.assertIn("'python-textual'", pkgbuild)
         self.assertIn("'python-pillow'", pkgbuild)
-        self.assertIn("'ubuntu-keyring'", pkgbuild)
+        self.assertNotIn("'ubuntu-keyring'", pkgbuild)
         self.assertIn("'debootstrap'", pkgbuild)
         self.assertIn("'dnf5'", pkgbuild)
         self.assertIn("'arch-install-scripts'", pkgbuild)
@@ -287,6 +287,7 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("%{_datadir}/spaces/pam/spaces.kali", spec)
         self.assertIn("Requires:       dnf5", spec)
         self.assertIn("Requires:       debootstrap", spec)
+        self.assertNotIn("ubuntu-keyring", spec)
         self.assertIn("Requires:       arch-install-scripts", spec)
 
         makefile = (ROOT / "native" / "Makefile").read_text(encoding="utf-8")

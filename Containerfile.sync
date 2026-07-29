@@ -1,0 +1,15 @@
+FROM quay.io/fedora/fedora:44
+
+RUN dnf -y install \
+        rpm-build \
+        gcc \
+        binutils \
+        glib2-devel \
+        pam-devel \
+        systemd-rpm-macros \
+        python3-devel \
+        python3-build \
+        python3-installer \
+        python3-setuptools \
+        python3-wheel \
+    && dnf clean all

@@ -15,7 +15,6 @@ depends=(
   'polkit'
   'pam'
   'debootstrap'
-  'ubuntu-keyring'
   'dnf5'
   'arch-install-scripts'
   'systemd'

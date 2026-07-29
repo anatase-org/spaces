@@ -27,7 +27,6 @@ Requires:       python3-textual
 Requires:       polkit
 Requires:       pam
 Requires:       debootstrap
-Requires:       ubuntu-keyring
 Requires:       dnf5
 Requires:       arch-install-scripts
 Requires:       systemd
