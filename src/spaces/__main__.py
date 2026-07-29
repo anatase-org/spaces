@@ -267,6 +267,12 @@ def _invoke_helper(operation: str, payload: dict[str, Any]) -> int:
 
 def _invoke_raw_helper(operation: str, arguments: list[str]) -> int:
     try:
+        if operation == "enter":
+            completed = subprocess.run(
+                _raw_helper_command(operation, arguments),
+                check=False,
+            )
+            return completed.returncode
         with _tty_polkit_agent():
             completed = subprocess.run(
                 _raw_helper_command(operation, arguments),

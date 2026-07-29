@@ -325,7 +325,7 @@ static bool wait_for_agent(int descriptor)
         && ready == 1;
 }
 
-static pid_t start_agent(const char *agent)
+static pid_t start_agent(const char *agent, int *ready_descriptor)
 {
     int error_pipe[2];
     int ready_pipe[2];
@@ -333,6 +333,7 @@ static pid_t start_agent(const char *agent)
     ssize_t size;
     pid_t child;
 
+    *ready_descriptor = -1;
     if (agent == NULL)
         return -1;
     if (pipe2(error_pipe, O_CLOEXEC) < 0)
@@ -370,12 +371,22 @@ static pid_t start_agent(const char *agent)
         close(ready_pipe[0]);
         return -1;
     }
-    if (!wait_for_agent(ready_pipe[0])) {
+    *ready_descriptor = ready_pipe[0];
+    return child;
+}
+
+static pid_t finish_agent_start(pid_t child, int ready_descriptor)
+{
+    int status;
+
+    if (child <= 0)
+        return child;
+    if (!wait_for_agent(ready_descriptor)) {
         fprintf(stderr,
                 "spaces: warning: polkit agent did not become ready\n");
     }
-    close(ready_pipe[0]);
-    if (waitpid(child, &child_errno, WNOHANG) == child) {
+    close(ready_descriptor);
+    if (waitpid(child, &status, WNOHANG) == child) {
         fprintf(stderr,
                 "spaces: warning: polkit agent exited during startup\n");
         return -1;
@@ -544,6 +555,7 @@ int main(int argc, char **argv)
     size_t dbus_environment_count = 0;
     int status_pipe[2];
     int status;
+    int agent_ready_descriptor;
     pid_t agent_pid;
     pid_t monitor;
     int index = 1;
@@ -582,11 +594,12 @@ int main(int argc, char **argv)
     }
     command = &argv[index + 1];
 
+    agent_pid = start_agent(agent, &agent_ready_descriptor);
     (void)update_dbus_environment(
         dbus_environment, dbus_environment_count
     );
     free(dbus_environment);
-    agent_pid = start_agent(agent);
+    agent_pid = finish_agent_start(agent_pid, agent_ready_descriptor);
     if (pipe2(status_pipe, O_CLOEXEC) < 0) {
         stop_agent(agent_pid);
         return 1;

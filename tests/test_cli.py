@@ -147,13 +147,43 @@ class CliTests(unittest.TestCase):
             mock.patch.object(
                 cli.subprocess, "run", return_value=completed
             ) as run,
+            mock.patch.object(cli, "_tty_polkit_agent") as agent,
         ):
             self.assertEqual(
                 cli._invoke_raw_helper("enter", ["alice@work"]),
                 42,
             )
 
+        agent.assert_not_called()
         run.assert_called_once_with(command, check=False)
+
+    def test_privileged_enter_keeps_tty_polkit_agent(self) -> None:
+        command = [
+            "pkexec",
+            "/usr/bin/spaces.priv",
+            "enter-as-user",
+            "root",
+            "work",
+        ]
+        completed = subprocess.CompletedProcess(command, 0)
+        with (
+            mock.patch.object(
+                cli, "_raw_helper_command", return_value=command
+            ),
+            mock.patch.object(
+                cli.subprocess, "run", return_value=completed
+            ),
+            mock.patch.object(cli, "_tty_polkit_agent") as agent,
+        ):
+            self.assertEqual(
+                cli._invoke_raw_helper(
+                    "enter-as-user",
+                    ["root", "work"],
+                ),
+                0,
+            )
+
+        agent.assert_called_once_with()
 
     def test_all_parser_distributions_have_drivers(self) -> None:
         for distribution_id in ("arch", "fedora", "ubuntu", "kali", "custom"):

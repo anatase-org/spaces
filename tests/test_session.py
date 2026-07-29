@@ -784,6 +784,16 @@ class NativeLauncherTests(unittest.TestCase):
         cls.dbus_update = Path(cls.temporary.name) / "dbus-update"
         cls.dbus_update.write_text(
             "#!/bin/sh\n"
+            "if test -n \"$SPACES_DBUS_STARTED\"; then\n"
+            "  : > \"$SPACES_DBUS_STARTED\"\n"
+            "  attempts=0\n"
+            "  while test ! -e \"$SPACES_AGENT_STARTED\"; do\n"
+            "    attempts=$((attempts + 1))\n"
+            "    test \"$attempts\" -lt 100 || exit 24\n"
+            "    sleep 0.01\n"
+            "  done\n"
+            "  : > \"$SPACES_SETUP_OVERLAPPED\"\n"
+            "fi\n"
             "if test -n \"$SPACES_DBUS_ENV_NAMES\"; then\n"
             "  printf '%s\\n' \"$@\" > \"$SPACES_DBUS_ENV_NAMES\"\n"
             "fi\n"
@@ -1051,6 +1061,72 @@ class NativeLauncherTests(unittest.TestCase):
                 try:
                     os.killpg(
                         int(marker.read_text(encoding="utf-8")),
+                        signal.SIGTERM,
+                    )
+                except ProcessLookupError:
+                    pass
+
+    def test_starts_agent_while_updating_dbus_environment(self) -> None:
+        agent_started = Path(self.temporary.name) / "overlap-agent-started"
+        dbus_started = Path(self.temporary.name) / "overlap-dbus-started"
+        overlapped = Path(self.temporary.name) / "setup-overlapped"
+        agent_pid = Path(self.temporary.name) / "overlap-agent-pid"
+        agent = Path(self.temporary.name) / "overlap-agent"
+        agent.write_text(
+            "#!/bin/sh\n"
+            "printf '%s' \"$$\" > \"$SPACES_AGENT_PID\"\n"
+            ": > \"$SPACES_AGENT_STARTED\"\n"
+            "attempts=0\n"
+            "while test ! -e \"$SPACES_DBUS_STARTED\"; do\n"
+            "  attempts=$((attempts + 1))\n"
+            "  test \"$attempts\" -lt 100 || exit 24\n"
+            "  sleep 0.01\n"
+            "done\n"
+            "printf 'Authentication agent result: true\\n' >&2\n"
+            "trap 'exit 0' TERM\n"
+            "while :; do sleep 0.05; done\n",
+            encoding="utf-8",
+        )
+        agent.chmod(0o755)
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "DISPLAY": ":0",
+                "SPACES_AGENT_PID": str(agent_pid),
+                "SPACES_AGENT_STARTED": str(agent_started),
+                "SPACES_DBUS_STARTED": str(dbus_started),
+                "SPACES_SETUP_OVERLAPPED": str(overlapped),
+            }
+        )
+        completed = subprocess.run(
+            [
+                self.launcher,
+                "--dbus-env",
+                "DISPLAY",
+                "--agent",
+                agent,
+                "--",
+                "/bin/sh",
+                "-c",
+                f"test -f {shlex.quote(str(overlapped))}",
+            ],
+            check=False,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+
+        try:
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertTrue(agent_started.exists())
+            self.assertTrue(dbus_started.exists())
+            self.assertTrue(overlapped.exists())
+        finally:
+            if agent_pid.exists():
+                try:
+                    os.killpg(
+                        int(agent_pid.read_text(encoding="utf-8")),
                         signal.SIGTERM,
                     )
                 except ProcessLookupError:
