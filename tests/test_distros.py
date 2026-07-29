@@ -16,6 +16,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class DistributionDriverTests(unittest.TestCase):
+    def test_desktop_drivers_install_xdg_mime_detector(self) -> None:
+        for packages in (
+            arch.PACKAGES,
+            fedora.PACKAGES,
+            kali.PACKAGES,
+        ):
+            self.assertIn("file", packages)
+
     def test_drivers_are_registered_and_describe_metadata(self) -> None:
         self.assertIs(get_driver("arch"), arch.DISTRIBUTION)
         self.assertIs(get_driver("fedora"), fedora.DISTRIBUTION)

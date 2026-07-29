@@ -634,7 +634,7 @@ class PortalNativeTests(unittest.TestCase):
                         )
                     except GLib.Error as error:
                         return str(error)
-                    self.fail("broker call unexpectedly succeeded")
+                    return "success"
 
                 mismatch = call("/guest/a", nested / "a")
                 self.assertIn(

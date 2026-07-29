@@ -41,6 +41,7 @@ class CoreTests(unittest.TestCase):
         self.assertIn("pipewire", ubuntu.PACKAGES)
         self.assertIn("xdg-desktop-portal", ubuntu.PACKAGES)
         self.assertIn("xdg-desktop-portal-kde", ubuntu.PACKAGES)
+        self.assertIn("file", ubuntu.PACKAGES)
         self.assertEqual(
             ubuntu.SECRET_PACKAGES,
             {

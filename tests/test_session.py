@@ -239,6 +239,10 @@ class DesktopPathTests(unittest.TestCase):
                 f"unix:{destination_root}/pulse/native",
             )
             self.assertEqual(plan.environment["QT_SCALE_FACTOR"], "1.5")
+            self.assertEqual(
+                plan.environment["BROWSER"],
+                "/run/spaces-host/bin/spaces-open",
+            )
             self.assertNotIn("KDE_FULL_SESSION", plan.environment)
             self.assertEqual(
                 plan.environment["KDE_SESSION_VERSION"], "6"

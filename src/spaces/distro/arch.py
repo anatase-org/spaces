@@ -29,6 +29,7 @@ PACKAGES = (
     "plasma-integration",
     "kde-cli-tools",
     "kwallet",
+    "file",
     "pipewire",
     "xdg-desktop-portal",
     "xdg-desktop-portal-kde",

@@ -55,6 +55,7 @@ STATUS_STATES = frozenset({"active", "inactive", "pending"})
 # graphical session into a PAM-backed command environment.
 DESKTOP_ENVIRONMENT = frozenset(
     {
+        "BROWSER",
         "COLORTERM",
         "DESKTOP_SESSION",
         "DISPLAY",
@@ -1304,6 +1305,11 @@ def _plan(
         if item and item.casefold() != "spaces"
     ]
     environment["XDG_CURRENT_DESKTOP"] = ":".join(["Spaces", *desktops])
+    # xdg-utils' generic backend falls through to $BROWSER when its optional
+    # file(1) MIME detector is unavailable. Keep that stock fallback on the
+    # same URI/file/directory-aware launcher instead of selecting a guest
+    # browser.
+    environment["BROWSER"] = "/run/spaces-host/bin/spaces-open"
     environment["XDG_CONFIG_DIRS"] = "/run/spaces-host/config:/etc/xdg"
     environment["XDG_SESSION_TYPE"] = selected.session_type
     environment["XDG_SESSION_CLASS"] = "user"

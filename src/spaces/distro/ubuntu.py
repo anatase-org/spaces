@@ -24,6 +24,7 @@ PACKAGES = (
     "breeze",
     "plasma-integration",
     "kde-cli-tools",
+    "file",
     "pipewire",
     "xdg-desktop-portal",
     "xdg-desktop-portal-kde",

@@ -34,6 +34,7 @@ PACKAGES = (
     "kwallet6",
     "libqca-qt6-plugins",
     "qt6-wayland",
+    "file",
     "pipewire",
     "xdg-desktop-portal",
     "xdg-desktop-portal-kde",
