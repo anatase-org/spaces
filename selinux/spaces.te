@@ -197,6 +197,9 @@ allow spaces_container_t mtrr_device_t:file mounton;
 allow spaces_container_t proc_t:filesystem remount;
 allow spaces_container_t sysctl_t:file mounton;
 allow spaces_container_t tmpfs_t:file map;
+# systemd falls back to bind-mounting standard device nodes onto regular
+# tmpfs files when a service's capability bounding set excludes CAP_MKNOD.
+allow spaces_container_t tmpfs_t:file mounton;
 manage_fifo_files_pattern(spaces_container_t, tmpfs_t, tmpfs_t)
 allow spaces_t domain:system status;
 

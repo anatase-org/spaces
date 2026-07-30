@@ -174,6 +174,10 @@ class PackagingTests(unittest.TestCase):
             "spaces_var_run_t:{ dir file sock_file } getattr;",
             type_enforcement,
         )
+        self.assertIn(
+            "allow spaces_container_t tmpfs_t:file mounton;",
+            type_enforcement,
+        )
         file_contexts = (ROOT / "selinux" / "spaces.fc").read_text(
             encoding="utf-8"
         )
