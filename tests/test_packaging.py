@@ -178,6 +178,28 @@ class PackagingTests(unittest.TestCase):
             "allow spaces_container_t tmpfs_t:file mounton;",
             type_enforcement,
         )
+        self.assertIn(
+            "dev_mount_sysfs_fs(spaces_container_t)",
+            type_enforcement,
+        )
+        self.assertIn(
+            "term_mount_pty_fs(spaces_container_t)",
+            type_enforcement,
+        )
+        self.assertIn(
+            "allow spaces_container_t hugetlbfs_t:filesystem "
+            "{ mount remount unmount };",
+            type_enforcement,
+        )
+        self.assertIn(
+            "allow spaces_container_t spaces_var_run_t:dir "
+            "list_dir_perms;",
+            type_enforcement,
+        )
+        self.assertIn(
+            "allow spaces_container_t spaces_var_run_t:dir watch;",
+            type_enforcement,
+        )
         file_contexts = (ROOT / "selinux" / "spaces.fc").read_text(
             encoding="utf-8"
         )
@@ -205,6 +227,14 @@ class PackagingTests(unittest.TestCase):
         )
         self.assertIn(
             "userdom_write_user_tmp_sockets(spaces_container_t)",
+            type_enforcement,
+        )
+        self.assertIn(
+            "dbus_connect_session_bus(spaces_t)",
+            type_enforcement,
+        )
+        self.assertIn(
+            "allow spaces_t userdomain:system start;",
             type_enforcement,
         )
         self.assertIn(
