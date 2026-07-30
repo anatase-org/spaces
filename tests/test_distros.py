@@ -83,11 +83,18 @@ class DistributionDriverTests(unittest.TestCase):
         driver = arch.DISTRIBUTION
         self.assertTrue(driver.multiple_options)
         self.assertEqual(driver.option_key, "options")
+        self.assertEqual(
+            driver.choices(),
+            [
+                ("yay — AUR helper (built from community source)", "yay"),
+                ("Shelly — graphical package manager", "shelly"),
+            ],
+        )
         self.assertEqual(driver.default_options, ("yay",))
         self.assertEqual(driver.selected_options(None), ["yay"])
         self.assertEqual(
-            driver.metadata(["yay"]),
-            {"id": "arch", "options": ["yay"]},
+            driver.metadata(["yay", "shelly"]),
+            {"id": "arch", "options": ["yay", "shelly"]},
         )
         self.assertEqual(driver.metadata([]), {"id": "arch", "options": []})
         self.assertEqual(
@@ -101,19 +108,22 @@ class DistributionDriverTests(unittest.TestCase):
         with self.assertRaises(DistributionError):
             driver.validate({"id": "arch", "packages": ["yay"]})
 
-    def test_arch_command_installs_yay_build_dependencies_only_when_selected(
+    def test_arch_command_installs_aur_build_dependencies_only_when_selected(
         self,
     ) -> None:
-        selected = arch.DISTRIBUTION.command(
-            {"id": "arch", "options": ["yay"]},
-            Path("/rootfs"),
+        yay = arch.DISTRIBUTION.command(
+            {"id": "arch", "options": ["yay"]}, Path("/rootfs")
+        )
+        shelly = arch.DISTRIBUTION.command(
+            {"id": "arch", "options": ["shelly"]}, Path("/rootfs")
         )
         opted_out = arch.DISTRIBUTION.command(
             {"id": "arch", "options": []},
             Path("/rootfs"),
         )
-        self.assertEqual(selected[:3], ["pacstrap", "-K", "/rootfs"])
-        self.assertTrue(set(arch.AUR_BUILD_PACKAGES).issubset(selected))
+        self.assertEqual(yay[:3], ["pacstrap", "-K", "/rootfs"])
+        self.assertTrue(set(arch.AUR_BUILD_PACKAGES).issubset(yay))
+        self.assertTrue(set(arch.AUR_BUILD_PACKAGES).issubset(shelly))
         self.assertTrue(set(arch.AUR_BUILD_PACKAGES).isdisjoint(opted_out))
         for package in (
             "base",
@@ -123,7 +133,7 @@ class DistributionDriverTests(unittest.TestCase):
             "xdg-desktop-portal-kde",
             "kwallet",
         ):
-            self.assertIn(package, selected)
+            self.assertIn(package, yay)
 
     def test_kali_has_no_configuration_and_only_id_metadata(self) -> None:
         driver = kali.DISTRIBUTION
@@ -277,73 +287,126 @@ class DistributionDriverTests(unittest.TestCase):
         setns.assert_called_once_with(17, mounts.os.CLONE_NEWNS)
         close.assert_called_once_with(17)
 
-    def test_arch_bootstrap_honors_yay_opt_out(self) -> None:
+    def test_arch_bootstrap_honors_aur_package_opt_out(self) -> None:
         with (
             mock.patch.object(arch.subprocess, "run") as run,
-            mock.patch.object(arch, "_install_yay") as install_yay,
+            mock.patch.object(arch, "_install_aur_package") as install,
         ):
             arch.DISTRIBUTION.bootstrap(
                 {"id": "arch", "options": []},
                 Path("/rootfs"),
             )
         run.assert_called_once()
-        install_yay.assert_not_called()
+        install.assert_not_called()
 
-    def test_arch_bootstrap_builds_selected_yay(self) -> None:
+    def test_arch_bootstrap_builds_each_selected_aur_package(self) -> None:
         with (
             mock.patch.object(arch.subprocess, "run"),
-            mock.patch.object(arch, "_install_yay") as install_yay,
+            mock.patch.object(arch, "_install_aur_package") as install,
         ):
             arch.DISTRIBUTION.bootstrap(
-                {"id": "arch", "options": ["yay"]},
+                {"id": "arch", "options": ["yay", "shelly"]},
                 Path("/rootfs"),
             )
-        install_yay.assert_called_once_with(Path("/rootfs"))
+        self.assertEqual(
+            install.call_args_list,
+            [
+                mock.call(
+                    Path("/rootfs"),
+                    "yay",
+                    arch.AUR_REPOSITORIES["yay"],
+                ),
+                mock.call(
+                    Path("/rootfs"),
+                    "shelly",
+                    arch.AUR_REPOSITORIES["shelly"],
+                ),
+            ],
+        )
 
-    def test_yay_is_built_unprivileged_and_builder_is_removed(self) -> None:
+    def test_shelly_does_not_depend_on_yay_being_selected(self) -> None:
+        with (
+            mock.patch.object(arch.subprocess, "run"),
+            mock.patch.object(arch, "_install_aur_package") as install,
+        ):
+            arch.DISTRIBUTION.bootstrap(
+                {"id": "arch", "options": ["shelly"]},
+                Path("/rootfs"),
+            )
+        install.assert_called_once_with(
+            Path("/rootfs"),
+            "shelly",
+            arch.AUR_REPOSITORIES["shelly"],
+        )
+
+    def test_aur_packages_are_built_unprivileged_and_installed_by_name(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             rootfs = Path(temporary)
+            (rootfs / "etc" / "sudoers.d").mkdir(parents=True)
             commands: list[list[str]] = []
 
-            def run(command: list[str], *, check: bool) -> subprocess.CompletedProcess:
+            def run(
+                command: list[str],
+                *,
+                check: bool,
+                stdout: int | None = None,
+                text: bool = False,
+            ) -> subprocess.CompletedProcess:
                 commands.append(command)
-                if "/usr/bin/git" in command:
-                    (rootfs / "home" / arch.BUILDER / "yay").mkdir(parents=True)
+                if "/usr/bin/useradd" in command:
+                    (rootfs / "home" / arch.BUILDER).mkdir(parents=True)
                 if "/usr/bin/makepkg" in command:
                     package_directory = (
-                        rootfs
-                        / "home"
-                        / arch.BUILDER
-                        / "yay"
+                        rootfs / "home" / arch.BUILDER / "packages"
                     )
-                    (package_directory / "yay-1.0-1-x86_64.pkg.tar.zst").touch()
+                    package_directory.mkdir()
+                    (package_directory / "shelly-1.0-1-x86_64.pkg.tar.zst").touch()
                     (
                         package_directory
-                        / "yay-debug-1.0-1-x86_64.pkg.tar.zst"
+                        / "shelly-flatpak-backend-1.0-1-x86_64.pkg.tar.zst"
                     ).touch()
-                return subprocess.CompletedProcess(command, 0)
+                output = None
+                if stdout == subprocess.PIPE:
+                    output = (
+                        "shelly-flatpak-backend\n"
+                        if "shelly-flatpak-backend-" in command[-1]
+                        else "shelly\n"
+                    )
+                return subprocess.CompletedProcess(command, 0, stdout=output)
 
             with mock.patch.object(arch.subprocess, "run", side_effect=run):
-                arch._install_yay(rootfs)
+                arch._install_aur_package(
+                    rootfs,
+                    "shelly",
+                    arch.AUR_REPOSITORIES["shelly"],
+                )
+
+            self.assertFalse((rootfs / arch.AUR_SUDOERS_DROP_IN).exists())
+            self.assertFalse((rootfs / "home" / arch.BUILDER).exists())
 
         self.assertTrue(
             all(command[:2] == ["arch-chroot", "-S"] for command in commands)
         )
         self.assertEqual(commands[1][0:4], ["arch-chroot", "-S", "-u", arch.BUILDER])
         self.assertIn("/usr/bin/mkdir", commands[1])
-        self.assertEqual(commands[2][0:4], ["arch-chroot", "-S", "-u", arch.BUILDER])
-        self.assertIn("TMPDIR=/home/spaces-build/.tmp", commands[2])
-        self.assertIn("/usr/bin/git", commands[2])
         self.assertEqual(commands[3][0:4], ["arch-chroot", "-S", "-u", arch.BUILDER])
         self.assertIn("TMPDIR=/home/spaces-build/.tmp", commands[3])
-        self.assertIn("/usr/bin/makepkg", commands[3])
-        self.assertNotIn("/usr/bin/runuser", commands[2])
+        self.assertIn("PKGDEST=/home/spaces-build/packages", commands[3])
+        self.assertIn("/usr/bin/git", commands[3])
+        self.assertIn(arch.AUR_REPOSITORIES["shelly"], commands[3])
+        self.assertEqual(commands[4][0:4], ["arch-chroot", "-S", "-u", arch.BUILDER])
+        self.assertIn("/usr/bin/makepkg", commands[4])
+        self.assertIn("--syncdeps", commands[4])
+        self.assertIn("--rmdeps", commands[4])
         self.assertNotIn("/usr/bin/runuser", commands[3])
-        self.assertIn("-U", commands[4])
-        self.assertIn("-Rns", commands[5])
+        install = next(command for command in commands if "-U" in command)
+        self.assertIn("shelly-1.0-1-x86_64.pkg.tar.zst", install[-1])
+        self.assertNotIn("flatpak-backend", install[-1])
         self.assertEqual(commands[-1][-2:], ["/usr/bin/userdel", arch.BUILDER])
 
-    def test_yay_builder_is_removed_after_failure(self) -> None:
+    def test_aur_builder_is_removed_after_failure(self) -> None:
         commands: list[list[str]] = []
 
         def run(command: list[str], *, check: bool) -> subprocess.CompletedProcess:
@@ -357,7 +420,13 @@ class DistributionDriverTests(unittest.TestCase):
             mock.patch.object(arch.subprocess, "run", side_effect=run),
             self.assertRaises(subprocess.CalledProcessError),
         ):
-            arch._install_yay(Path(temporary))
+            rootfs = Path(temporary)
+            (rootfs / "etc" / "sudoers.d").mkdir(parents=True)
+            arch._install_aur_package(
+                rootfs,
+                "yay",
+                arch.AUR_REPOSITORIES["yay"],
+            )
         self.assertEqual(commands[-1][-2:], ["/usr/bin/userdel", arch.BUILDER])
 
     def test_kali_bootstrap_orders_signed_base_sources_and_default_tools(

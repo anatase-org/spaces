@@ -35,17 +35,30 @@ PACKAGES = (
     "xdg-desktop-portal",
     "xdg-desktop-portal-kde",
 )
-AUR_BUILD_PACKAGES = ("base-devel", "go")
-YAY_REPOSITORY = "https://aur.archlinux.org/yay.git"
+AUR_BUILD_PACKAGES = ("base-devel",)
+AUR_REPOSITORIES = {
+    "yay": "https://aur.archlinux.org/yay.git",
+    "shelly": "https://aur.archlinux.org/shelly.git",
+}
+AUR_PACKAGE_NAMES = {
+    "yay": "yay",
+    "shelly": "Shelly",
+}
 BUILDER = "spaces-build"
 SYSTEM_AUTH = Path("etc/pam.d/system-auth")
 SUDOERS_DROP_IN = Path("etc/sudoers.d/10-spaces-wheel")
+AUR_SUDOERS_DROP_IN = Path("etc/sudoers.d/10-spaces-build")
 SUDOERS_CONTENT = (
     "# Managed by Spaces: administrator group\n"
     "%wheel ALL=(ALL:ALL) ALL\n"
 ).encode()
+AUR_SUDOERS_CONTENT = (
+    "# Managed by Spaces: temporary AUR package builder\n"
+    f"{BUILDER} ALL=(root) NOPASSWD: /usr/bin/pacman\n"
+).encode()
 OPTIONS = {
     "yay": _("yay — AUR helper (built from community source)"),
+    "shelly": _("Shelly — graphical package manager"),
 }
 
 
@@ -77,15 +90,40 @@ def _arch_chroot(
     subprocess.run([*command, str(rootfs), *arguments], check=True)
 
 
-def _install_yay(rootfs: Path) -> None:
+def _arch_chroot_output(
+    rootfs: Path,
+    *arguments: str,
+    user: str | None = None,
+) -> str:
+    command = ["arch-chroot", "-S"]
+    if user is not None:
+        command.extend(["-u", user])
+    completed = subprocess.run(
+        [*command, str(rootfs), *arguments],
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    return completed.stdout
+
+
+def _install_aur_package(
+    rootfs: Path,
+    package: str,
+    repository: str,
+) -> None:
     home = Path("/home") / BUILDER
-    checkout = home / "yay"
+    checkout = home / package
     temporary = home / ".tmp"
+    package_directory = home / "packages"
+    sudoers = rootfs / AUR_SUDOERS_DROP_IN
     build_environment = (
         "/usr/bin/env",
         f"TMPDIR={temporary}",
+        f"PKGDEST={package_directory}",
     )
     created = False
+    sudoers_created = False
     error: BaseException | None = None
     try:
         _arch_chroot(
@@ -107,11 +145,31 @@ def _install_yay(rootfs: Path) -> None:
         )
         _arch_chroot(
             rootfs,
+            "/usr/bin/mkdir",
+            "--mode=0700",
+            str(package_directory),
+            user=BUILDER,
+        )
+        safe_directory(
+            rootfs,
+            AUR_SUDOERS_DROP_IN.parent,
+            "Arch AUR builder sudoers",
+        )
+        try:
+            sudoers.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            raise DistributionError(_("Unsafe AUR builder sudoers drop-in."))
+        atomic_write(sudoers, AUR_SUDOERS_CONTENT, 0o440)
+        sudoers_created = True
+        _arch_chroot(
+            rootfs,
             *build_environment,
             "/usr/bin/git",
             "clone",
             "--depth=1",
-            YAY_REPOSITORY,
+            repository,
             str(checkout),
             user=BUILDER,
         )
@@ -122,46 +180,62 @@ def _install_yay(rootfs: Path) -> None:
             "--clean",
             "--cleanbuild",
             "--noconfirm",
+            "--syncdeps",
+            "--rmdeps",
             "--dir",
             str(checkout),
             user=BUILDER,
         )
-        packages = [
+        package_files = [
             path
-            for path in (rootfs / checkout.relative_to("/")).glob(
-                "yay-*.pkg.tar.zst"
+            for path in (rootfs / package_directory.relative_to("/")).glob(
+                "*.pkg.tar.*"
             )
             if (
                 path.is_file()
                 and not path.is_symlink()
-                and not path.name.startswith("yay-debug-")
+                and path.suffix != ".sig"
             )
         ]
-        if len(packages) != 1:
+        matching_packages = []
+        for path in package_files:
+            guest_path = "/" + str(path.relative_to(rootfs))
+            built_package = _arch_chroot_output(
+                rootfs,
+                "/usr/bin/pacman",
+                "--query",
+                "--file",
+                "--print-format",
+                "%n",
+                guest_path,
+            ).strip()
+            if built_package == package:
+                matching_packages.append(guest_path)
+        if len(matching_packages) != 1:
             raise DistributionError(
-                _("The yay build did not produce exactly one package.")
+                _(
+                    "The AUR build did not produce exactly one {package} package.",
+                    package=package,
+                )
             )
-        package = "/" + str(packages[0].relative_to(rootfs))
         _arch_chroot(
             rootfs,
             "/usr/bin/pacman",
             "--noconfirm",
             "-U",
-            package,
-        )
-        _arch_chroot(
-            rootfs,
-            "/usr/bin/pacman",
-            "--noconfirm",
-            "-Rns",
-            "go",
+            matching_packages[0],
         )
     except BaseException as caught:
         error = caught
         raise
     finally:
+        cleanup_error: BaseException | None = None
+        if sudoers_created:
+            try:
+                sudoers.unlink()
+            except OSError as caught:
+                cleanup_error = caught
         if created:
-            cleanup_error: BaseException | None = None
             try:
                 _arch_chroot(
                     rootfs,
@@ -169,7 +243,7 @@ def _install_yay(rootfs: Path) -> None:
                     BUILDER,
                 )
             except (OSError, subprocess.CalledProcessError) as caught:
-                cleanup_error = caught
+                cleanup_error = cleanup_error or caught
             builder_home = rootfs / home.relative_to("/")
             if builder_home.exists() or builder_home.is_symlink():
                 if builder_home.is_dir() and not builder_home.is_symlink():
@@ -179,10 +253,10 @@ def _install_yay(rootfs: Path) -> None:
                         cleanup_error = cleanup_error or caught
                 else:
                     cleanup_error = cleanup_error or DistributionError(
-                        _("Unsafe yay builder home.")
+                        _("Unsafe AUR builder home.")
                     )
-            if cleanup_error is not None and error is None:
-                raise cleanup_error
+        if cleanup_error is not None and error is None:
+            raise cleanup_error
 
 
 class ArchDistribution(Distribution):
@@ -193,7 +267,7 @@ class ArchDistribution(Distribution):
     def command(self, metadata: Mapping[str, Any], rootfs: Path) -> list[str]:
         self.validate(metadata)
         packages = list(PACKAGES)
-        if "yay" in metadata["options"]:
+        if {"yay", "shelly"} & set(metadata["options"]):
             packages.extend(AUR_BUILD_PACKAGES)
         return ["pacstrap", "-K", str(rootfs), *packages]
 
@@ -201,12 +275,29 @@ class ArchDistribution(Distribution):
         self.validate(metadata)
         print(_("Bootstrapping Arch Linux..."), flush=True)
         subprocess.run(self.command(metadata, rootfs), check=True)
-        if "yay" in metadata["options"]:
-            print(_("Building yay from the AUR..."), flush=True)
+        options = metadata["options"]
+        for package in options:
+            package_name = AUR_PACKAGE_NAMES[package]
+            print(
+                _(
+                    "Building {package} from the AUR...",
+                    package=package_name,
+                ),
+                flush=True,
+            )
             try:
-                _install_yay(rootfs)
+                _install_aur_package(
+                    rootfs,
+                    package,
+                    AUR_REPOSITORIES[package],
+                )
             except (OSError, subprocess.CalledProcessError) as error:
-                raise DistributionError(_("Could not build yay.")) from error
+                raise DistributionError(
+                    _(
+                        "Could not build {package}.",
+                        package=package_name,
+                    )
+                ) from error
 
     def reconcile_host_authentication(
         self,
