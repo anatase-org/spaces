@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from spaces.distro import arch, fedora, get_driver, kali, ubuntu
+from spaces.distro import arch, fedora, get_driver, kali, mounts, ubuntu
 from spaces.distro.model import DistributionError
 from spaces.distro.pam import SPACES_PAM_BLOCK
 
@@ -207,6 +207,36 @@ class DistributionDriverTests(unittest.TestCase):
             ["umount", str(rootfs / "sys")],
             ["umount", str(rootfs / "proc")],
         ])
+
+    def test_fedora_bootstrap_hides_host_selinux_mount(self) -> None:
+        with (
+            mock.patch.object(Path, "is_mount", return_value=True),
+            mock.patch.object(mounts.os, "open", return_value=17) as open_namespace,
+            mock.patch.object(mounts.os, "unshare") as unshare,
+            mock.patch.object(mounts.os, "setns") as setns,
+            mock.patch.object(mounts.os, "close") as close,
+            mock.patch.object(mounts.subprocess, "run") as run,
+        ):
+            with mounts.hidden_selinuxfs():
+                pass
+
+        open_namespace.assert_called_once_with(
+            "/proc/self/ns/mnt",
+            mounts.os.O_RDONLY | mounts.os.O_CLOEXEC,
+        )
+        unshare.assert_called_once_with(mounts.os.CLONE_NEWNS)
+        self.assertEqual(
+            [call.args[0] for call in run.call_args_list],
+            [
+                ["mount", "--make-rprivate", "/"],
+                ["umount", "/sys/fs/selinux"],
+            ],
+        )
+        self.assertTrue(
+            all(call.kwargs == {"check": True} for call in run.call_args_list)
+        )
+        setns.assert_called_once_with(17, mounts.os.CLONE_NEWNS)
+        close.assert_called_once_with(17)
 
     def test_arch_bootstrap_honors_yay_opt_out(self) -> None:
         with (

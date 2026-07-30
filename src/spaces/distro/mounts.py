@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import os
 import stat
 import subprocess
 from pathlib import Path
@@ -11,6 +12,30 @@ from typing import Iterator
 from .. import _
 from .model import DistributionError
 from .pam import safe_directory
+
+
+SELINUXFS = Path("/sys/fs/selinux")
+
+
+@contextlib.contextmanager
+def hidden_selinuxfs() -> Iterator[None]:
+    """Run children in a mount namespace where host SELinux is undiscoverable."""
+
+    if not SELINUXFS.is_mount():
+        yield
+        return
+
+    namespace = os.open("/proc/self/ns/mnt", os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        os.unshare(os.CLONE_NEWNS)
+        try:
+            subprocess.run(["mount", "--make-rprivate", "/"], check=True)
+            subprocess.run(["umount", str(SELINUXFS)], check=True)
+            yield
+        finally:
+            os.setns(namespace, os.CLONE_NEWNS)
+    finally:
+        os.close(namespace)
 
 
 def _ensure_directory(rootfs: Path, name: str, distribution_name: str) -> Path:

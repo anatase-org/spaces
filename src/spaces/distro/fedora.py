@@ -10,7 +10,7 @@ from typing import Any, Mapping
 
 from .. import _
 from .model import Distribution, DistributionError
-from .mounts import mounted_api_filesystems
+from .mounts import hidden_selinuxfs, mounted_api_filesystems
 from .pam import SPACES_PAM_BLOCK, atomic_write, safe_directory, safe_file
 
 
@@ -211,7 +211,8 @@ class FedoraDistribution(Distribution):
             flush=True,
         )
         with mounted_api_filesystems(rootfs, "Fedora"):
-            subprocess.run(self.command(metadata, rootfs), check=True)
+            with hidden_selinuxfs():
+                subprocess.run(self.command(metadata, rootfs), check=True)
 
     def reconcile_host_authentication(
         self,
