@@ -183,6 +183,10 @@ class PackagingTests(unittest.TestCase):
             type_enforcement,
         )
         self.assertIn(
+            "dev_unmount_sysfs_fs(spaces_container_t)",
+            type_enforcement,
+        )
+        self.assertIn(
             "term_mount_pty_fs(spaces_container_t)",
             type_enforcement,
         )
