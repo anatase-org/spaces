@@ -27,6 +27,11 @@ from . import session
 
 SYSTEMCTL = "/usr/bin/systemctl"
 MACHINECTL = "/usr/bin/machinectl"
+# These are search paths, not scalar session coordinates.  Keep Spaces'
+# entries first, then retain guest distribution and administrator additions.
+MERGED_DBUS_PATH_ENVIRONMENT = frozenset(
+    {"XCURSOR_PATH", "XDG_CONFIG_DIRS", "XDG_DATA_DIRS"}
+)
 
 
 def get_driver(distribution_id: str) -> Any:
@@ -288,7 +293,12 @@ def _machine_shell(
     if launcher:
         actual_command = ["/run/spaces-host/bin/spaces-session-launcher"]
         for name in sorted((environment or {})):
-            actual_command.extend(["--dbus-env", name])
+            option = (
+                "--dbus-env-path"
+                if name in MERGED_DBUS_PATH_ENVIRONMENT
+                else "--dbus-env"
+            )
+            actual_command.extend([option, name])
         if agent is not None:
             actual_command.extend(["--agent", agent])
         actual_command.append("--")

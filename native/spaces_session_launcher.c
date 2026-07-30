@@ -21,6 +21,10 @@
     "/usr/bin/dbus-update-activation-environment"
 #endif
 
+#ifndef SYSTEMCTL
+#define SYSTEMCTL "/usr/bin/systemctl"
+#endif
+
 #ifndef AGENT_STATE_ROOT
 #define AGENT_STATE_ROOT "/run/user"
 #endif
@@ -408,6 +412,296 @@ static bool agent_state_is_live(AgentState state)
         && process_start_time(state.pid, &start_time)
         && start_time == state.start_time
         && (kill(-state.pid, 0) == 0 || errno == EPERM);
+}
+
+static char *read_manager_environment(void)
+{
+    enum {
+        INITIAL_CAPACITY = 4096,
+        MAXIMUM_CAPACITY = 1024 * 1024,
+        POLL_ATTEMPTS = 100
+    };
+    char *output;
+    size_t capacity = INITIAL_CAPACITY;
+    size_t length = 0;
+    int output_pipe[2];
+    int flags;
+    int status = 0;
+    int attempt;
+    bool child_done = false;
+    bool child_status_valid = false;
+    bool end_of_file = false;
+    pid_t child;
+
+    if (pipe2(output_pipe, O_CLOEXEC) < 0)
+        return NULL;
+    child = fork();
+    if (child < 0) {
+        close(output_pipe[0]);
+        close(output_pipe[1]);
+        return NULL;
+    }
+    if (child == 0) {
+        int null_fd = open("/dev/null", O_RDWR | O_CLOEXEC);
+
+        close(output_pipe[0]);
+        if (null_fd < 0
+            || dup2(null_fd, STDIN_FILENO) < 0
+            || dup2(output_pipe[1], STDOUT_FILENO) < 0
+            || dup2(null_fd, STDERR_FILENO) < 0)
+            _exit(127);
+        if (null_fd > STDERR_FILENO)
+            close(null_fd);
+        if (output_pipe[1] > STDERR_FILENO)
+            close(output_pipe[1]);
+        execl(
+            SYSTEMCTL,
+            SYSTEMCTL,
+            "--user",
+            "show-environment",
+            (char *)NULL
+        );
+        _exit(127);
+    }
+    close(output_pipe[1]);
+    flags = fcntl(output_pipe[0], F_GETFL);
+    if (flags < 0
+        || fcntl(output_pipe[0], F_SETFL, flags | O_NONBLOCK) < 0) {
+        close(output_pipe[0]);
+        (void)kill(child, SIGKILL);
+        (void)waitpid(child, NULL, 0);
+        return NULL;
+    }
+    output = malloc(capacity);
+    if (output == NULL) {
+        close(output_pipe[0]);
+        (void)kill(child, SIGKILL);
+        (void)waitpid(child, NULL, 0);
+        return NULL;
+    }
+
+    for (attempt = 0;
+         attempt < POLL_ATTEMPTS && (!child_done || !end_of_file);
+         attempt++) {
+        struct pollfd descriptor = {
+            .fd = output_pipe[0],
+            .events = POLLIN | POLLHUP
+        };
+        ssize_t size;
+        pid_t waited;
+
+        for (;;) {
+            if (length + 1 == capacity) {
+                char *larger;
+                size_t new_capacity;
+
+                if (capacity >= MAXIMUM_CAPACITY)
+                    break;
+                new_capacity = capacity * 2;
+                if (new_capacity > MAXIMUM_CAPACITY)
+                    new_capacity = MAXIMUM_CAPACITY;
+                larger = realloc(output, new_capacity);
+                if (larger == NULL)
+                    break;
+                output = larger;
+                capacity = new_capacity;
+            }
+            size = read(
+                output_pipe[0], output + length, capacity - length - 1
+            );
+            if (size > 0) {
+                length += (size_t)size;
+                continue;
+            }
+            if (size == 0)
+                end_of_file = true;
+            else if (errno != EAGAIN && errno != EWOULDBLOCK
+                     && errno != EINTR)
+                end_of_file = true;
+            break;
+        }
+        if (!child_done) {
+            waited = waitpid(child, &status, WNOHANG);
+            if (waited == child) {
+                child_done = true;
+                child_status_valid = true;
+            } else if (waited < 0 && errno != EINTR) {
+                child_done = true;
+            }
+        }
+        if (!child_done || !end_of_file)
+            (void)poll(&descriptor, 1, 10);
+    }
+    close(output_pipe[0]);
+    if (!child_done) {
+        (void)kill(child, SIGKILL);
+        do {
+            child_done = waitpid(child, &status, 0) == child;
+        } while (!child_done && errno == EINTR);
+        child_status_valid = child_done;
+    }
+    if (!child_done
+        || !child_status_valid
+        || !end_of_file
+        || !WIFEXITED(status)
+        || WEXITSTATUS(status) != 0) {
+        free(output);
+        return NULL;
+    }
+    output[length] = '\0';
+    return output;
+}
+
+static char *manager_environment_value(
+    const char *environment,
+    const char *name
+)
+{
+    const char *line = environment;
+    size_t name_length = strlen(name);
+
+    while (*line != '\0') {
+        const char *end = strchr(line, '\n');
+        size_t line_length = end == NULL
+            ? strlen(line)
+            : (size_t)(end - line);
+
+        if (line_length > name_length
+            && line[name_length] == '='
+            && strncmp(line, name, name_length) == 0) {
+            size_t value_length = line_length - name_length - 1;
+            char *value = malloc(value_length + 1);
+
+            if (value == NULL)
+                return NULL;
+            memcpy(value, line + name_length + 1, value_length);
+            value[value_length] = '\0';
+            return value;
+        }
+        if (end == NULL)
+            break;
+        line = end + 1;
+    }
+    return NULL;
+}
+
+static bool path_has_component(
+    const char *path,
+    const char *component,
+    size_t component_length
+)
+{
+    const char *cursor = path;
+
+    while (*cursor != '\0') {
+        const char *end = strchr(cursor, ':');
+        size_t length = end == NULL
+            ? strlen(cursor)
+            : (size_t)(end - cursor);
+
+        if (length == component_length
+            && memcmp(cursor, component, length) == 0)
+            return true;
+        if (end == NULL)
+            break;
+        cursor = end + 1;
+    }
+    return false;
+}
+
+static char *merge_path_environment(
+    const char *preferred,
+    const char *preserved
+)
+{
+    size_t preferred_length = strlen(preferred);
+    size_t preserved_length = strlen(preserved);
+    char *merged = malloc(preferred_length + preserved_length + 2);
+    const char *cursor = preserved;
+    size_t length = preferred_length;
+
+    if (merged == NULL)
+        return NULL;
+    memcpy(merged, preferred, preferred_length);
+    merged[length] = '\0';
+    while (*cursor != '\0') {
+        const char *end = strchr(cursor, ':');
+        size_t component_length = end == NULL
+            ? strlen(cursor)
+            : (size_t)(end - cursor);
+
+        if (component_length > 0
+            && !path_has_component(merged, cursor, component_length)) {
+            if (length > 0)
+                merged[length++] = ':';
+            memcpy(merged + length, cursor, component_length);
+            length += component_length;
+            merged[length] = '\0';
+        }
+        if (end == NULL)
+            break;
+        cursor = end + 1;
+    }
+    return merged;
+}
+
+static int merge_manager_path_environment(
+    char *const *names,
+    const bool *merge_paths,
+    size_t count
+)
+{
+    /*
+     * machinectl supplies Spaces' environment to this process, while the
+     * guest user manager still holds distribution-provided additions.  Merge
+     * the latter after the Spaces paths before synchronizing both D-Bus and
+     * systemd, preserving Spaces' portal/appearance precedence.
+     */
+    char *manager_environment;
+    size_t index;
+    bool needed = false;
+    int result = 0;
+
+    for (index = 0; index < count; index++)
+        needed = needed || merge_paths[index];
+    if (!needed)
+        return 0;
+    manager_environment = read_manager_environment();
+    if (manager_environment == NULL) {
+        fprintf(stderr,
+                "spaces: warning: could not read guest service-manager "
+                "environment\n");
+        return -1;
+    }
+    for (index = 0; index < count; index++) {
+        const char *preferred;
+        char *preserved;
+        char *merged;
+
+        if (!merge_paths[index])
+            continue;
+        preferred = getenv(names[index]);
+        preserved = manager_environment_value(
+            manager_environment, names[index]
+        );
+        if (preferred == NULL || preserved == NULL) {
+            free(preserved);
+            continue;
+        }
+        merged = merge_path_environment(preferred, preserved);
+        free(preserved);
+        if (merged == NULL || setenv(names[index], merged, 1) < 0) {
+            free(merged);
+            result = -1;
+            continue;
+        }
+        free(merged);
+    }
+    free(manager_environment);
+    if (result < 0)
+        fprintf(stderr,
+                "spaces: warning: could not merge guest path environment\n");
+    return result;
 }
 
 static int update_dbus_environment(char *const *names, size_t count)
@@ -969,6 +1263,7 @@ int main(int argc, char **argv)
 {
     const char *agent = NULL;
     char **dbus_environment;
+    bool *merge_dbus_paths;
     char **command;
     size_t dbus_environment_count = 0;
     int status_pipe[2];
@@ -979,39 +1274,57 @@ int main(int argc, char **argv)
     int index = 1;
 
     dbus_environment = calloc((size_t)argc, sizeof(*dbus_environment));
-    if (dbus_environment == NULL)
+    merge_dbus_paths = calloc((size_t)argc, sizeof(*merge_dbus_paths));
+    if (dbus_environment == NULL || merge_dbus_paths == NULL) {
+        free(dbus_environment);
+        free(merge_dbus_paths);
         return 1;
+    }
     while (index < argc && strcmp(argv[index], "--") != 0) {
         if (strcmp(argv[index], "--agent") == 0) {
             if (index + 1 >= argc) {
                 fprintf(stderr, "spaces: --agent requires a path\n");
                 free(dbus_environment);
+                free(merge_dbus_paths);
                 return 2;
             }
             agent = argv[index + 1];
             index += 2;
-        } else if (strcmp(argv[index], "--dbus-env") == 0) {
+        } else if (strcmp(argv[index], "--dbus-env") == 0
+                   || strcmp(argv[index], "--dbus-env-path") == 0) {
+            bool merge_path =
+                strcmp(argv[index], "--dbus-env-path") == 0;
+
             if (index + 1 >= argc) {
                 fprintf(stderr,
-                        "spaces: --dbus-env requires a variable name\n");
+                        "spaces: %s requires a variable name\n",
+                        argv[index]);
                 free(dbus_environment);
+                free(merge_dbus_paths);
                 return 2;
             }
-            dbus_environment[dbus_environment_count++] = argv[index + 1];
+            dbus_environment[dbus_environment_count] = argv[index + 1];
+            merge_dbus_paths[dbus_environment_count] = merge_path;
+            dbus_environment_count++;
             index += 2;
         } else {
             fprintf(stderr, "spaces: unknown option: %s\n", argv[index]);
             free(dbus_environment);
+            free(merge_dbus_paths);
             return 2;
         }
     }
     if (index >= argc || strcmp(argv[index], "--") != 0) {
         fprintf(stderr, "spaces: expected -- before the command\n");
         free(dbus_environment);
+        free(merge_dbus_paths);
         return 2;
     }
     command = &argv[index + 1];
 
+    (void)merge_manager_path_environment(
+        dbus_environment, merge_dbus_paths, dbus_environment_count
+    );
     agent_reference = acquire_agent_reference(
         agent, &agent_ready_descriptor
     );
@@ -1019,6 +1332,7 @@ int main(int argc, char **argv)
         dbus_environment, dbus_environment_count
     );
     free(dbus_environment);
+    free(merge_dbus_paths);
     finish_agent_reference(&agent_reference, agent_ready_descriptor);
     if (pipe2(status_pipe, O_CLOEXEC) < 0) {
         release_agent_reference(&agent_reference);

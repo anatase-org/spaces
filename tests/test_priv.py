@@ -1085,6 +1085,10 @@ class PrivilegedTests(unittest.TestCase):
                             "/run/spaces/desktop/1000/wayland/wayland-0"
                         ),
                         "DISPLAY": ":0",
+                        "XDG_DATA_DIRS": (
+                            "/run/spaces/desktop/1000/open-data:"
+                            "/usr/local/share:/usr/share"
+                        ),
                     },
                     launcher=True,
                     agent="/usr/libexec/polkit-agent",
@@ -1103,6 +1107,11 @@ class PrivilegedTests(unittest.TestCase):
                     "--setenv=WAYLAND_DISPLAY="
                     "/run/spaces/desktop/1000/wayland/wayland-0"
                 ),
+                (
+                    "--setenv=XDG_DATA_DIRS="
+                    "/run/spaces/desktop/1000/open-data:"
+                    "/usr/local/share:/usr/share"
+                ),
                 "--",
                 "shell",
                 "work",
@@ -1111,6 +1120,8 @@ class PrivilegedTests(unittest.TestCase):
                 "DISPLAY",
                 "--dbus-env",
                 "WAYLAND_DISPLAY",
+                "--dbus-env-path",
+                "XDG_DATA_DIRS",
                 "--agent",
                 "/usr/libexec/polkit-agent",
                 "--",

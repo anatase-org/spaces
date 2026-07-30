@@ -826,6 +826,7 @@ class NativeLauncherTests(unittest.TestCase):
         cls.temporary = tempfile.TemporaryDirectory()
         cls.launcher = Path(cls.temporary.name) / "launcher"
         cls.dbus_update = Path(cls.temporary.name) / "dbus-update"
+        cls.systemctl = Path(cls.temporary.name) / "systemctl"
         cls.agent_state_root = Path(cls.temporary.name) / "runtime"
         (
             cls.agent_state_root / str(os.getuid())
@@ -848,12 +849,28 @@ class NativeLauncherTests(unittest.TestCase):
             "if test -n \"$SPACES_DBUS_DISPLAY\"; then\n"
             "  printf '%s' \"$DISPLAY\" > \"$SPACES_DBUS_DISPLAY\"\n"
             "fi\n"
+            "if test -n \"$SPACES_DBUS_PATHS\"; then\n"
+            "  printf '%s\\n%s\\n%s\\n' \\\n"
+            "    \"$XDG_DATA_DIRS\" \"$XDG_CONFIG_DIRS\" \\\n"
+            "    \"$XCURSOR_PATH\" > \"$SPACES_DBUS_PATHS\"\n"
+            "fi\n"
             "if test \"$SPACES_DBUS_UPDATE_FAIL\" = 1; then\n"
             "  exit 23\n"
             "fi\n",
             encoding="utf-8",
         )
         cls.dbus_update.chmod(0o755)
+        cls.systemctl.write_text(
+            "#!/bin/sh\n"
+            "test \"$1\" = --user || exit 2\n"
+            "test \"$2\" = show-environment || exit 2\n"
+            "if test \"$SPACES_SYSTEMCTL_HANG\" = 1; then\n"
+            "  exec sleep 5\n"
+            "fi\n"
+            "printf '%s\\n' \"$SPACES_MANAGER_ENVIRONMENT\"\n",
+            encoding="utf-8",
+        )
+        cls.systemctl.chmod(0o755)
         source = (
             Path(__file__).parents[1]
             / "native"
@@ -870,6 +887,7 @@ class NativeLauncherTests(unittest.TestCase):
                         "-DDBUS_UPDATE_ACTIVATION_ENVIRONMENT="
                         f'"{cls.dbus_update}"'
                     ),
+                    f'-DSYSTEMCTL="{cls.systemctl}"',
                     f'-DAGENT_STATE_ROOT="{cls.agent_state_root}"',
                     "-Wl,--wrap=__libc_start_main",
                     "-o",
@@ -938,6 +956,105 @@ class NativeLauncherTests(unittest.TestCase):
         self.assertEqual(display.read_text(encoding="utf-8"), ":77")
         self.assertEqual(completed.stdout, "")
         self.assertEqual(completed.stderr, "")
+
+    def test_preserves_guest_path_environment_after_spaces_paths(self) -> None:
+        paths = Path(self.temporary.name) / "dbus-environment-paths"
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "SPACES_DBUS_ENV_NAMES": (
+                    str(Path(self.temporary.name) / "path-environment-names")
+                ),
+                "SPACES_DBUS_PATHS": str(paths),
+                "SPACES_MANAGER_ENVIRONMENT": (
+                    "XDG_DATA_DIRS=/usr/local/share:/usr/share:"
+                    "/var/lib/snapd/desktop\n"
+                    "XDG_CONFIG_DIRS=/etc/xdg:/opt/vendor/config\n"
+                    "XCURSOR_PATH=/usr/share/icons:/opt/vendor/icons"
+                ),
+                "XDG_DATA_DIRS": (
+                    "/run/spaces/desktop/1000/open-data:"
+                    "/usr/local/share:/usr/share"
+                ),
+                "XDG_CONFIG_DIRS": "/run/spaces-host/config:/etc/xdg",
+                "XCURSOR_PATH": (
+                    "/run/spaces/desktop/1000/data/system/icons:"
+                    "/usr/share/icons"
+                ),
+            }
+        )
+        completed = subprocess.run(
+            [
+                self.launcher,
+                "--dbus-env-path",
+                "XDG_DATA_DIRS",
+                "--dbus-env-path",
+                "XDG_CONFIG_DIRS",
+                "--dbus-env-path",
+                "XCURSOR_PATH",
+                "--",
+                "/bin/sh",
+                "-c",
+                "exit 0",
+            ],
+            check=False,
+            env=environment,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(completed.returncode, 0)
+        self.assertEqual(
+            paths.read_text(encoding="utf-8"),
+            (
+                "/run/spaces/desktop/1000/open-data:"
+                "/usr/local/share:/usr/share:/var/lib/snapd/desktop\n"
+                "/run/spaces-host/config:/etc/xdg:/opt/vendor/config\n"
+                "/run/spaces/desktop/1000/data/system/icons:"
+                "/usr/share/icons:/opt/vendor/icons\n"
+            ),
+        )
+        self.assertEqual(completed.stdout, "")
+        self.assertEqual(completed.stderr, "")
+
+    def test_hung_manager_environment_read_is_bounded(self) -> None:
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "SPACES_SYSTEMCTL_HANG": "1",
+                "XDG_DATA_DIRS": (
+                    "/run/spaces/desktop/1000/open-data:/usr/share"
+                ),
+            }
+        )
+        started = time.monotonic()
+        completed = subprocess.run(
+            [
+                self.launcher,
+                "--dbus-env-path",
+                "XDG_DATA_DIRS",
+                "--",
+                "/bin/sh",
+                "-c",
+                "exit 43",
+            ],
+            check=False,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+
+        self.assertEqual(completed.returncode, 43)
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertEqual(completed.stdout, "")
+        self.assertEqual(
+            completed.stderr,
+            (
+                "spaces: warning: could not read guest service-manager "
+                "environment\n"
+            ),
+        )
 
     def test_dbus_environment_failure_does_not_block_application(self) -> None:
         environment = os.environ.copy()
