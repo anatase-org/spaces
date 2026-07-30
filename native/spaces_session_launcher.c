@@ -2,6 +2,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <poll.h>
 #include <pwd.h>
 #include <signal.h>
@@ -9,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/prctl.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -17,6 +19,10 @@
 #ifndef DBUS_UPDATE_ACTIVATION_ENVIRONMENT
 #define DBUS_UPDATE_ACTIVATION_ENVIRONMENT \
     "/usr/bin/dbus-update-activation-environment"
+#endif
+
+#ifndef AGENT_STATE_ROOT
+#define AGENT_STATE_ROOT "/run/user"
 #endif
 
 #if defined(__x86_64__) || defined(__aarch64__)
@@ -60,13 +66,31 @@ int __wrap___libc_start_main(
 #endif
 
 static volatile sig_atomic_t forwarded_child = -1;
+static volatile sig_atomic_t termination_requested = 0;
+
+typedef struct {
+    pid_t pid;
+    unsigned long long start_time;
+    int state_descriptor;
+    bool held;
+    bool starting;
+} AgentReference;
+
+typedef struct {
+    pid_t pid;
+    unsigned long long start_time;
+    unsigned int references;
+} AgentState;
 
 static void forward_term(int signum)
 {
     pid_t child = (pid_t)forwarded_child;
 
-    if (child > 0)
+    if (child > 0) {
         (void)kill(child, signum);
+    } else {
+        termination_requested = signum;
+    }
 }
 
 static int configure_supervisor_signals(void)
@@ -131,6 +155,259 @@ static void terminate_agent(pid_t agent)
         usleep(100000);
     }
     (void)kill(-agent, SIGKILL);
+}
+
+static bool parse_unsigned(
+    const char *begin,
+    const char *end,
+    unsigned long long maximum,
+    unsigned long long *result
+)
+{
+    unsigned long long value = 0;
+    const char *cursor;
+
+    if (begin == end)
+        return false;
+    for (cursor = begin; cursor < end; cursor++) {
+        unsigned int digit;
+
+        if (*cursor < '0' || *cursor > '9')
+            return false;
+        digit = (unsigned int)(*cursor - '0');
+        if (value > (maximum - digit) / 10)
+            return false;
+        value = value * 10 + digit;
+    }
+    *result = value;
+    return true;
+}
+
+static bool process_start_time(
+    pid_t process,
+    unsigned long long *start_time
+)
+{
+    char buffer[2048];
+    char path[64];
+    char *cursor;
+    char *end;
+    ssize_t size;
+    int descriptor;
+    int field;
+
+    if (process <= 1)
+        return false;
+    if (snprintf(
+            path, sizeof(path), "/proc/%ld/stat", (long)process
+        ) >= (int)sizeof(path))
+        return false;
+    descriptor = open(path, O_RDONLY | O_CLOEXEC);
+    if (descriptor < 0)
+        return false;
+    do {
+        size = read(descriptor, buffer, sizeof(buffer) - 1);
+    } while (size < 0 && errno == EINTR);
+    close(descriptor);
+    if (size <= 0)
+        return false;
+    buffer[size] = '\0';
+    cursor = strrchr(buffer, ')');
+    if (cursor == NULL)
+        return false;
+    cursor++;
+    for (field = 3; field <= 22; field++) {
+        while (*cursor == ' ')
+            cursor++;
+        if (*cursor == '\0')
+            return false;
+        end = cursor;
+        while (*end != '\0' && *end != ' ')
+            end++;
+        if (field == 22) {
+            unsigned long long value;
+
+            if (!parse_unsigned(cursor, end, ULLONG_MAX, &value))
+                return false;
+            *start_time = value;
+            return true;
+        }
+        cursor = end;
+    }
+    return false;
+}
+
+static void terminate_adopted_groups(int signum)
+{
+    char buffer[4096];
+    char path[96];
+    char *cursor;
+    ssize_t size;
+    pid_t own_group = getpgrp();
+    pid_t groups[32];
+    size_t group_count = 0;
+    int descriptor;
+
+    if (snprintf(
+            path,
+            sizeof(path),
+            "/proc/self/task/%ld/children",
+            (long)getpid()
+        ) >= (int)sizeof(path))
+        return;
+    descriptor = open(path, O_RDONLY | O_CLOEXEC);
+    if (descriptor < 0)
+        return;
+    do {
+        size = read(descriptor, buffer, sizeof(buffer) - 1);
+    } while (size < 0 && errno == EINTR);
+    close(descriptor);
+    if (size <= 0)
+        return;
+    buffer[size] = '\0';
+    cursor = buffer;
+    while (*cursor != '\0' && group_count < 32) {
+        unsigned long long process_value;
+        char *end;
+        pid_t group;
+        size_t index;
+        bool known = false;
+
+        while (*cursor == ' ')
+            cursor++;
+        if (*cursor == '\0')
+            break;
+        end = cursor;
+        while (*end != '\0' && *end != ' ')
+            end++;
+        if (!parse_unsigned(
+                cursor, end, (unsigned long long)INT_MAX, &process_value
+            ))
+            break;
+        group = getpgid((pid_t)process_value);
+        if (group > 1 && group != own_group) {
+            for (index = 0; index < group_count; index++) {
+                if (groups[index] == group) {
+                    known = true;
+                    break;
+                }
+            }
+            if (!known) {
+                groups[group_count++] = group;
+                (void)kill(-group, signum);
+            }
+        }
+        cursor = end;
+    }
+}
+
+static int lock_agent_state(void)
+{
+    char path[256];
+    int descriptor;
+
+    if (snprintf(
+            path,
+            sizeof(path),
+            "%s/%lu/spaces-polkit-agent.state",
+            AGENT_STATE_ROOT,
+            (unsigned long)getuid()
+        ) >= (int)sizeof(path))
+        return -1;
+    descriptor = open(
+        path,
+        O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW,
+        0600
+    );
+    if (descriptor < 0)
+        return -1;
+    while (flock(descriptor, LOCK_EX) < 0) {
+        if (errno != EINTR) {
+            close(descriptor);
+            return -1;
+        }
+    }
+    return descriptor;
+}
+
+static AgentState read_agent_state(int descriptor)
+{
+    AgentState state = {.pid = -1, .start_time = 0, .references = 0};
+    char buffer[128];
+    char *cursor;
+    char *end;
+    unsigned long long process;
+    unsigned long long references;
+    ssize_t size;
+    int field;
+
+    do {
+        size = pread(descriptor, buffer, sizeof(buffer) - 1, 0);
+    } while (size < 0 && errno == EINTR);
+    if (size <= 0)
+        return state;
+    buffer[size] = '\0';
+    cursor = buffer;
+    for (field = 0; field < 3; field++) {
+        unsigned long long value;
+        unsigned long long maximum = field == 0
+            ? (unsigned long long)INT_MAX
+            : (field == 1 ? ULLONG_MAX : (unsigned long long)UINT_MAX);
+
+        while (*cursor == ' ')
+            cursor++;
+        end = cursor;
+        while (*end != '\0' && *end != ' ' && *end != '\n')
+            end++;
+        if (!parse_unsigned(cursor, end, maximum, &value))
+            return state;
+        if (field == 0)
+            process = value;
+        else if (field == 1)
+            state.start_time = value;
+        else
+            references = value;
+        cursor = end;
+    }
+    state.references = (unsigned int)references;
+    state.pid = (pid_t)process;
+    return state;
+}
+
+static bool write_agent_state(int descriptor, AgentState state)
+{
+    char buffer[128];
+    int length;
+    ssize_t size;
+
+    length = snprintf(
+        buffer,
+        sizeof(buffer),
+        "%ld %llu %u\n",
+        (long)state.pid,
+        state.start_time,
+        state.references
+    );
+    if (length <= 0 || length >= (int)sizeof(buffer))
+        return false;
+    if (ftruncate(descriptor, 0) < 0)
+        return false;
+    do {
+        size = pwrite(descriptor, buffer, (size_t)length, 0);
+    } while (size < 0 && errno == EINTR);
+    return size == length;
+}
+
+static bool agent_state_is_live(AgentState state)
+{
+    unsigned long long start_time;
+
+    return state.pid > 1
+        && state.references > 0
+        && getpgid(state.pid) == state.pid
+        && process_start_time(state.pid, &start_time)
+        && start_time == state.start_time
+        && (kill(-state.pid, 0) == 0 || errno == EPERM);
 }
 
 static int update_dbus_environment(char *const *names, size_t count)
@@ -201,6 +478,7 @@ static int update_dbus_environment(char *const *names, size_t count)
 }
 
 static void report_status(int descriptor, int status);
+static void detach_terminal(void);
 
 static void execute_agent(
     const char *agent,
@@ -223,6 +501,17 @@ static void execute_agent(
         close(null_fd);
     if (output_descriptor > STDERR_FILENO)
         close(output_descriptor);
+    /*
+     * polkit-kde reports successful agent registration with qDebug(). Fedora
+     * disables the default Qt debug category, so enable it only in the agent
+     * child. The supervisor consumes the output and uses the registration
+     * message as its readiness signal.
+     */
+    if (setenv("QT_LOGGING_RULES", "default.debug=true", 1) < 0) {
+        child_errno = errno;
+        report_status(error_descriptor, child_errno);
+        _exit(127);
+    }
     execl(agent, agent, (char *)NULL);
     child_errno = errno;
     report_status(error_descriptor, child_errno);
@@ -300,6 +589,7 @@ static void supervise_agent(
     }
     close(error_descriptor);
     close(output_pipe[1]);
+    detach_terminal();
     relay_agent_output(output_pipe[0], ready_descriptor);
     do {
         waited = waitpid(child, &status, 0);
@@ -394,6 +684,130 @@ static pid_t finish_agent_start(pid_t child, int ready_descriptor)
     return child;
 }
 
+static AgentReference acquire_agent_reference(
+    const char *agent,
+    int *ready_descriptor
+)
+{
+    AgentReference reference = {
+        .pid = -1,
+        .start_time = 0,
+        .state_descriptor = -1,
+        .held = false,
+        .starting = false,
+    };
+    AgentState state;
+
+    *ready_descriptor = -1;
+    if (agent == NULL)
+        return reference;
+    reference.state_descriptor = lock_agent_state();
+    if (reference.state_descriptor < 0) {
+        fprintf(
+            stderr,
+            "spaces: warning: could not lock shared polkit agent state\n"
+        );
+        return reference;
+    }
+    state = read_agent_state(reference.state_descriptor);
+    if (agent_state_is_live(state) && state.references < UINT_MAX) {
+        state.references++;
+        if (write_agent_state(reference.state_descriptor, state)) {
+            reference.pid = state.pid;
+            reference.start_time = state.start_time;
+            reference.held = true;
+        }
+        (void)flock(reference.state_descriptor, LOCK_UN);
+        close(reference.state_descriptor);
+        reference.state_descriptor = -1;
+        return reference;
+    }
+
+    state.pid = 0;
+    state.start_time = 0;
+    state.references = 0;
+    (void)write_agent_state(reference.state_descriptor, state);
+    reference.pid = start_agent(agent, ready_descriptor);
+    if (reference.pid <= 0) {
+        (void)flock(reference.state_descriptor, LOCK_UN);
+        close(reference.state_descriptor);
+        reference.state_descriptor = -1;
+        return reference;
+    }
+    reference.held = true;
+    reference.starting = true;
+    return reference;
+}
+
+static void finish_agent_reference(
+    AgentReference *reference,
+    int ready_descriptor
+)
+{
+    AgentState state;
+    pid_t started;
+
+    if (!reference->starting)
+        return;
+    started = finish_agent_start(reference->pid, ready_descriptor);
+    if (started > 0
+        && process_start_time(started, &reference->start_time)) {
+        state.pid = started;
+        state.start_time = reference->start_time;
+        state.references = 1;
+        if (write_agent_state(reference->state_descriptor, state)) {
+            reference->starting = false;
+        } else {
+            started = -1;
+        }
+    }
+    if (started <= 0) {
+        state.pid = 0;
+        state.start_time = 0;
+        state.references = 0;
+        (void)write_agent_state(reference->state_descriptor, state);
+        stop_agent(reference->pid);
+        reference->pid = -1;
+        reference->start_time = 0;
+        reference->held = false;
+        reference->starting = false;
+    }
+    (void)flock(reference->state_descriptor, LOCK_UN);
+    close(reference->state_descriptor);
+    reference->state_descriptor = -1;
+}
+
+static void release_agent_reference(AgentReference *reference)
+{
+    AgentState state;
+    int descriptor;
+
+    if (!reference->held || reference->pid <= 0)
+        return;
+    descriptor = lock_agent_state();
+    if (descriptor >= 0) {
+        state = read_agent_state(descriptor);
+        if (state.pid == reference->pid
+            && state.start_time == reference->start_time
+            && state.references > 0) {
+            state.references--;
+            if (state.references == 0) {
+                state.pid = 0;
+                state.start_time = 0;
+                (void)write_agent_state(descriptor, state);
+                terminate_agent(reference->pid);
+            } else {
+                (void)write_agent_state(descriptor, state);
+            }
+        }
+        (void)flock(descriptor, LOCK_UN);
+        close(descriptor);
+    }
+    reference->pid = -1;
+    reference->start_time = 0;
+    reference->held = false;
+}
+
 static void execute_application(char **command)
 {
     int saved_errno;
@@ -461,7 +875,7 @@ static void detach_terminal(void)
 
 static void monitor_application(
     char **command,
-    pid_t agent,
+    AgentReference agent,
     int status_descriptor
 )
 {
@@ -478,14 +892,14 @@ static void monitor_application(
     if (prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) < 0) {
         report_status(status_descriptor, 1 << 8);
         close(status_descriptor);
-        terminate_agent(agent);
+        release_agent_reference(&agent);
         _exit(1);
     }
     application = fork();
     if (application < 0) {
         report_status(status_descriptor, 1 << 8);
         close(status_descriptor);
-        terminate_agent(agent);
+        release_agent_reference(&agent);
         _exit(1);
     }
     if (application == 0)
@@ -496,7 +910,7 @@ static void monitor_application(
         (void)kill(application, SIGTERM);
         report_status(status_descriptor, 1 << 8);
         close(status_descriptor);
-        terminate_agent(agent);
+        release_agent_reference(&agent);
         _exit(1);
     }
     (void)signal(SIGPIPE, SIG_IGN);
@@ -505,7 +919,7 @@ static void monitor_application(
         pid_t waited = waitpid(-1, &status, 0);
 
         if (waited < 0) {
-            if (errno == EINTR)
+            if (errno == EINTR && !termination_requested)
                 continue;
             break;
         }
@@ -517,12 +931,16 @@ static void monitor_application(
             reported = true;
             detach_terminal();
         }
+        if (termination_requested)
+            break;
     }
+    if (termination_requested)
+        terminate_adopted_groups((int)termination_requested);
     if (!reported) {
         report_status(status_descriptor, 1 << 8);
         close(status_descriptor);
     }
-    terminate_agent(agent);
+    release_agent_reference(&agent);
     _exit(0);
 }
 
@@ -556,7 +974,7 @@ int main(int argc, char **argv)
     int status_pipe[2];
     int status;
     int agent_ready_descriptor;
-    pid_t agent_pid;
+    AgentReference agent_reference;
     pid_t monitor;
     int index = 1;
 
@@ -594,45 +1012,45 @@ int main(int argc, char **argv)
     }
     command = &argv[index + 1];
 
-    agent_pid = start_agent(agent, &agent_ready_descriptor);
+    agent_reference = acquire_agent_reference(
+        agent, &agent_ready_descriptor
+    );
     (void)update_dbus_environment(
         dbus_environment, dbus_environment_count
     );
     free(dbus_environment);
-    agent_pid = finish_agent_start(agent_pid, agent_ready_descriptor);
+    finish_agent_reference(&agent_reference, agent_ready_descriptor);
     if (pipe2(status_pipe, O_CLOEXEC) < 0) {
-        stop_agent(agent_pid);
+        release_agent_reference(&agent_reference);
         return 1;
     }
     monitor = fork();
     if (monitor < 0) {
         close(status_pipe[0]);
         close(status_pipe[1]);
-        stop_agent(agent_pid);
+        release_agent_reference(&agent_reference);
         return 1;
     }
     if (monitor == 0) {
         close(status_pipe[0]);
-        monitor_application(command, agent_pid, status_pipe[1]);
+        monitor_application(command, agent_reference, status_pipe[1]);
     }
+    agent_reference.held = false;
 
     close(status_pipe[1]);
     forwarded_child = monitor;
     if (configure_supervisor_signals() < 0) {
         (void)kill(monitor, SIGTERM);
         close(status_pipe[0]);
-        stop_agent(agent_pid);
         return 1;
     }
     if (read_status(status_pipe[0], &status) < 0) {
         (void)kill(monitor, SIGTERM);
         close(status_pipe[0]);
-        stop_agent(agent_pid);
         return 1;
     }
     close(status_pipe[0]);
     forwarded_child = -1;
     (void)waitpid(monitor, NULL, WNOHANG);
-    (void)waitpid(agent_pid, NULL, WNOHANG);
     return status_code(status);
 }

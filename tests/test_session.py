@@ -826,6 +826,10 @@ class NativeLauncherTests(unittest.TestCase):
         cls.temporary = tempfile.TemporaryDirectory()
         cls.launcher = Path(cls.temporary.name) / "launcher"
         cls.dbus_update = Path(cls.temporary.name) / "dbus-update"
+        cls.agent_state_root = Path(cls.temporary.name) / "runtime"
+        (
+            cls.agent_state_root / str(os.getuid())
+        ).mkdir(parents=True)
         cls.dbus_update.write_text(
             "#!/bin/sh\n"
             "if test -n \"$SPACES_DBUS_STARTED\"; then\n"
@@ -866,6 +870,7 @@ class NativeLauncherTests(unittest.TestCase):
                         "-DDBUS_UPDATE_ACTIVATION_ENVIRONMENT="
                         f'"{cls.dbus_update}"'
                     ),
+                    f'-DAGENT_STATE_ROOT="{cls.agent_state_root}"',
                     "-Wl,--wrap=__libc_start_main",
                     "-o",
                     str(cls.launcher),
@@ -1003,8 +1008,11 @@ class NativeLauncherTests(unittest.TestCase):
     def test_agent_stops_after_daemonized_descendants_exit(self) -> None:
         agent_pid = Path(self.temporary.name) / "lifecycle-agent-pid"
         agent_stopped = Path(self.temporary.name) / "lifecycle-agent-stopped"
-        application_stopped = (
-            Path(self.temporary.name) / "lifecycle-application-stopped"
+        first_daemon_stopped = (
+            Path(self.temporary.name) / "lifecycle-first-daemon-stopped"
+        )
+        last_daemon_stopped = (
+            Path(self.temporary.name) / "lifecycle-last-daemon-stopped"
         )
         agent = Path(self.temporary.name) / "lifecycle-agent"
         agent.write_text(
@@ -1029,23 +1037,190 @@ class NativeLauncherTests(unittest.TestCase):
                 "/bin/sh",
                 "-c",
                 (
-                    f"(sleep 0.3; printf stopped > "
-                    f"{shlex.quote(str(application_stopped))}) & exit 7"
+                    f"(sleep 0.2; printf stopped > "
+                    f"{shlex.quote(str(first_daemon_stopped))}) "
+                    ">/dev/null 2>&1 & "
+                    f"(sleep 0.6; printf stopped > "
+                    f"{shlex.quote(str(last_daemon_stopped))}) "
+                    ">/dev/null 2>&1 & exit 7"
                 ),
             ],
             check=False,
             env=environment,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
         )
         try:
             self.assertEqual(completed.returncode, 7)
             self.assertLess(time.monotonic() - started, 0.2)
             self.assertTrue(self.wait_for_path(agent_pid))
             self.assertFalse(agent_stopped.exists())
+            self.assertTrue(self.wait_for_path(first_daemon_stopped))
+            self.assertFalse(agent_stopped.exists())
+            self.assertTrue(self.wait_for_path(last_daemon_stopped))
+            self.assertTrue(self.wait_for_path(agent_stopped))
+        finally:
+            if agent_pid.exists() and not agent_stopped.exists():
+                try:
+                    os.killpg(
+                        int(agent_pid.read_text(encoding="utf-8")),
+                        signal.SIGTERM,
+                    )
+                except ProcessLookupError:
+                    pass
+
+    def test_overlapping_launches_share_refcounted_agent(self) -> None:
+        started = Path(self.temporary.name) / "shared-agent-started"
+        stopped = Path(self.temporary.name) / "shared-agent-stopped"
+        agent_pid = Path(self.temporary.name) / "shared-agent-pid"
+        agent = Path(self.temporary.name) / "shared-agent"
+        agent.write_text(
+            "#!/bin/sh\n"
+            "printf 'started\\n' >> \"$SPACES_AGENT_STARTED\"\n"
+            "printf '%s' \"$$\" > \"$SPACES_AGENT_MARKER\"\n"
+            "printf 'Authentication agent result: true\\n' >&2\n"
+            "trap 'printf stopped > \"$SPACES_AGENT_STOPPED\"; exit 0' TERM\n"
+            "while :; do sleep 0.05; done\n",
+            encoding="utf-8",
+        )
+        agent.chmod(0o755)
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "SPACES_AGENT_STARTED": str(started),
+                "SPACES_AGENT_MARKER": str(agent_pid),
+                "SPACES_AGENT_STOPPED": str(stopped),
+            }
+        )
+        first = subprocess.Popen(
+            [
+                self.launcher,
+                "--agent",
+                agent,
+                "--",
+                "/bin/sh",
+                "-c",
+                "trap 'exit 0' TERM; while :; do sleep 0.05; done",
+            ],
+            env=environment,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            self.assertTrue(self.wait_for_path(agent_pid))
+            second = subprocess.run(
+                [
+                    self.launcher,
+                    "--agent",
+                    agent,
+                    "--",
+                    "/bin/true",
+                ],
+                check=False,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertEqual(
+                started.read_text(encoding="utf-8"),
+                "started\n",
+            )
+            self.assertFalse(stopped.exists())
+            first.terminate()
+            first.wait(timeout=5)
+            self.assertTrue(self.wait_for_path(stopped))
+        finally:
+            if first.poll() is None:
+                first.terminate()
+                first.wait(timeout=5)
+            if agent_pid.exists() and not stopped.exists():
+                try:
+                    os.killpg(
+                        int(agent_pid.read_text(encoding="utf-8")),
+                        signal.SIGTERM,
+                    )
+                except ProcessLookupError:
+                    pass
+
+    @unittest.skipUnless(shutil.which("setsid"), "setsid is unavailable")
+    def test_termination_stops_monitor_after_application_exit(self) -> None:
+        monitor_pid = Path(self.temporary.name) / "terminating-monitor-pid"
+        application_pid = (
+            Path(self.temporary.name) / "terminating-application-pid"
+        )
+        application_stopped = (
+            Path(self.temporary.name) / "terminating-application-stopped"
+        )
+        agent_pid = Path(self.temporary.name) / "terminating-agent-pid"
+        agent_stopped = (
+            Path(self.temporary.name) / "terminating-agent-stopped"
+        )
+        agent = Path(self.temporary.name) / "terminating-agent"
+        agent.write_text(
+            "#!/bin/sh\n"
+            "printf '%s' \"$$\" > \"$SPACES_AGENT_MARKER\"\n"
+            "printf 'Authentication agent result: true\\n' >&2\n"
+            "trap 'printf stopped > \"$SPACES_AGENT_STOPPED\"; exit 0' TERM\n"
+            "while :; do sleep 0.05; done\n",
+            encoding="utf-8",
+        )
+        agent.chmod(0o755)
+        environment = os.environ.copy()
+        environment["SPACES_AGENT_MARKER"] = str(agent_pid)
+        environment["SPACES_AGENT_STOPPED"] = str(agent_stopped)
+        descendant = (
+            "trap "
+            + shlex.quote(
+                "printf stopped > "
+                f"{shlex.quote(str(application_stopped))}; exit 0"
+            )
+            + " TERM; "
+            + f"printf '%s' \"$$\" > {shlex.quote(str(application_pid))}; "
+            + "while :; do sleep 0.05; done"
+        )
+        completed = subprocess.run(
+            [
+                self.launcher,
+                "--agent",
+                agent,
+                "--",
+                "/bin/sh",
+                "-c",
+                (
+                    f"printf '%s' \"$PPID\" > "
+                    f"{shlex.quote(str(monitor_pid))}; "
+                    "setsid /bin/sh -c "
+                    f"{shlex.quote(descendant)} >/dev/null 2>&1 & exit 0"
+                ),
+            ],
+            check=False,
+            env=environment,
+            capture_output=True,
+            text=True,
+        )
+        try:
+            self.assertEqual(completed.returncode, 0)
+            self.assertTrue(self.wait_for_path(agent_pid))
+            self.assertTrue(self.wait_for_path(application_pid))
+            self.assertFalse(agent_stopped.exists())
+            self.assertFalse(application_stopped.exists())
+            os.kill(
+                int(monitor_pid.read_text(encoding="utf-8")),
+                signal.SIGTERM,
+            )
             self.assertTrue(self.wait_for_path(application_stopped))
             self.assertTrue(self.wait_for_path(agent_stopped))
         finally:
+            if application_pid.exists() and not application_stopped.exists():
+                try:
+                    os.killpg(
+                        int(application_pid.read_text(encoding="utf-8")),
+                        signal.SIGTERM,
+                    )
+                except ProcessLookupError:
+                    pass
             if agent_pid.exists() and not agent_stopped.exists():
                 try:
                     os.killpg(
@@ -1059,10 +1234,12 @@ class NativeLauncherTests(unittest.TestCase):
         marker = Path(self.temporary.name) / "registering-agent-pid"
         ready = Path(self.temporary.name) / "registering-agent-ready"
         stopped = Path(self.temporary.name) / "registering-agent-stopped"
+        logging_rules = Path(self.temporary.name) / "agent-logging-rules"
         agent = Path(self.temporary.name) / "registering-agent"
         agent.write_text(
             "#!/bin/sh\n"
             "printf '%s' \"$$\" > \"$SPACES_AGENT_MARKER\"\n"
+            "printf '%s' \"$QT_LOGGING_RULES\" > \"$SPACES_LOGGING_RULES\"\n"
             "sleep 0.2\n"
             "printf ready > \"$SPACES_AGENT_READY\"\n"
             "printf 'Authentication agent result: true\\n' >&2\n"
@@ -1077,6 +1254,8 @@ class NativeLauncherTests(unittest.TestCase):
                 "SPACES_AGENT_MARKER": str(marker),
                 "SPACES_AGENT_READY": str(ready),
                 "SPACES_AGENT_STOPPED": str(stopped),
+                "SPACES_LOGGING_RULES": str(logging_rules),
+                "QT_LOGGING_RULES": "custom.debug=false",
             }
         )
         completed = subprocess.run(
@@ -1087,7 +1266,10 @@ class NativeLauncherTests(unittest.TestCase):
                 "--",
                 "/bin/sh",
                 "-c",
-                f"test -f {shlex.quote(str(ready))}",
+                (
+                    f"test -f {shlex.quote(str(ready))}"
+                    " && test \"$QT_LOGGING_RULES\" = custom.debug=false"
+                ),
             ],
             check=False,
             env=environment,
@@ -1099,6 +1281,10 @@ class NativeLauncherTests(unittest.TestCase):
         try:
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertEqual(completed.stderr, "")
+            self.assertEqual(
+                logging_rules.read_text(encoding="utf-8"),
+                "default.debug=true",
+            )
             self.assertTrue(self.wait_for_path(stopped))
         finally:
             if marker.exists() and not stopped.exists():
