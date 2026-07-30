@@ -1839,6 +1839,7 @@ def _command(
         "--settings=no",
         "--notify-ready=yes",
         "--resolv-conf=bind-host",
+        "--inaccessible=/sys/fs/selinux",
         *_selinux_arguments(),
         *(
             ("--system-call-filter=perf_event_open",)

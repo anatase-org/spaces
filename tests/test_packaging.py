@@ -128,6 +128,11 @@ class PackagingTests(unittest.TestCase):
             "%{_prefix}/local/share/applications/spaces",
             spec,
         )
+        self.assertIn(
+            "/usr/lib/spaces/guest %{_datadir}/spaces/portal "
+            "%{_rundir}/spaces",
+            spec,
+        )
         self.assertIn("selinux/spaces.pp", spec)
         self.assertTrue((ROOT / "selinux" / "spaces.te").is_file())
         self.assertTrue((ROOT / "selinux" / "spaces.fc").is_file())
@@ -175,6 +180,64 @@ class PackagingTests(unittest.TestCase):
         self.assertIn(
             "/usr/local/share/applications/spaces(/.*)?",
             file_contexts,
+        )
+        self.assertIn(
+            "/usr/lib/spaces/guest(/.*)?",
+            file_contexts,
+        )
+        self.assertIn(
+            "/usr/share/spaces/portal(/.*)?",
+            file_contexts,
+        )
+        self.assertIn(
+            "allow spaces_container_t spaces_file_t:dir "
+            "{ watch watch_reads };",
+            type_enforcement,
+        )
+        self.assertIn(
+            "allow spaces_container_t spaces_apifs_file_t:dir "
+            "{ watch watch_reads };",
+            type_enforcement,
+        )
+        self.assertIn(
+            "userdom_write_user_tmp_sockets(spaces_container_t)",
+            type_enforcement,
+        )
+        self.assertIn(
+            "allow spaces_container_t user_tmp_t:file write;",
+            type_enforcement,
+        )
+        self.assertIn(
+            "allow spaces_container_t config_home_t:file read_file_perms;",
+            type_enforcement,
+        )
+        self.assertIn(
+            "read_files_pattern(\n"
+            "\tspaces_container_t,\n"
+            "\tspaces_var_run_t,\n"
+            "\tspaces_var_run_t\n"
+            ")",
+            type_enforcement,
+        )
+        self.assertIn(
+            "xserver_stream_connect(spaces_container_t)",
+            type_enforcement,
+        )
+        self.assertIn(
+            "unconfined_stream_connect(spaces_container_t)",
+            type_enforcement,
+        )
+        self.assertIn(
+            "unconfined_use_fds(spaces_container_t)",
+            type_enforcement,
+        )
+        self.assertIn(
+            "dbus_write_session_tmp_sock_files(spaces_t)",
+            type_enforcement,
+        )
+        self.assertIn(
+            "dbus_session_bus_client(spaces_t)",
+            type_enforcement,
         )
 
     def test_polkit_policy_scopes_authorization_by_operation(self) -> None:

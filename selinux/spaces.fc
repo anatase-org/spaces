@@ -1,5 +1,8 @@
 /usr/bin/spaces\.priv	--	gen_context(system_u:object_r:spaces_exec_t,s0)
 
+/usr/lib/spaces/guest(/.*)?	gen_context(system_u:object_r:spaces_apifs_file_t,s0)
+/usr/share/spaces/portal(/.*)?	gen_context(system_u:object_r:spaces_apifs_file_t,s0)
+
 /var/lib/spaces(/.*)?		gen_context(system_u:object_r:spaces_file_t,s0)
 
 /run/spaces(/.*)?		gen_context(system_u:object_r:spaces_var_run_t,s0)

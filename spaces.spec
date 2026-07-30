@@ -71,7 +71,8 @@ done
 %post
 %selinux_modules_install %{_datadir}/selinux/packages/spaces.pp
 restorecon -RF %{_bindir}/spaces.priv %{_localstatedir}/lib/spaces \
-  %{_rundir}/spaces %{_prefix}/local/share/applications/spaces \
+  /usr/lib/spaces/guest %{_datadir}/spaces/portal %{_rundir}/spaces \
+  %{_prefix}/local/share/applications/spaces \
   2>/dev/null || :
 %systemd_post spaces@.service
 %systemd_user_post spaces@.service

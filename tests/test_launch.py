@@ -263,6 +263,7 @@ class LaunchTests(unittest.TestCase):
             "--settings=no",
             "--notify-ready=yes",
             "--resolv-conf=bind-host",
+            "--inaccessible=/sys/fs/selinux",
         ]
 
         for network, added_caps in network_caps.items():
@@ -398,6 +399,7 @@ class LaunchTests(unittest.TestCase):
             )
         for context in contexts:
             self.assertIn(context, arguments)
+        self.assertIn("--inaccessible=/sys/fs/selinux", arguments)
 
     def test_development_kernel_capabilities_extend_launch(self) -> None:
         for level in ("development", "admin"):

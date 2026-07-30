@@ -119,6 +119,11 @@ optional_policy(`
 	fprintd_dbus_chat(spaces_t)
 ')
 
+# The per-user host portal broker connects to the initiating user's session
+# bus.  It receives only the broker name and desktop request from Spaces.
+dbus_write_session_tmp_sock_files(spaces_t)
+dbus_session_bus_client(spaces_t)
+
 ########################################
 #
 # Spaces container payload
@@ -139,6 +144,7 @@ manage_blk_files_pattern(spaces_container_t, spaces_file_t, spaces_file_t)
 allow spaces_container_t spaces_file_t:chr_file {
 	mmap_file_perms watch watch_reads
 };
+allow spaces_container_t spaces_file_t:dir { watch watch_reads };
 allow spaces_container_t spaces_file_t:fifo_file watch;
 allow spaces_container_t spaces_file_t:{ file dir } mounton;
 allow spaces_container_t spaces_file_t:filesystem { mount remount unmount };
@@ -216,6 +222,7 @@ manage_blk_files_pattern(spaces_container_t, spaces_apifs_file_t, spaces_apifs_f
 allow spaces_container_t spaces_apifs_file_t:chr_file {
 	mmap_file_perms watch watch_reads
 };
+allow spaces_container_t spaces_apifs_file_t:dir { watch watch_reads };
 allow spaces_container_t spaces_apifs_file_t:fifo_file watch;
 allow spaces_container_t spaces_apifs_file_t:sock_file watch;
 allow spaces_container_t spaces_apifs_file_t:{ file dir } mounton;
@@ -226,8 +233,29 @@ allow spaces_container_t spaces_apifs_file_t:filesystem {
 # The guest PAM bridge connects back to the per-space host authentication
 # socket.  Runtime portal sockets use this type as well.
 allow spaces_container_t spaces_var_run_t:dir search_dir_perms;
+read_files_pattern(
+	spaces_container_t,
+	spaces_var_run_t,
+	spaces_var_run_t
+)
 allow spaces_container_t spaces_var_run_t:sock_file rw_sock_file_perms;
 allow spaces_container_t spaces_t:unix_stream_socket connectto;
+
+# Desktop forwarding bind-mounts only the selected host display and media
+# sockets into the guest mount namespace.  Permit the container to use those
+# user-session sockets without exposing the rest of the host runtime tree.
+gen_require(`
+	type user_tmp_t;
+	type config_home_t;
+')
+allow spaces_container_t user_tmp_t:file write;
+allow spaces_container_t config_home_t:file read_file_perms;
+userdom_write_user_tmp_sockets(spaces_container_t)
+xserver_stream_connect(spaces_container_t)
+optional_policy(`
+	unconfined_stream_connect(spaces_container_t)
+	unconfined_use_fds(spaces_container_t)
+')
 
 # systemd-machined opens the container's /dev/ptmx when machinectl starts an
 # interactive or command shell.
