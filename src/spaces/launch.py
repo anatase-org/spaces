@@ -60,6 +60,7 @@ BASE_DEVICE_ALLOW = (
     ("/dev/fuse", "rwm"),
 )
 ROOTFS_SYMLINKS = (("/var/home", "/home"),)
+ZSH_SKELETON_PATH = Path("/etc/skel/.zshrc")
 MASKED_UNIT_DESTINATIONS = (
     # Avoid messing with the network
     "/etc/systemd/system/netplan-configure.service",
@@ -316,6 +317,35 @@ def _apply_rootfs_fixups(rootfs: Path) -> None:
                     error=error,
                 )
             )
+
+    try:
+        skeleton = rootfs / ZSH_SKELETON_PATH.parent.relative_to("/")
+        if skeleton.is_symlink() or not skeleton.is_dir():
+            raise OSError(_("the skeleton directory is missing or unsafe"))
+        zshrc = skeleton / ZSH_SKELETON_PATH.name
+        try:
+            descriptor = os.open(
+                zshrc,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | os.O_NOFOLLOW
+                | os.O_CLOEXEC,
+                0o644,
+            )
+        except FileExistsError:
+            if zshrc.is_symlink() or not zshrc.is_file():
+                raise OSError(_("the skeleton file is unsafe"))
+        else:
+            os.close(descriptor)
+    except (OSError, RuntimeError, ValueError) as error:
+        logger.error(
+            _(
+                "Could not prepare rootfs Zsh skeleton file {path}: {error}",
+                path=ZSH_SKELETON_PATH,
+                error=error,
+            )
+        )
 
     _drop_ping_capability(rootfs)
 

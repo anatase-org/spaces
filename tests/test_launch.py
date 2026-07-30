@@ -1032,17 +1032,31 @@ class LaunchTests(unittest.TestCase):
             launch_module._unit_mask_bind_arguments(),
         )
 
-    def test_rootfs_fixups_only_create_var_home_symlink(self) -> None:
+    def test_rootfs_fixups_prepare_links_and_zsh_skeleton(self) -> None:
         launch_module._apply_rootfs_fixups(self.rootfs)
 
         var_home = self.rootfs / "var" / "home"
         self.assertTrue(var_home.is_symlink())
         self.assertEqual(os.readlink(var_home), "/home")
+        zshrc = self.rootfs / "etc" / "skel" / ".zshrc"
+        self.assertTrue(zshrc.is_file())
+        self.assertEqual(zshrc.read_text(encoding="utf-8"), "")
+        self.assertEqual(zshrc.stat().st_mode & 0o777, 0o644)
         for destination in launch_module.MASKED_UNIT_DESTINATIONS:
             with self.subTest(destination=destination):
                 self.assertFalse(
                     (self.rootfs / destination.removeprefix("/")).exists()
                 )
+
+    def test_rootfs_fixups_preserve_existing_zsh_skeleton(self) -> None:
+        zshrc = self.rootfs / "etc" / "skel" / ".zshrc"
+        zshrc.write_text("configured\n", encoding="utf-8")
+        zshrc.chmod(0o640)
+
+        launch_module._apply_rootfs_fixups(self.rootfs)
+
+        self.assertEqual(zshrc.read_text(encoding="utf-8"), "configured\n")
+        self.assertEqual(zshrc.stat().st_mode & 0o777, 0o640)
 
     def test_rootfs_fixups_drop_ping_capability_when_sockets_are_enabled(
         self,
@@ -1543,6 +1557,18 @@ class UserFixupTests(unittest.TestCase):
             (user.space_home / ".config" / "settings").read_text(),
             "first\n",
         )
+
+    def test_new_home_inherits_prepared_zsh_skeleton(self) -> None:
+        user = self._user()
+        (self.etc / "skel").mkdir()
+
+        launch_module._apply_rootfs_fixups(self.rootfs)
+        launch_module._ensure_user_homes(self.rootfs, (user,))
+
+        zshrc = user.space_home / ".zshrc"
+        self.assertTrue(zshrc.is_file())
+        self.assertEqual(zshrc.read_text(encoding="utf-8"), "")
+        self.assertEqual(zshrc.stat().st_mode & 0o777, 0o644)
 
     def test_missing_skeleton_creates_session_paths(self) -> None:
         user = self._user()
