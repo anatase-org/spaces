@@ -50,7 +50,6 @@ class DistroConfig:
 @dataclass(frozen=True)
 class HostConfig:
     version: int | None = None
-    default_shell: str | None = None
     distros: Mapping[str, DistroConfig] = field(default_factory=dict)
 
     def packages_for(self, distro_id: str) -> tuple[str, ...]:
@@ -320,19 +319,12 @@ def _parse(data: object) -> HostConfig:
     for key in data:
         if key not in {
             "version",
-            "default_shell",
             "distros",
         }:
             _warning(_("Ignoring unknown Spaces configuration option: %s."), key)
 
-    shell_path = (
-        _guest_path(data["default_shell"], _("default shell"))
-        if "default_shell" in data
-        else None
-    )
     return HostConfig(
         version=SUPPORTED_VERSION,
-        default_shell=str(shell_path) if shell_path is not None else None,
         distros=_parse_distros(data.get("distros")),
     )
 

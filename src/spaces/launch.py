@@ -584,17 +584,9 @@ def _ensure_administrator_group(
         gshadow_records.append([group_name, "!", "", ""])
 
 
-def _default_user_shell(
-    rootfs: Path,
-    preferred_shell: str | None = None,
-) -> str:
+def _account_shell(rootfs: Path) -> str:
     resolved_rootfs = rootfs.resolve(strict=True)
-    shells = (
-        (preferred_shell, "/bin/bash", "/usr/bin/bash")
-        if preferred_shell is not None
-        else ("/bin/bash", "/usr/bin/bash")
-    )
-    for shell in shells:
+    for shell in ("/bin/bash", "/usr/bin/bash"):
         candidate = rootfs / shell.removeprefix("/")
         try:
             resolved = candidate.resolve(strict=True)
@@ -613,7 +605,6 @@ def _reconcile_accounts(
     rootfs: Path,
     users: tuple[SpaceUser, ...],
     administrator_group: str = "wheel",
-    preferred_shell: str | None = None,
 ) -> None:
     non_root_users = tuple(user for user in users if user.uid != 0)
     if not non_root_users:
@@ -656,7 +647,7 @@ def _reconcile_accounts(
             _("Unsafe account database path: {path}.", path=gshadow_path)
         )
 
-    shell = _default_user_shell(rootfs, preferred_shell)
+    shell = _account_shell(rootfs)
     _ensure_administrator_group(
         group_records,
         gshadow_records,
@@ -2100,7 +2091,6 @@ def launch(space_name: str) -> int:
         rootfs,
         users,
         administrator_group,
-        configuration.default_shell,
     )
     distro_id = info["distribution"]["id"]
     custom_binds = _prepare_custom_mounts(

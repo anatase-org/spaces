@@ -38,7 +38,6 @@ class HostConfigTests(unittest.TestCase):
                 json.dumps(
                     {
                         "version": 1,
-                        "default_shell": "/usr/bin/zsh",
                         "distros": {
                             "arch": {
                                 "packages": ["screen", "tmux", "zsh"],
@@ -76,7 +75,6 @@ class HostConfigTests(unittest.TestCase):
             configuration = host_config.load(path)
 
         self.assertEqual(configuration.version, 1)
-        self.assertEqual(configuration.default_shell, "/usr/bin/zsh")
         self.assertEqual(
             configuration.packages_for("arch"),
             ("screen", "tmux", "zsh"),

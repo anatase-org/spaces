@@ -1296,30 +1296,20 @@ class UserFixupTests(unittest.TestCase):
         if gshadow_text:
             (self.etc / "gshadow").write_text(gshadow_text, encoding="utf-8")
 
-    def test_preferred_shell_is_used_only_when_executable(self) -> None:
-        zsh = self.rootfs / "usr/bin/zsh"
-        zsh.parent.mkdir(parents=True)
-        zsh.write_text("", encoding="utf-8")
-        zsh.chmod(0o755)
+    def test_account_shell_uses_executable_bash_or_sh_fallback(self) -> None:
         bash = self.rootfs / "bin/bash"
         bash.parent.mkdir(parents=True)
         bash.write_text("", encoding="utf-8")
         bash.chmod(0o755)
 
         self.assertEqual(
-            launch_module._default_user_shell(
-                self.rootfs,
-                "/usr/bin/zsh",
-            ),
-            "/usr/bin/zsh",
-        )
-        zsh.chmod(0o644)
-        self.assertEqual(
-            launch_module._default_user_shell(
-                self.rootfs,
-                "/usr/bin/zsh",
-            ),
+            launch_module._account_shell(self.rootfs),
             "/bin/bash",
+        )
+        bash.chmod(0o644)
+        self.assertEqual(
+            launch_module._account_shell(self.rootfs),
+            "/bin/sh",
         )
 
     def test_reconcile_renames_and_locks_existing_uid(self) -> None:

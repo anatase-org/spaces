@@ -921,7 +921,7 @@ class PrivilegedTests(unittest.TestCase):
             ],
         )
 
-    def test_enter_without_command_uses_machinectl_default_shell(self) -> None:
+    def test_enter_without_command_uses_machinectl_shell(self) -> None:
         info = core.create_info(
             "work",
             {"id": "custom"},
