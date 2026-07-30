@@ -358,6 +358,24 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             app.mouse_position = Offset(0, -1000)
             selected.render()
 
+    async def test_radio_markers_use_terminal_background(self) -> None:
+        app = PermissionForm(
+            home=Path("/home/user"),
+            folders=[],
+            network="advanced",
+            selected_home=[],
+            include_system=True,
+            distribution_title="",
+            distribution_description="",
+            distribution_options=[],
+            distribution_value=None,
+        )
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            for radio in app.query(CleanRadioButton):
+                marker_style = radio.get_visual_style("toggle--button")
+                self.assertEqual(marker_style.background.ansi, -1)
+
     async def test_arch_distribution_options_are_checkboxes(self) -> None:
         app = PermissionForm(
             home=Path("/home/user"),

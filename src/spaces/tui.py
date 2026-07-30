@@ -220,6 +220,16 @@ class PermissionForm(
         border: none;
         background: transparent;
     }
+    CleanRadioButton > .toggle--button {
+        color: $foreground;
+        background: ansi_default;
+        text-style: dim;
+    }
+    CleanRadioButton.-on > .toggle--button {
+        color: $accent;
+        background: ansi_default;
+        text-style: bold not dim;
+    }
     #form RadioSet, #form SelectionList {
         scrollbar-color: $accent-muted;
         scrollbar-color-hover: $accent;
