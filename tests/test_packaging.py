@@ -257,6 +257,21 @@ class PackagingTests(unittest.TestCase):
             type_enforcement,
         )
         self.assertIn(
+            "allow spaces_container_t cpu_device_t:chr_file "
+            "{ open read };",
+            type_enforcement,
+        )
+        self.assertIn(
+            "allow spaces_container_t tun_tap_device_t:chr_file "
+            "rw_chr_file_perms;",
+            type_enforcement,
+        )
+        self.assertIn(
+            "allow spaces_container_t vhost_device_t:chr_file "
+            "rw_chr_file_perms;",
+            type_enforcement,
+        )
+        self.assertIn(
             "allow spaces_container_t user_tty_device_t:chr_file {\n"
             "\topen watch watch_reads\n"
             "};",
@@ -282,6 +297,14 @@ class PackagingTests(unittest.TestCase):
         )
         self.assertIn(
             "allow spaces_container_t tmpfs_t:file execute;",
+            type_enforcement,
+        )
+        self.assertIn(
+            "allow spaces_container_t tmpfs_t:chr_file relabelfrom;",
+            type_enforcement,
+        )
+        self.assertIn(
+            "allow spaces_container_t tmpfs_t:lnk_file relabelfrom;",
             type_enforcement,
         )
         self.assertIn(
