@@ -98,6 +98,12 @@ def run_streamed(
             output_chunks.append(line)
             stream(line)
         returncode = process.wait()
+    except KeyboardInterrupt:
+        # The child shares our foreground process group and receives SIGINT too.
+        # Let it finish its own interrupt cleanup instead of replacing SIGINT
+        # with SIGTERM while it is preserving a partial installation.
+        process.wait()
+        raise
     finally:
         if process.stdout is not None:
             process.stdout.close()

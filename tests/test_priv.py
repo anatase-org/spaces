@@ -400,6 +400,35 @@ class PrivilegedTests(unittest.TestCase):
         self.assertTrue((space / "home").is_dir())
         self.assertTrue((space / "info.json").is_file())
 
+    def test_bootstrap_keyboard_interrupt_moves_rootfs_to_failed_path(
+        self,
+    ) -> None:
+        space = self.state_root / "ubuntu"
+        with (
+            mock.patch.object(
+                ubuntu.subprocess,
+                "run",
+                side_effect=[
+                    subprocess.CompletedProcess(
+                        [
+                            "/usr/bin/systemctl",
+                            "stop",
+                            "spaces@ubuntu.service",
+                        ],
+                        0,
+                    ),
+                    KeyboardInterrupt,
+                ],
+            ),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            priv.create(self.info)
+
+        self.assertFalse((space / "rootfs").exists())
+        self.assertTrue((space / "rootfs.fail").is_dir())
+        self.assertTrue((space / "home").is_dir())
+        self.assertTrue((space / "info.json").is_file())
+
     def test_create_stop_failure_preserves_existing_space(self) -> None:
         space = self.state_root / "ubuntu"
         rootfs = space / "rootfs"

@@ -74,6 +74,27 @@ class SpacesLoggingTests(unittest.TestCase):
         self.assertEqual(result.returncode, 42)
         self.assertEqual(result.stdout, "failed\n")
 
+    def test_run_streamed_waits_for_child_cleanup_on_keyboard_interrupt(
+        self,
+    ) -> None:
+        process = mock.Mock()
+        process.stdout.__iter__ = mock.Mock(side_effect=KeyboardInterrupt)
+        process.wait.return_value = 130
+        process.poll.return_value = 130
+
+        with (
+            patch.object(
+                spaces_logging.subprocess,
+                "Popen",
+                return_value=process,
+            ),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            spaces_logging.run_streamed(["spaces.priv", "create", "{}"])
+
+        process.wait.assert_called_once_with()
+        process.terminate.assert_not_called()
+
     def test_stream_records_are_concatenated_until_next_message(self) -> None:
         output = io.StringIO()
         handler = SpacesHandler()
