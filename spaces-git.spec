@@ -1,11 +1,15 @@
+%global commit %(git rev-parse --verify HEAD)
+%global shortcommit %(git rev-parse --short=12 %{commit})
+%global gitversion %(tag=$(git describe --tags --abbrev=0 --match 'v[0-9]*' %{commit} 2>/dev/null || :); if test -n "$tag"; then version=${tag#v}; distance=$(git rev-list --count "$tag"..%{commit}); if test "$distance" -eq 0; then printf '%s' "$version"; else printf '%s^%s.g%s' "$version" "$distance" "%{shortcommit}"; fi; else printf '0.0.0^git%s.g%s' "$(git rev-list --count %{commit})" "%{shortcommit}"; fi)
+
 Name:           spaces
-Version:        0.0.1
+Version:        %{gitversion}
 Release:        1%{?dist}
 Summary:        Spaces. Develop on the distribution of your choice, securely.
 
 License:        AGPL-3.0-or-later
 URL:            https://github.com/anatase-org/spaces
-Source:       	https://github.com/anatase-org/spaces/archive/refs/tags/v%{version}.tar.gz
+Source:         %{url}/archive/%{commit}/%{name}-%{commit}.tar.gz
 
 ExclusiveArch:  x86_64 aarch64
 BuildRequires:  gcc
@@ -44,7 +48,7 @@ Requires(postun): policycoreutils
 Spaces provide a chroot-like sandboxing environment for you to access your favorite distributions: Arch, Fedora, Kali, and Ubuntu. A simple permission system ensures your local files and credentials remain secure, even if your space is compromised. Spaces are constructed directly using packages from your chosen distribution repositories with signature enforcement. No container middleman or surprises.
 
 %prep
-%autosetup -n %{name}-%{version}
+%autosetup -n %{name}-%{commit}
 
 %build
 %{python3} -m build --wheel --no-isolation
