@@ -18,6 +18,43 @@ SELINUXFS = Path("/sys/fs/selinux")
 
 
 @contextlib.contextmanager
+def mounted_rootfs(rootfs: Path, distribution_name: str) -> Iterator[None]:
+    """Expose a rootfs as a mountpoint in a private mount namespace."""
+
+    try:
+        status = rootfs.lstat()
+    except OSError as error:
+        raise DistributionError(
+            _(
+                "{distribution} rootfs is missing.",
+                distribution=distribution_name,
+            )
+        ) from error
+    if rootfs.is_symlink() or not stat.S_ISDIR(status.st_mode):
+        raise DistributionError(
+            _(
+                "Unsafe {distribution} rootfs.",
+                distribution=distribution_name,
+            )
+        )
+
+    namespace = os.open("/proc/self/ns/mnt", os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        os.unshare(os.CLONE_NEWNS)
+        try:
+            subprocess.run(["mount", "--make-rprivate", "/"], check=True)
+            subprocess.run(
+                ["mount", "--bind", str(rootfs), str(rootfs)],
+                check=True,
+            )
+            yield
+        finally:
+            os.setns(namespace, os.CLONE_NEWNS)
+    finally:
+        os.close(namespace)
+
+
+@contextlib.contextmanager
 def hidden_selinuxfs() -> Iterator[None]:
     """Run children in a mount namespace where host SELinux is undiscoverable."""
 

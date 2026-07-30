@@ -287,6 +287,34 @@ class DistributionDriverTests(unittest.TestCase):
         setns.assert_called_once_with(17, mounts.os.CLONE_NEWNS)
         close.assert_called_once_with(17)
 
+    def test_rootfs_mountpoint_is_private_and_temporary(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            mock.patch.object(mounts.os, "open", return_value=17) as open_namespace,
+            mock.patch.object(mounts.os, "unshare") as unshare,
+            mock.patch.object(mounts.os, "setns") as setns,
+            mock.patch.object(mounts.os, "close") as close,
+            mock.patch.object(mounts.subprocess, "run") as run,
+        ):
+            rootfs = Path(temporary)
+            with mounts.mounted_rootfs(rootfs, "Arch"):
+                pass
+
+        open_namespace.assert_called_once_with(
+            "/proc/self/ns/mnt",
+            mounts.os.O_RDONLY | mounts.os.O_CLOEXEC,
+        )
+        unshare.assert_called_once_with(mounts.os.CLONE_NEWNS)
+        self.assertEqual(
+            [call.args[0] for call in run.call_args_list],
+            [
+                ["mount", "--make-rprivate", "/"],
+                ["mount", "--bind", str(rootfs), str(rootfs)],
+            ],
+        )
+        setns.assert_called_once_with(17, mounts.os.CLONE_NEWNS)
+        close.assert_called_once_with(17)
+
     def test_arch_bootstrap_honors_aur_package_opt_out(self) -> None:
         with (
             mock.patch.object(arch.subprocess, "run") as run,
@@ -303,6 +331,7 @@ class DistributionDriverTests(unittest.TestCase):
         with (
             mock.patch.object(arch.subprocess, "run"),
             mock.patch.object(arch, "_install_aur_package") as install,
+            mock.patch.object(arch, "mounted_rootfs") as mounted_rootfs,
         ):
             arch.DISTRIBUTION.bootstrap(
                 {"id": "arch", "options": ["yay", "shelly"]},
@@ -323,11 +352,13 @@ class DistributionDriverTests(unittest.TestCase):
                 ),
             ],
         )
+        mounted_rootfs.assert_called_once_with(Path("/rootfs"), "Arch")
 
     def test_shelly_does_not_depend_on_yay_being_selected(self) -> None:
         with (
             mock.patch.object(arch.subprocess, "run"),
             mock.patch.object(arch, "_install_aur_package") as install,
+            mock.patch.object(arch, "mounted_rootfs"),
         ):
             arch.DISTRIBUTION.bootstrap(
                 {"id": "arch", "options": ["shelly"]},
@@ -387,16 +418,19 @@ class DistributionDriverTests(unittest.TestCase):
             self.assertFalse((rootfs / "home" / arch.BUILDER).exists())
 
         self.assertTrue(
-            all(command[:2] == ["arch-chroot", "-S"] for command in commands)
+            all(command[0] == "arch-chroot" for command in commands)
         )
-        self.assertEqual(commands[1][0:4], ["arch-chroot", "-S", "-u", arch.BUILDER])
+        self.assertTrue(all("-S" not in command for command in commands))
+        self.assertEqual(commands[1][0:3], ["arch-chroot", "-u", arch.BUILDER])
         self.assertIn("/usr/bin/mkdir", commands[1])
-        self.assertEqual(commands[3][0:4], ["arch-chroot", "-S", "-u", arch.BUILDER])
+        self.assertEqual(commands[3][0:3], ["arch-chroot", "-u", arch.BUILDER])
+        self.assertIn("HOME=/home/spaces-build", commands[3])
         self.assertIn("TMPDIR=/home/spaces-build/.tmp", commands[3])
         self.assertIn("PKGDEST=/home/spaces-build/packages", commands[3])
         self.assertIn("/usr/bin/git", commands[3])
         self.assertIn(arch.AUR_REPOSITORIES["shelly"], commands[3])
-        self.assertEqual(commands[4][0:4], ["arch-chroot", "-S", "-u", arch.BUILDER])
+        self.assertEqual(commands[4][0:3], ["arch-chroot", "-u", arch.BUILDER])
+        self.assertIn("HOME=/home/spaces-build", commands[4])
         self.assertIn("/usr/bin/makepkg", commands[4])
         self.assertIn("--syncdeps", commands[4])
         self.assertIn("--rmdeps", commands[4])

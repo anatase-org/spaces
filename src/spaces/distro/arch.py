@@ -9,6 +9,7 @@ from typing import Any, Mapping
 
 from .. import _
 from .model import Distribution, DistributionError
+from .mounts import mounted_rootfs
 from .pam import (
     atomic_write,
     reconcile_managed_pam_file,
@@ -84,7 +85,7 @@ def _arch_chroot(
     *arguments: str,
     user: str | None = None,
 ) -> None:
-    command = ["arch-chroot", "-S"]
+    command = ["arch-chroot"]
     if user is not None:
         command.extend(["-u", user])
     subprocess.run([*command, str(rootfs), *arguments], check=True)
@@ -95,7 +96,7 @@ def _arch_chroot_output(
     *arguments: str,
     user: str | None = None,
 ) -> str:
-    command = ["arch-chroot", "-S"]
+    command = ["arch-chroot"]
     if user is not None:
         command.extend(["-u", user])
     completed = subprocess.run(
@@ -119,6 +120,7 @@ def _install_aur_package(
     sudoers = rootfs / AUR_SUDOERS_DROP_IN
     build_environment = (
         "/usr/bin/env",
+        f"HOME={home}",
         f"TMPDIR={temporary}",
         f"PKGDEST={package_directory}",
     )
@@ -205,10 +207,8 @@ def _install_aur_package(
                 "/usr/bin/pacman",
                 "--query",
                 "--file",
-                "--print-format",
-                "%n",
                 guest_path,
-            ).strip()
+            ).split(maxsplit=1)[0]
             if built_package == package:
                 matching_packages.append(guest_path)
         if len(matching_packages) != 1:
@@ -276,28 +276,33 @@ class ArchDistribution(Distribution):
         print(_("Bootstrapping Arch Linux..."), flush=True)
         subprocess.run(self.command(metadata, rootfs), check=True)
         options = metadata["options"]
-        for package in options:
-            package_name = AUR_PACKAGE_NAMES[package]
-            print(
-                _(
-                    "Building {package} from the AUR...",
-                    package=package_name,
-                ),
-                flush=True,
-            )
-            try:
-                _install_aur_package(
-                    rootfs,
-                    package,
-                    AUR_REPOSITORIES[package],
-                )
-            except (OSError, subprocess.CalledProcessError) as error:
-                raise DistributionError(
-                    _(
-                        "Could not build {package}.",
-                        package=package_name,
+        if options:
+            with mounted_rootfs(rootfs, "Arch"):
+                for package in options:
+                    package_name = AUR_PACKAGE_NAMES[package]
+                    print(
+                        _(
+                            "Building {package} from the AUR...",
+                            package=package_name,
+                        ),
+                        flush=True,
                     )
-                ) from error
+                    try:
+                        _install_aur_package(
+                            rootfs,
+                            package,
+                            AUR_REPOSITORIES[package],
+                        )
+                    except (
+                        OSError,
+                        subprocess.CalledProcessError,
+                    ) as error:
+                        raise DistributionError(
+                            _(
+                                "Could not build {package}.",
+                                package=package_name,
+                            )
+                        ) from error
 
     def reconcile_host_authentication(
         self,
