@@ -87,25 +87,34 @@ podman run --rm \
             -ba /work/rpmbuild/SPECS/spaces.spec
     '
 
-mapfile -t rpm_candidates < <(
+mapfile -t spaces_rpm_candidates < <(
     find "$build_dir/rpmbuild/RPMS" -type f \
         -name 'spaces-*.rpm' \
+        ! -name 'spaces-selinux-*' \
         ! -name 'spaces-debuginfo-*' \
         ! -name 'spaces-debugsource-*'
 )
+mapfile -t selinux_rpm_candidates < <(
+    find "$build_dir/rpmbuild/RPMS" -type f \
+        -name 'spaces-selinux-*.rpm'
+)
 
-(( ${#rpm_candidates[@]} == 1 )) ||
-    die "expected exactly one installable Spaces RPM"
+(( ${#spaces_rpm_candidates[@]} == 1 )) ||
+    die "expected exactly one Spaces application RPM"
+(( ${#selinux_rpm_candidates[@]} == 1 )) ||
+    die "expected exactly one Spaces SELinux policy RPM"
 
-rpm_path=${rpm_candidates[0]}
-rpm_name=${rpm_path##*/}
+spaces_rpm_path=${spaces_rpm_candidates[0]}
+spaces_rpm_name=${spaces_rpm_path##*/}
+selinux_rpm_path=${selinux_rpm_candidates[0]}
+selinux_rpm_name=${selinux_rpm_path##*/}
 
-echo "Copying $rpm_name to $remote_host:~/..."
-scp "$rpm_path" "$remote_host:"
+echo "Copying $spaces_rpm_name and $selinux_rpm_name to $remote_host:~/..."
+scp "$spaces_rpm_path" "$selinux_rpm_path" "$remote_host:"
 
-echo "Installing $rpm_name on $remote_host..."
+echo "Installing $spaces_rpm_name and $selinux_rpm_name on $remote_host..."
 ssh -t "$remote_host" "sudo rpm-ostree usroverlay || true
-sudo dnf5 install -y ~/$rpm_name &&
+sudo dnf5 install -y ~/$spaces_rpm_name ~/$selinux_rpm_name &&
 sudo systemctl try-reload-or-restart polkit.service &&
 sudo systemctl stop 'spaces@*'"
 

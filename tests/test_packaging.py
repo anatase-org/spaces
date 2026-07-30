@@ -38,6 +38,42 @@ class PackagingTests(unittest.TestCase):
             "awk '$1 == \"Version:\" { print $2; exit }' spaces.spec",
             sync,
         )
+        self.assertIn("-name 'spaces-selinux-*.rpm'", sync)
+        self.assertIn(
+            'scp "$spaces_rpm_path" "$selinux_rpm_path" "$remote_host:"',
+            sync,
+        )
+        self.assertIn(
+            "~/$spaces_rpm_name ~/$selinux_rpm_name",
+            sync,
+        )
+        for spec in (release_spec, git_spec):
+            self.assertIn(
+                "Requires:       %{name}-selinux = "
+                "%{version}-%{release}",
+                spec,
+            )
+            self.assertIn("%package selinux", spec)
+            self.assertIn("BuildArch:      noarch", spec)
+            self.assertIn("Requires:       container-selinux", spec)
+            self.assertIn("Requires:       selinux-policy-targeted", spec)
+            self.assertIn("%description selinux", spec)
+
+            main_post = spec.split("%post\n", 1)[1].split("%preun", 1)[0]
+            self.assertNotIn("%selinux_modules_install", main_post)
+            policy_post = spec.split("%post selinux\n", 1)[1].split(
+                "%postun selinux",
+                1,
+            )[0]
+            self.assertIn("%selinux_modules_install", policy_post)
+
+            main_files = spec.split("%files\n", 1)[1].split(
+                "%files selinux",
+                1,
+            )[0]
+            self.assertNotIn("selinux/packages/spaces.pp", main_files)
+            policy_files = spec.split("%files selinux\n", 1)[1]
+            self.assertIn("selinux/packages/spaces.pp", policy_files)
 
     def test_console_scripts_and_package_data(self) -> None:
         project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
@@ -602,8 +638,9 @@ class PackagingTests(unittest.TestCase):
         self,
     ) -> None:
         spec = (ROOT / "spaces.spec").read_text(encoding="utf-8")
+        main_package = spec.split("%package selinux", 1)[0]
         self.assertIn("ExclusiveArch:  x86_64 aarch64", spec)
-        self.assertNotIn("BuildArch:      noarch", spec)
+        self.assertNotIn("BuildArch:      noarch", main_package)
         self.assertIn("%make_build -C native", spec)
         self.assertIn("%{_sysconfdir}/pam.d/spaces", spec)
         self.assertIn("%{_datadir}/spaces/pam/spaces.ubuntu", spec)

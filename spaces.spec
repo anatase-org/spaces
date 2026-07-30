@@ -36,12 +36,22 @@ Requires:       systemd
 Requires:       systemd-container
 Requires:       glib2
 Requires:       xdg-dbus-proxy
-Requires:       container-selinux
-Requires(post): policycoreutils
-Requires(postun): policycoreutils
+Requires:       %{name}-selinux = %{version}-%{release}
 
 %description
 Spaces provide a chroot-like sandboxing environment for you to access your favorite distributions: Arch, Fedora, Kali, and Ubuntu. A simple permission system ensures your local files and credentials remain secure, even if your space is compromised. Spaces are constructed directly using packages from your chosen distribution repositories with signature enforcement. No container middleman or surprises.
+
+%package selinux
+Summary:        SELinux policy for Spaces
+BuildArch:      noarch
+Requires:       container-selinux
+Requires:       selinux-policy-targeted
+Requires(post): policycoreutils
+Requires(postun): policycoreutils
+
+%description selinux
+SELinux policy for Spaces. This package can remain installed on images that
+do not include the Spaces application.
 
 %prep
 %autosetup -n %{name}-%{version}
@@ -71,12 +81,6 @@ for distro in arch fedora ubuntu; do
 done
 
 %post
-%selinux_modules_install %{_datadir}/selinux/packages/spaces.pp
-restorecon -RF %{_bindir}/spaces.priv %{_localstatedir}/lib/spaces \
-  /usr/lib/spaces/guest %{_datadir}/spaces/portal %{_rundir}/spaces \
-  %{_prefix}/local/share/applications/spaces \
-  2>/dev/null || :
-restorecon -F /home/*/.ssh/config /root/.ssh/config 2>/dev/null || :
 %systemd_post spaces@.service
 %systemd_user_post spaces@.service
 
@@ -87,6 +91,16 @@ restorecon -F /home/*/.ssh/config /root/.ssh/config 2>/dev/null || :
 %postun
 %systemd_postun_with_restart spaces@.service
 %systemd_user_postun_with_restart spaces@.service
+
+%post selinux
+%selinux_modules_install %{_datadir}/selinux/packages/spaces.pp
+restorecon -RF %{_bindir}/spaces.priv %{_localstatedir}/lib/spaces \
+  /usr/lib/spaces/guest %{_datadir}/spaces/portal %{_rundir}/spaces \
+  %{_prefix}/local/share/applications/spaces \
+  2>/dev/null || :
+restorecon -F /home/*/.ssh/config /root/.ssh/config 2>/dev/null || :
+
+%postun selinux
 %selinux_modules_uninstall spaces
 if [ $1 -eq 0 ]; then
   restorecon -F /home/*/.ssh/config /root/.ssh/config 2>/dev/null || :
@@ -98,7 +112,6 @@ fi
 %{_bindir}/%{name}*
 %{python3_sitelib}/%{name}*
 %{_datadir}/polkit-1/actions/org.anatase.spaces.policy
-%{_datadir}/selinux/packages/spaces.pp
 %dir %{_datadir}/spaces
 %dir %{_datadir}/spaces/pam
 %{_datadir}/spaces/pam/spaces.common-auth
@@ -127,3 +140,7 @@ fi
 %dir %{_prefix}/local/share/applications/spaces
 %{_unitdir}/spaces@.service
 %{_userunitdir}/spaces@.service
+
+%files selinux
+%license LICENSE
+%{_datadir}/selinux/packages/spaces.pp

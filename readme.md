@@ -54,7 +54,7 @@ It is not possible to mount SSH or GPG directories from the host into the space.
 
 ### SELinux
 
-Fedora packages install the SELinux policy and file labels automatically. The host service runs as `spaces_t`, guests run as `spaces_container_t`, persistent files use `spaces_file_t`, and runtime files use `spaces_var_run_t` or `spaces_apifs_file_t`. Labels can be repaired while spaces are running:
+Fedora packages install the `spaces-selinux` policy package and file labels automatically. The policy package can also be installed independently on images that do not contain the Spaces application. The host service runs as `spaces_t`, guests run as `spaces_container_t`, persistent files use `spaces_file_t`, and runtime files use `spaces_var_run_t` or `spaces_apifs_file_t`. Labels can be repaired while spaces are running:
 
 ```bash
 sudo restorecon -RF /var/lib/spaces
