@@ -159,7 +159,8 @@ allow spaces_container_t spaces_file_t:{ file dir } mounton;
 allow spaces_container_t spaces_file_t:filesystem { mount remount unmount };
 
 # The guest systemd manages units within the cgroup subtree delegated by the
-# host service.
+# host service. Nested container runtimes also mount that delegated cgroup
+# filesystem in their own mount namespaces.
 fs_manage_cgroup_dirs(spaces_container_t)
 fs_manage_cgroup_files(spaces_container_t)
 fs_remount_cgroup(spaces_container_t)
@@ -219,8 +220,9 @@ gen_require(`
 	type tun_tap_device_t;
 	type vhost_device_t;
 ')
+allow spaces_container_t cgroup_t:filesystem mount;
 allow spaces_container_t cgroup_t:file mounton;
-allow spaces_container_t devpts_t:chr_file mounton;
+allow spaces_container_t devpts_t:chr_file { mounton open };
 allow spaces_container_t device_t:filesystem { remount unmount };
 # Newer container-selinux releases give some nspawn runtime tmpfs mounts a
 # dedicated type.  Guest systemd must be able to populate those mounts.

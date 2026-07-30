@@ -257,6 +257,10 @@ class PackagingTests(unittest.TestCase):
             type_enforcement,
         )
         self.assertIn(
+            "allow spaces_container_t cgroup_t:filesystem mount;",
+            type_enforcement,
+        )
+        self.assertIn(
             "dev_mount_sysfs_fs(spaces_container_t)",
             type_enforcement,
         )
@@ -269,7 +273,7 @@ class PackagingTests(unittest.TestCase):
             type_enforcement,
         )
         self.assertIn(
-            "allow spaces_container_t devpts_t:chr_file mounton;",
+            "allow spaces_container_t devpts_t:chr_file { mounton open };",
             type_enforcement,
         )
         self.assertIn(
