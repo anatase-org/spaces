@@ -233,8 +233,21 @@ allow spaces_container_t spaces_t:unix_stream_socket connectto;
 # interactive or command shell.
 gen_require(`
 	type systemd_machined_t;
+	attribute user_home_type;
 ')
 allow systemd_machined_t spaces_apifs_file_t:chr_file rw_chr_file_perms;
-allow systemd_machined_t spaces_file_t:dir mounton;
+create_dirs_pattern(
+	systemd_machined_t,
+	spaces_apifs_file_t,
+	spaces_apifs_file_t
+)
+create_files_pattern(
+	systemd_machined_t,
+	spaces_apifs_file_t,
+	spaces_apifs_file_t
+)
+allow systemd_machined_t spaces_apifs_file_t:{ file dir } mounton;
+allow systemd_machined_t spaces_file_t:{ file dir } mounton;
+allow systemd_machined_t user_home_type:file getattr;
+allow systemd_machined_t spaces_var_run_t:{ dir file sock_file } getattr;
 userdom_search_user_home_content(systemd_machined_t)
-userdom_dontaudit_getattr_user_home_content(systemd_machined_t)

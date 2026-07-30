@@ -132,6 +132,43 @@ class PackagingTests(unittest.TestCase):
         self.assertTrue((ROOT / "selinux" / "spaces.te").is_file())
         self.assertTrue((ROOT / "selinux" / "spaces.fc").is_file())
         self.assertTrue((ROOT / "selinux" / "spaces.if").is_file())
+        type_enforcement = (ROOT / "selinux" / "spaces.te").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "allow systemd_machined_t spaces_file_t:{ file dir } mounton;",
+            type_enforcement,
+        )
+        self.assertIn(
+            "allow systemd_machined_t "
+            "spaces_apifs_file_t:{ file dir } mounton;",
+            type_enforcement,
+        )
+        self.assertIn(
+            "create_dirs_pattern(\n"
+            "\tsystemd_machined_t,\n"
+            "\tspaces_apifs_file_t,\n"
+            "\tspaces_apifs_file_t\n"
+            ")",
+            type_enforcement,
+        )
+        self.assertIn(
+            "create_files_pattern(\n"
+            "\tsystemd_machined_t,\n"
+            "\tspaces_apifs_file_t,\n"
+            "\tspaces_apifs_file_t\n"
+            ")",
+            type_enforcement,
+        )
+        self.assertIn(
+            "allow systemd_machined_t user_home_type:file getattr;",
+            type_enforcement,
+        )
+        self.assertIn(
+            "allow systemd_machined_t "
+            "spaces_var_run_t:{ dir file sock_file } getattr;",
+            type_enforcement,
+        )
         file_contexts = (ROOT / "selinux" / "spaces.fc").read_text(
             encoding="utf-8"
         )
