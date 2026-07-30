@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -66,6 +67,27 @@ class ShortcutExportTests(unittest.TestCase):
         )
         path.parent.mkdir(parents=True, exist_ok=True)
         Image.new("RGBA", (128, 128), (20, 40, 220, 255)).save(path)
+        return path
+
+    def add_svg_icon(self, name: str) -> Path:
+        path = (
+            self.rootfs
+            / "usr"
+            / "share"
+            / "icons"
+            / "hicolor"
+            / "scalable"
+            / "apps"
+            / f"{name}.svg"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            '<svg xmlns="http://www.w3.org/2000/svg" '
+            'viewBox="0 0 128 128">'
+            '<rect width="128" height="128" fill="#143cdc"/>'
+            "</svg>",
+            encoding="utf-8",
+        )
         return path
 
     def test_recursive_export_rewrites_and_sanitizes_entries(self) -> None:
@@ -194,6 +216,39 @@ class ShortcutExportTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn(f"Icon={icon}\n", desktop)
+
+    def test_themed_svg_icon_name_is_rasterized(self) -> None:
+        (self.system / "org.gnome.Software.desktop").write_text(
+            self.desktop("Software", icon="org.gnome.Software"),
+            encoding="utf-8",
+        )
+        self.add_svg_icon("org.gnome.Software")
+
+        generated = shortcuts.generate(
+            "ubuntu",
+            self.rootfs,
+            "custom",
+            self.output,
+        )
+
+        self.assertEqual(len(generated), 1)
+        shortcut = generated[0]
+        self.assertEqual(
+            shortcut.icon_name,
+            f"{shortcuts.ICON_FILENAME_PREFIX}org.gnome.Software.png",
+        )
+        self.assertIsNotNone(shortcut.icon)
+        assert shortcut.icon is not None
+        with Image.open(io.BytesIO(shortcut.icon)) as icon:
+            self.assertEqual(icon.size, (256, 256))
+            self.assertEqual(icon.getpixel((128, 128)), (20, 60, 220, 255))
+        self.assertIn(
+            (
+                f"Icon={self.output}/spaces/ubuntu-v1/icons/"
+                f"{shortcuts.ICON_FILENAME_PREFIX}org.gnome.Software.png\n"
+            ),
+            shortcut.desktop.decode("utf-8"),
+        )
 
     def test_reconcile_removes_stale_entries_icons_and_versions(self) -> None:
         source = self.system / "editor.desktop"

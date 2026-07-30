@@ -12,6 +12,7 @@ import select
 import shutil
 import stat
 import struct
+import subprocess
 import tempfile
 import threading
 from dataclasses import dataclass
@@ -41,7 +42,11 @@ MAX_DESKTOP_FILE_SIZE = 1024 * 1024
 MAX_ICON_FILE_SIZE = 32 * 1024 * 1024
 MAX_ICON_PIXELS = 16 * 1024 * 1024
 ICON_SIZE = 256
-ICON_EXTENSIONS = frozenset({".png", ".xpm", ".jpg", ".jpeg", ".ico", ".webp", ".bmp"})
+ICON_EXTENSIONS = frozenset(
+    {".png", ".svg", ".xpm", ".jpg", ".jpeg", ".ico", ".webp", ".bmp"}
+)
+SVG_CONVERTER = Path("/usr/bin/rsvg-convert")
+SVG_RENDER_TIMEOUT = 5
 MAIN_KEYS = frozenset(
     {
         "Type",
@@ -312,12 +317,20 @@ def _safe_icon_candidate(rootfs: Path, candidate: Path) -> Path | None:
     return fixed_candidate
 
 
+def _icon_key(value: str) -> str:
+    """Keep reverse-DNS icon names intact while removing real file extensions."""
+    path = Path(value)
+    if path.suffix.casefold() in ICON_EXTENSIONS:
+        return path.stem
+    return path.name
+
+
 def _build_icon_index(
     rootfs: Path,
     values: set[str],
 ) -> dict[str, list[Path]]:
     requested = {
-        Path(value).stem
+        _icon_key(value)
         for value in values
         if value and not value.startswith("/") and "\0" not in value
     }
@@ -365,7 +378,7 @@ def _icon_candidates(
         candidate = _safe_icon_candidate(rootfs, rootfs / value.lstrip("/"))
         return [candidate] if candidate is not None else []
 
-    return index.get(Path(value).stem, [])
+    return index.get(_icon_key(value), [])
 
 
 def _load_icon(
@@ -375,8 +388,37 @@ def _load_icon(
 ) -> Image.Image | None:
     ranked: list[tuple[int, int, Path, Image.Image]] = []
     for candidate in _icon_candidates(rootfs, value, index):
+        suffix = candidate.suffix.casefold()
+        if suffix == ".svg":
+            try:
+                rendered = subprocess.run(
+                    [
+                        SVG_CONVERTER,
+                        "--format=png",
+                        f"--width={ICON_SIZE}",
+                        f"--height={ICON_SIZE}",
+                        "--keep-aspect-ratio",
+                        "--",
+                        candidate,
+                    ],
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    timeout=SVG_RENDER_TIMEOUT,
+                )
+            except (OSError, subprocess.SubprocessError):
+                continue
+            if (
+                rendered.returncode != 0
+                or not rendered.stdout
+                or len(rendered.stdout) > MAX_ICON_FILE_SIZE
+            ):
+                continue
+            stream: Path | io.BytesIO = io.BytesIO(rendered.stdout)
+        else:
+            stream = candidate
         try:
-            with Image.open(candidate) as source:
+            with Image.open(stream) as source:
                 width, height = source.size
                 pixels = width * height
                 if width <= 0 or height <= 0 or pixels > MAX_ICON_PIXELS:
@@ -390,7 +432,7 @@ def _load_icon(
             Image.DecompressionBombError,
         ):
             continue
-        preference = 1 if candidate.suffix.casefold() == ".png" else 0
+        preference = 2 if suffix == ".svg" else (1 if suffix == ".png" else 0)
         ranked.append((preference, pixels, candidate, image))
     if not ranked:
         return None

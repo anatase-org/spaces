@@ -12,6 +12,7 @@ depends=(
   'python-pillow'
   'python-rich'
   'python-textual'
+  'librsvg'
   'polkit'
   'pam'
   'debootstrap'

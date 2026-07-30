@@ -26,6 +26,7 @@ Requires:       python3
 Requires:       python3-pillow
 Requires:       python3-rich
 Requires:       python3-textual
+Requires:       librsvg2-tools
 Requires:       polkit
 Requires:       pam
 Requires:       debootstrap

@@ -356,6 +356,7 @@ class PackagingTests(unittest.TestCase):
         )
         self.assertIn("'python-textual'", pkgbuild)
         self.assertIn("'python-pillow'", pkgbuild)
+        self.assertIn("'librsvg'", pkgbuild)
         self.assertNotIn("'ubuntu-keyring'", pkgbuild)
         self.assertIn("'debootstrap'", pkgbuild)
         self.assertIn("'dnf5'", pkgbuild)
@@ -506,6 +507,7 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("Requires:       glib2", spec)
         self.assertIn("Requires:       xdg-dbus-proxy", spec)
         self.assertIn("Requires:       python3-pillow", spec)
+        self.assertIn("Requires:       librsvg2-tools", spec)
         self.assertIn("BuildRequires:  glib2-devel", spec)
         self.assertTrue(
             (ROOT / "native" / "spaces_session_launcher.c").exists()
