@@ -41,6 +41,7 @@ SYSTEMD_UMOUNT = "/usr/bin/systemd-umount"
 BUSCTL = "/usr/bin/busctl"
 API_VFS_WRITABLE = "SYSTEMD_NSPAWN_API_VFS_WRITABLE"
 SELINUXFS = Path("/sys/fs/selinux")
+SELINUX_GUEST_PATH = Path("/sys/fs/selinux")
 SELINUX_POLICY_PACKAGE = Path("/usr/share/selinux/packages/spaces.pp")
 SELINUX_PROCESS_CONTEXT = "system_u:system_r:spaces_container_t:s0"
 SELINUX_APIFS_CONTEXT = "system_u:object_r:spaces_apifs_file_t:s0"
@@ -1786,10 +1787,11 @@ def _device_bind_arguments(
 
 
 def _selinux_arguments() -> tuple[str, ...]:
-    """Select the packaged SELinux labels when its policy is available."""
+    """Hide host SELinux state and select labels when SELinux is active."""
 
     if not (SELINUXFS / "enforce").is_file():
         return ()
+    mask = f"--inaccessible={SELINUX_GUEST_PATH}"
     if not SELINUX_POLICY_PACKAGE.is_file():
         logger.warning(
             _(
@@ -1797,8 +1799,9 @@ def _selinux_arguments() -> tuple[str, ...]:
                 "missing; launching without an explicit container context."
             )
         )
-        return ()
+        return (mask,)
     return (
+        mask,
         f"--selinux-context={SELINUX_PROCESS_CONTEXT}",
         f"--selinux-apifs-context={SELINUX_APIFS_CONTEXT}",
     )
@@ -1839,7 +1842,6 @@ def _command(
         "--settings=no",
         "--notify-ready=yes",
         "--resolv-conf=bind-host",
-        "--inaccessible=/sys/fs/selinux",
         *_selinux_arguments(),
         *(
             ("--system-call-filter=perf_event_open",)
