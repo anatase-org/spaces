@@ -337,8 +337,7 @@ def discover(
                 if (
                     not (parent_path / name).is_symlink()
                     and not (
-                        level == "full"
-                        and parent_path == device_root
+                        parent_path == device_root
                         and name in NSPAWN_MANAGED_DIRECTORIES
                     )
                 )
@@ -370,6 +369,8 @@ def discover(
                 except ValueError:
                     continue
                 destination = PurePosixPath("/dev", *relative.parts)
+                if destination in NSPAWN_MANAGED_DEVICES:
+                    continue
                 if level != "full":
                     assert metadata_reader is not None
                     metadata = metadata_reader(kind, metadata_stat.st_rdev)
@@ -387,8 +388,6 @@ def discover(
                         )
                     ):
                         continue
-                elif destination in NSPAWN_MANAGED_DEVICES:
-                    continue
                 nodes.append(
                     DeviceNode(
                         destination=destination,

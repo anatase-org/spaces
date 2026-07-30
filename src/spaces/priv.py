@@ -633,13 +633,16 @@ def main(argv: list[str] | None = None) -> int:
         print(_("Invalid JSON payload: {error}", error=error), file=sys.stderr)
         return 2
     except subprocess.CalledProcessError as error:
-        print(
-            _(
+        if arguments.command == "configure":
+            message = _(
+                "Configuration saved but restarting the space failed."
+            )
+        else:
+            message = _(
                 "Creation failed; any partial bootstrap was moved to "
                 "rootfs.fail and info.json was preserved."
-            ),
-            file=sys.stderr,
-        )
+            )
+        print(message, file=sys.stderr)
         return error.returncode or 1
     except (core.SpacesError, OSError) as error:
         print(_("spaces.priv: {error}", error=error), file=sys.stderr)

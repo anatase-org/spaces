@@ -260,6 +260,20 @@ class DeviceDiscoveryTests(unittest.TestCase):
             },
         )
 
+    def test_admin_leaves_nspawn_api_devices_managed(self) -> None:
+        definitions = {
+            "console": ("c", 5, 1, 0, metadata()),
+            "pts/7": ("c", 136, 7, 100, metadata()),
+            "unclassifiable": ("c", 240, 0, 100, metadata()),
+        }
+
+        found = {
+            str(item.destination)
+            for item in self._discover("admin", definitions)
+        }
+
+        self.assertEqual(found, {"/dev/unclassifiable"})
+
     def test_full_includes_security_and_storage_but_leaves_api_dev_managed(
         self,
     ) -> None:

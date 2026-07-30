@@ -489,6 +489,29 @@ class PrivilegedTests(unittest.TestCase):
             "Exiting due to Ctrl+C", file=priv.sys.stderr
         )
 
+    def test_configure_service_failure_does_not_claim_rootfs_was_moved(
+        self,
+    ) -> None:
+        error = subprocess.CalledProcessError(
+            5,
+            [
+                "/usr/bin/systemctl",
+                "try-restart",
+                "spaces@ubuntu.service",
+            ],
+        )
+        with (
+            mock.patch.object(priv.os, "geteuid", return_value=0),
+            mock.patch.object(priv, "configure", side_effect=error),
+            mock.patch.object(priv, "print") as print_output,
+        ):
+            self.assertEqual(priv.main(["configure", "{}"]), 5)
+
+        print_output.assert_called_once_with(
+            "Configuration saved but restarting the space failed.",
+            file=priv.sys.stderr,
+        )
+
     def test_configure_merges_user_and_system(self) -> None:
         with mock.patch.object(ubuntu.subprocess, "run"):
             priv.create(self.info)
