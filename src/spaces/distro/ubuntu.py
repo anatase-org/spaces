@@ -90,6 +90,37 @@ def _configure_apt_sources(rootfs: Path, release: str) -> None:
     )
 
 
+def _available_additional_packages(
+    rootfs: Path,
+    packages: Sequence[str],
+) -> tuple[str, ...]:
+    available: list[str] = []
+    for package in packages:
+        result = subprocess.run(
+            chroot_command(
+                rootfs,
+                "apt-cache",
+                "show",
+                "--no-all-versions",
+                package,
+            ),
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if result.returncode == 0:
+            available.append(package)
+        else:
+            print(
+                _(
+                    "Skipping unavailable Ubuntu package: {package}",
+                    package=package,
+                ),
+                flush=True,
+            )
+    return tuple(available)
+
+
 class UbuntuDistribution(Distribution):
     def describe(self, metadata: Mapping[str, Any]) -> str:
         self.validate(metadata)
@@ -117,11 +148,6 @@ class UbuntuDistribution(Distribution):
         additional_packages: Sequence[str] = (),
     ) -> None:
         version = str(metadata["version"])
-        packages = (
-            *PACKAGES,
-            *SECRET_PACKAGES[version],
-            *additional_packages,
-        )
         print(
             _(
                 "Bootstrapping Ubuntu {version}...",
@@ -135,6 +161,11 @@ class UbuntuDistribution(Distribution):
             subprocess.run(
                 chroot_command(rootfs, "apt-get", "update"),
                 check=True,
+            )
+            packages = (
+                *PACKAGES,
+                *SECRET_PACKAGES[version],
+                *_available_additional_packages(rootfs, additional_packages),
             )
             print(
                 _(

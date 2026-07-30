@@ -184,6 +184,51 @@ class DistributionDriverTests(unittest.TestCase):
             ],
         )
 
+    def test_ubuntu_skips_unavailable_configured_packages(self) -> None:
+        metadata = {"id": "ubuntu", "version": "noble"}
+        with tempfile.TemporaryDirectory() as temporary:
+            rootfs = Path(temporary) / "rootfs"
+            rootfs.mkdir()
+            commands: list[list[str]] = []
+
+            def run(
+                command: list[str],
+                **_kwargs: object,
+            ) -> subprocess.CompletedProcess:
+                commands.append(command)
+                return subprocess.CompletedProcess(
+                    command,
+                    1
+                    if "apt-cache" in command and command[-1] == "fastfetch"
+                    else 0,
+                )
+
+            with mock.patch.object(ubuntu.subprocess, "run", side_effect=run):
+                ubuntu.DISTRIBUTION.bootstrap(
+                    metadata,
+                    rootfs,
+                    ("fastfetch", "screen"),
+                )
+
+        package_checks = [
+            command
+            for command in commands
+            if "apt-cache" in command
+        ]
+        self.assertEqual(
+            [command[-1] for command in package_checks],
+            ["fastfetch", "screen"],
+        )
+        install = next(
+            command
+            for command in commands
+            if "apt-get" in command and "install" in command
+        )
+        self.assertNotIn("fastfetch", install)
+        self.assertIn("screen", install)
+        self.assertTrue(set(ubuntu.PACKAGES).issubset(install))
+        self.assertTrue(set(ubuntu.SECRET_PACKAGES["noble"]).issubset(install))
+
     def test_fedora_bootstrap_uses_driver_command(self) -> None:
         metadata = {"id": "fedora", "version": "44"}
         with tempfile.TemporaryDirectory() as temporary:
