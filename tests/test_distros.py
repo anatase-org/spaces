@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -180,9 +181,41 @@ class DistributionDriverTests(unittest.TestCase):
                 ["umount", str(rootfs / "proc")],
             ],
         )
-        self.assertTrue(
-            all(call.kwargs == {"check": True} for call in run.call_args_list)
+        self.assertEqual(
+            Path(run.call_args_list[2].kwargs["env"]["XDG_CONFIG_HOME"]).parent,
+            rootfs,
         )
+        self.assertTrue(run.call_args_list[2].kwargs["check"])
+        self.assertTrue(all(
+            call.kwargs == {"check": True}
+            for index, call in enumerate(run.call_args_list)
+            if index != 2
+        ))
+
+    def test_fedora_rpm_environment_uses_guest_database_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            rootfs = Path(temporary) / "rootfs"
+            rootfs.mkdir()
+            with fedora._rpm_environment(rootfs) as environment:
+                config = Path(environment["XDG_CONFIG_HOME"])
+                self.assertEqual(config.parent, rootfs)
+                self.assertEqual(
+                    (config / "rpm/macros").read_text(encoding="utf-8"),
+                    "%_dbpath /usr/lib/sysimage/rpm\n",
+                )
+                self.assertEqual(
+                    {
+                        key: value
+                        for key, value in environment.items()
+                        if key != "XDG_CONFIG_HOME"
+                    },
+                    {
+                        key: value
+                        for key, value in os.environ.items()
+                        if key != "XDG_CONFIG_HOME"
+                    },
+                )
+            self.assertFalse(config.exists())
 
     def test_fedora_bootstrap_unmounts_api_filesystems_after_failure(self) -> None:
         metadata = {"id": "fedora", "version": "44"}
@@ -191,9 +224,15 @@ class DistributionDriverTests(unittest.TestCase):
             rootfs.mkdir()
             commands: list[list[str]] = []
 
-            def run(command: list[str], *, check: bool) -> subprocess.CompletedProcess:
+            def run(
+                command: list[str],
+                *,
+                check: bool,
+                env: dict[str, str] | None = None,
+            ) -> subprocess.CompletedProcess:
                 commands.append(command)
                 if command[0] == "dnf5":
+                    self.assertIsNotNone(env)
                     raise subprocess.CalledProcessError(1, command)
                 return subprocess.CompletedProcess(command, 0)
 

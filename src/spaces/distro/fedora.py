@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterator, Mapping
 
 from .. import _
 from .model import Distribution, DistributionError
@@ -43,9 +46,30 @@ PACKAGES = (
 )
 RELEASES = {"44": _("44")}
 HOST_REPOSITORY_DIRECTORY = Path("/usr/share/spaces/repos")
+RPM_DATABASE_DIRECTORY = Path("/usr/lib/sysimage/rpm")
 AUTHSELECT_STATE = Path("var/lib/spaces/fedora-authselect.json")
 AUTHSELECT_PROFILE = Path("etc/authselect/custom/spaces")
 AUTHSELECT_FILES = ("system-auth", "password-auth")
+
+
+@contextlib.contextmanager
+def _rpm_environment(rootfs: Path) -> Iterator[dict[str, str]]:
+    """Override host RPM macros with Fedora's database location."""
+
+    with tempfile.TemporaryDirectory(
+        prefix=".spaces-rpm-config.",
+        dir=rootfs,
+    ) as temporary:
+        config = Path(temporary)
+        rpm_config = config / "rpm"
+        rpm_config.mkdir(mode=0o700)
+        (rpm_config / "macros").write_text(
+            f"%_dbpath {RPM_DATABASE_DIRECTORY}\n",
+            encoding="utf-8",
+        )
+        environment = os.environ.copy()
+        environment["XDG_CONFIG_HOME"] = str(config)
+        yield environment
 
 
 def _authselect(rootfs: Path, *arguments: str, capture: bool = False) -> str:
@@ -212,7 +236,12 @@ class FedoraDistribution(Distribution):
         )
         with mounted_api_filesystems(rootfs, "Fedora"):
             with hidden_selinuxfs():
-                subprocess.run(self.command(metadata, rootfs), check=True)
+                with _rpm_environment(rootfs) as environment:
+                    subprocess.run(
+                        self.command(metadata, rootfs),
+                        check=True,
+                        env=environment,
+                    )
 
     def reconcile_host_authentication(
         self,
