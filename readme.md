@@ -50,7 +50,7 @@ Spaces is a small daemon that escalates using polkits. The root inside spaces is
 
 Spaces only mounts users that have executed `spaces configure --user <space>` or were the ones to create the space and only after they log in. The root inside spaces is the same root as the host. This was chosen because user namespaces cannot do certain actions such as modify the host network (would need a bridge and would not be able to open ports) or change kernel settings. Even though the default priviledge level of spaces disallows these actions, a key requirement in design was making spaces able to change permissions without recreating them. However, this also means that spaces can be victim to a class of security issues such as improper mounts, kernel bugs, or other sandboxing holes that can cause the root inside the space to escape.
 
-It is not possible to mount SSH or GPG directories from the host into the space. This is blocked through both not supporting mounting the whole home directory and with SELinux as a second layer (if your host supports it). Only agent forwarding is supported.
+It is not possible to mount SSH or GPG directories from the host into the space. Spaces can mount `~/.ssh/config`, but it does not expose private keys; use agent forwarding for authentication. The SSH config and selected top-level home files are mounted read-write.
 
 ### SELinux
 
@@ -58,6 +58,7 @@ Fedora packages install the SELinux policy and file labels automatically. The ho
 
 ```bash
 sudo restorecon -RF /var/lib/spaces
+restorecon -F ~/.ssh/config
 ```
 
 ## Contributing

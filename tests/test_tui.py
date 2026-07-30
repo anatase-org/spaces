@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -22,6 +23,26 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
     def test_permission_form_uses_textual_4_theme_variables(self) -> None:
         self.assertNotIn("$ansi-foreground", PermissionForm.CSS)
         self.assertIn("color: $foreground;", PermissionForm.CSS)
+
+    def test_home_files_are_listed_below_folders(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            (home / "notes.txt").touch()
+            app = PermissionForm(
+                home=home,
+                folders=["notes.txt", ".bashrc", "Documents", "Projects"],
+                network="basic",
+                selected_home=[".bashrc", "Projects"],
+                include_system=False,
+                distribution_title="",
+                distribution_description="",
+                distribution_options=[],
+                distribution_value=None,
+            )
+            self.assertEqual(
+                app.folders,
+                ["Projects", "Documents", ".bashrc", "notes.txt"],
+            )
 
     async def test_initial_values_and_step_progress(self) -> None:
         app = PermissionForm(

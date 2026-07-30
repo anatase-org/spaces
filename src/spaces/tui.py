@@ -26,6 +26,7 @@ from textual.widgets.selection_list import Selection
 
 from . import _
 from .core import (
+    DEFAULT_HOME_FILES,
     DEFAULT_HOME_FOLDERS,
     DEVICE_LEVELS,
     KERNEL_CAPABILITY_LEVELS,
@@ -385,15 +386,33 @@ class PermissionForm(
         self.initial_administrator = administrator
         self.initial_desktop = desktop
         self.administrator_group = administrator_group
-        selected_folders = [
-            folder
-            for folder in (*DEFAULT_HOME_FOLDERS, *selected_home)
-            if folder in self.initial_home and folder in folders
-        ]
-        selected_folders = list(dict.fromkeys(selected_folders))
+        file_names = {
+            name
+            for name in folders
+            if name in DEFAULT_HOME_FILES
+            or (
+                (home / name).is_file()
+                and not (home / name).is_symlink()
+            )
+        }
+
+        def ordered(entries: list[str], defaults: tuple[str, ...]) -> list[str]:
+            selected = [
+                entry
+                for entry in (*defaults, *selected_home)
+                if entry in self.initial_home and entry in entries
+            ]
+            selected = list(dict.fromkeys(selected))
+            return [
+                *selected,
+                *[entry for entry in entries if entry not in self.initial_home],
+            ]
+
+        directories = [name for name in folders if name not in file_names]
+        files = [name for name in folders if name in file_names]
         self.folders = [
-            *selected_folders,
-            *[folder for folder in folders if folder not in self.initial_home],
+            *ordered(directories, DEFAULT_HOME_FOLDERS),
+            *ordered(files, DEFAULT_HOME_FILES),
         ]
         self.include_system = include_system
         self.distribution_title = distribution_title
@@ -548,7 +567,7 @@ class PermissionForm(
             with Vertical(id="user-step", classes="step"):
                 yield Static(
                     _(
-                        "Choose folders from {home} to make available.",
+                        "Choose folders and files from {home} to make available.",
                         home=self.home,
                     ),
                     classes="description",

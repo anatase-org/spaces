@@ -208,10 +208,23 @@ class CoreTests(unittest.TestCase):
             (home / "Documents").mkdir()
             (home / ".ssh").mkdir()
             (home / "file.txt").write_text("not a folder")
+            (home / ".hidden").write_text("hidden file")
             (home / "linked").symlink_to(home / "Documents", target_is_directory=True)
+            (home / "linked-file").symlink_to(home / "file.txt")
             self.assertEqual(
                 core.discover_home_folders(home),
-                ["Documents", "Downloads", "Projects"],
+                [
+                    "Documents",
+                    "Downloads",
+                    "Projects",
+                    ".bash_history",
+                    ".bashrc",
+                    ".hidden",
+                    ".ssh/config",
+                    ".zhistory",
+                    ".zshrc",
+                    "file.txt",
+                ],
             )
 
     def test_new_space_defaults(self) -> None:
@@ -233,7 +246,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(devices, "basic")
         self.assertTrue(host_authentication)
         self.assertTrue(shortcuts)
-        self.assertEqual(selected_home, ["Projects", "Downloads"])
+        self.assertEqual(selected_home, list(core.DEFAULT_HOME_MOUNTS))
         self.assertTrue(administrator)
         self.assertTrue(desktop)
 
@@ -558,6 +571,33 @@ class CoreTests(unittest.TestCase):
             ["Projects"],
         )
         info["permissions"]["users"]["1000"]["permissions"]["home"] = ["../secret"]
+        with self.assertRaises(core.SpacesError):
+            core.validate_info(info)
+
+    def test_hidden_files_and_ssh_config_are_valid_home_permissions(self) -> None:
+        info = core.create_info(
+            "work",
+            {"id": "custom"},
+            core.Identity(1000, 1000, Path("/home/user")),
+            "basic",
+            [".bashrc", ".ssh/config"],
+        )
+        self.assertEqual(
+            info["permissions"]["users"]["1000"]["permissions"]["home"],
+            [".bashrc", ".ssh/config"],
+        )
+
+    def test_other_nested_home_permissions_are_rejected(self) -> None:
+        info = core.create_info(
+            "work",
+            {"id": "custom"},
+            core.Identity(1000, 1000, Path("/home/user")),
+            "basic",
+            [],
+        )
+        info["permissions"]["users"]["1000"]["permissions"]["home"] = [
+            ".ssh/id_ed25519"
+        ]
         with self.assertRaises(core.SpacesError):
             core.validate_info(info)
 

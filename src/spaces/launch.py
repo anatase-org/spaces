@@ -168,7 +168,7 @@ class SpaceUser:
 
 @dataclass(frozen=True, order=True)
 class HomeMount:
-    """One permitted host directory and its destination in the space."""
+    """One permitted host home entry and its destination in the space."""
 
     destination: str
     source: Path
@@ -852,16 +852,42 @@ def _prepare_mounts(users: tuple[SpaceUser, ...]) -> tuple[HomeMount, ...]:
                 source_fd = os.open(
                     source,
                     os.O_PATH
-                    | os.O_DIRECTORY
                     | os.O_NOFOLLOW
                     | os.O_CLOEXEC,
                 )
                 try:
                     source_stat = os.fstat(source_fd)
+                    source_is_directory = stat.S_ISDIR(source_stat.st_mode)
+                    source_is_file = stat.S_ISREG(source_stat.st_mode)
+                    if not source_is_directory and not source_is_file:
+                        raise OSError(
+                            _("Permitted home source has an unsupported type.")
+                        )
+                    if source_is_directory and (
+                        name.startswith(".") or "/" in name
+                    ):
+                        raise OSError(
+                            _("Hidden or nested home directories are not permitted.")
+                        )
+
+                    source_parent = user.host_home
+                    for component in PurePosixPath(name).parts[:-1]:
+                        source_parent /= component
+                        if (
+                            source_parent.is_symlink()
+                            or not source_parent.is_dir()
+                        ):
+                            raise OSError(
+                                _("Permitted home source has an unsafe parent.")
+                            )
+
+                    resolved_home = user.host_home.resolve(strict=True)
                     resolved_source = source.resolve(strict=True)
                     resolved_stat = resolved_source.stat()
                     if (
-                        source_stat.st_dev != resolved_stat.st_dev
+                        not resolved_source.is_relative_to(resolved_home)
+                        or source_stat.st_mode != resolved_stat.st_mode
+                        or source_stat.st_dev != resolved_stat.st_dev
                         or source_stat.st_ino != resolved_stat.st_ino
                     ):
                         raise OSError(
@@ -880,12 +906,31 @@ def _prepare_mounts(users: tuple[SpaceUser, ...]) -> tuple[HomeMount, ...]:
                 continue
 
             persistent_target = user.space_home / name
-            created_target = False
+            created_paths: list[Path] = []
             try:
-                if persistent_target.is_symlink() or (
+                target_parent = user.space_home
+                for component in PurePosixPath(name).parts[:-1]:
+                    target_parent /= component
+                    try:
+                        target_parent.mkdir(mode=0o700)
+                    except FileExistsError:
+                        pass
+                    else:
+                        created_paths.append(target_parent)
+                        os.chown(target_parent, user.uid, user.gid)
+                    if target_parent.is_symlink() or not target_parent.is_dir():
+                        raise OSError(
+                            _("Space home destination has an unsafe parent.")
+                        )
+
+                wrong_target_type = persistent_target.is_symlink() or (
                     persistent_target.exists()
-                    and not persistent_target.is_dir()
-                ):
+                    and (
+                        (source_is_directory and not persistent_target.is_dir())
+                        or (source_is_file and not persistent_target.is_file())
+                    )
+                )
+                if wrong_target_type:
                     logger.warning(
                         _(
                             "Space home destination {path} is unsafe; "
@@ -895,8 +940,20 @@ def _prepare_mounts(users: tuple[SpaceUser, ...]) -> tuple[HomeMount, ...]:
                     )
                     continue
                 if not persistent_target.exists():
-                    persistent_target.mkdir(mode=0o700)
-                    created_target = True
+                    if source_is_directory:
+                        persistent_target.mkdir(mode=0o700)
+                    else:
+                        target_fd = os.open(
+                            persistent_target,
+                            os.O_WRONLY
+                            | os.O_CREAT
+                            | os.O_EXCL
+                            | os.O_NOFOLLOW
+                            | os.O_CLOEXEC,
+                            0o600,
+                        )
+                        os.close(target_fd)
+                    created_paths.append(persistent_target)
                     os.chown(persistent_target, user.uid, user.gid)
             except OSError as error:
                 logger.warning(
@@ -907,9 +964,12 @@ def _prepare_mounts(users: tuple[SpaceUser, ...]) -> tuple[HomeMount, ...]:
                         error=error,
                     )
                 )
-                if created_target:
+                for created_path in reversed(created_paths):
                     try:
-                        persistent_target.rmdir()
+                        if created_path.is_dir():
+                            created_path.rmdir()
+                        else:
+                            created_path.unlink()
                     except OSError:
                         pass
                 continue

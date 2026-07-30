@@ -1627,6 +1627,57 @@ class UserFixupTests(unittest.TestCase):
             (),
         )
 
+    def test_regular_home_files_are_prepared_as_read_write_mounts(self) -> None:
+        user = self._user(permitted=(".bashrc", ".ssh/config"))
+        ssh = user.host_home / ".ssh"
+        ssh.mkdir(parents=True)
+        (user.host_home / ".bashrc").write_text("host bashrc\n")
+        (ssh / "config").write_text("Host example\n")
+        user.space_home.mkdir()
+
+        available = launch_module._prepare_mounts((user,))
+
+        self.assertEqual(
+            [mount.destination for mount in available],
+            ["/home/alice/.bashrc", "/home/alice/.ssh/config"],
+        )
+        self.assertTrue((user.space_home / ".bashrc").is_file())
+        self.assertTrue((user.space_home / ".ssh/config").is_file())
+        self.assertTrue((user.space_home / ".ssh").is_dir())
+        self.assertEqual(
+            [launch_module._bind_argument(mount) for mount in available],
+            [
+                f"--bind={user.host_home}/.bashrc:/home/alice/.bashrc",
+                (
+                    f"--bind={user.host_home}/.ssh/config:"
+                    "/home/alice/.ssh/config"
+                ),
+            ],
+        )
+
+    def test_missing_home_file_is_skipped_without_creating_target(self) -> None:
+        user = self._user(permitted=(".bashrc", ".ssh/config"))
+        user.host_home.mkdir(parents=True)
+        user.space_home.mkdir()
+
+        with self.assertLogs(launch_module.logger, level="WARNING"):
+            available = launch_module._prepare_mounts((user,))
+
+        self.assertEqual(available, ())
+        self.assertFalse((user.space_home / ".bashrc").exists())
+        self.assertFalse((user.space_home / ".ssh").exists())
+
+    def test_hidden_home_directories_are_not_mountable(self) -> None:
+        user = self._user(permitted=(".config",))
+        (user.host_home / ".config").mkdir(parents=True)
+        user.space_home.mkdir()
+
+        with self.assertLogs(launch_module.logger, level="WARNING"):
+            available = launch_module._prepare_mounts((user,))
+
+        self.assertEqual(available, ())
+        self.assertFalse((user.space_home / ".config").exists())
+
     def test_mount_destination_preparation_failure_is_skipped(self) -> None:
         user = self._user(permitted=("Projects",))
         user.host_home.mkdir(parents=True)

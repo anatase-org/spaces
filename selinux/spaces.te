@@ -22,6 +22,10 @@ files_pid_file(spaces_var_run_t)
 type spaces_shortcut_t;
 files_type(spaces_shortcut_t)
 
+type ssh_home_config_t;
+userdom_user_home_content(ssh_home_config_t)
+files_poly_parent(ssh_home_config_t)
+
 # The host-side supervisor is a container runtime, while the nspawn payload
 # gets a separate, MCS-constrained container domain.
 container_runtime_domain_template(spaces)
@@ -352,6 +356,27 @@ kernel_io_uring_use(spaces_container_t)
 userdom_manage_user_home_content(spaces_container_t)
 userdom_exec_user_home_content_files(spaces_container_t)
 
+# Keep ~/.ssh/config separate from keys and other files labeled ssh_home_t.
+# Spaces mounts this one file read-write, while the host SSH client and normal
+# user domains retain their expected access.
+gen_require(`
+	type ssh_home_t;
+	type ssh_t;
+')
+filetrans_pattern(
+	userdomain,
+	ssh_home_t,
+	ssh_home_config_t,
+	file,
+	"config"
+)
+allow spaces_t ssh_home_t:dir search_dir_perms;
+allow spaces_t ssh_home_config_t:file { getattr open };
+allow ssh_t ssh_home_config_t:file manage_file_perms;
+allow spaces_container_t ssh_home_config_t:file {
+	append getattr ioctl lock map open read setattr write
+};
+
 # systemd-machined opens the container's /dev/ptmx when machinectl starts an
 # interactive or command shell.
 gen_require(`
@@ -372,5 +397,7 @@ create_files_pattern(
 allow systemd_machined_t spaces_apifs_file_t:{ file dir } mounton;
 allow systemd_machined_t spaces_file_t:{ file dir } mounton;
 allow systemd_machined_t user_home_type:file getattr;
+allow systemd_machined_t ssh_home_t:dir search_dir_perms;
+allow systemd_machined_t ssh_home_config_t:file getattr;
 allow systemd_machined_t spaces_var_run_t:{ dir file sock_file } getattr;
 userdom_search_user_home_content(systemd_machined_t)

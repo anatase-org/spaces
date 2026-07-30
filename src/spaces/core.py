@@ -26,6 +26,14 @@ KERNEL_CAPABILITY_LEVELS = (
 )
 DEVICE_LEVELS = ("disabled", "basic", "admin", "full")
 DEFAULT_HOME_FOLDERS = ("Projects", "Downloads")
+DEFAULT_HOME_FILES = (
+    ".ssh/config",
+    ".bashrc",
+    ".zshrc",
+    ".zhistory",
+    ".bash_history",
+)
+DEFAULT_HOME_MOUNTS = (*DEFAULT_HOME_FOLDERS, *DEFAULT_HOME_FILES)
 SPACE_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
 
 
@@ -92,29 +100,29 @@ def validate_home_name(name: object) -> str:
     if (
         not isinstance(name, str)
         or not name
-        or name.startswith(".")
         or name in {".", ".."}
-        or "/" in name
         or "\0" in name
+        or ("/" in name and name != ".ssh/config")
     ):
         raise SpacesError(
-            _("Invalid home folder permission: {name!r}.", name=name)
+            _("Invalid home mount permission: {name!r}.", name=name)
         )
     return name
 
 
 def discover_home_folders(home: Path) -> list[str]:
-    """Find visible, immediate real directories and offer common defaults."""
+    """Find mountable home directories and files, with files listed last."""
 
-    names = set(DEFAULT_HOME_FOLDERS)
+    directories = set(DEFAULT_HOME_FOLDERS)
+    files = set(DEFAULT_HOME_FILES)
     try:
         for entry in home.iterdir():
-            if (
-                not entry.name.startswith(".")
-                and entry.is_dir()
-                and not entry.is_symlink()
-            ):
-                names.add(entry.name)
+            if entry.is_symlink():
+                continue
+            if not entry.name.startswith(".") and entry.is_dir():
+                directories.add(entry.name)
+            elif entry.is_file():
+                files.add(entry.name)
     except OSError as error:
         raise SpacesError(
             _(
@@ -123,7 +131,10 @@ def discover_home_folders(home: Path) -> list[str]:
                 error=error,
             )
         ) from error
-    return sorted(names, key=str.casefold)
+    return [
+        *sorted(directories, key=str.casefold),
+        *sorted(files, key=str.casefold),
+    ]
 
 
 def _require_mapping(value: object, label: str) -> dict[str, Any]:
@@ -357,7 +368,7 @@ def defaults_from_info(
     devices = "basic"
     host_authentication = True
     shortcuts = True
-    selected_home = list(DEFAULT_HOME_FOLDERS)
+    selected_home = list(DEFAULT_HOME_MOUNTS)
     administrator = True
     desktop = True
     if not info:
@@ -397,13 +408,12 @@ def defaults_from_info(
     user_permissions = user.get("permissions", {})
     home = user_permissions.get("home")
     if isinstance(home, list):
-        selected_home = [
-            name
-            for name in home
-            if isinstance(name, str)
-            and not name.startswith(".")
-            and "/" not in name
-        ]
+        selected_home = []
+        for name in home:
+            try:
+                selected_home.append(validate_home_name(name))
+            except SpacesError:
+                continue
     existing_administrator = user_permissions.get("administrator")
     if isinstance(existing_administrator, bool):
         administrator = existing_administrator

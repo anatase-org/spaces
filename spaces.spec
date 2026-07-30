@@ -76,6 +76,7 @@ restorecon -RF %{_bindir}/spaces.priv %{_localstatedir}/lib/spaces \
   /usr/lib/spaces/guest %{_datadir}/spaces/portal %{_rundir}/spaces \
   %{_prefix}/local/share/applications/spaces \
   2>/dev/null || :
+restorecon -F /home/*/.ssh/config /root/.ssh/config 2>/dev/null || :
 %systemd_post spaces@.service
 %systemd_user_post spaces@.service
 
@@ -87,6 +88,9 @@ restorecon -RF %{_bindir}/spaces.priv %{_localstatedir}/lib/spaces \
 %systemd_postun_with_restart spaces@.service
 %systemd_user_postun_with_restart spaces@.service
 %selinux_modules_uninstall spaces
+if [ $1 -eq 0 ]; then
+  restorecon -F /home/*/.ssh/config /root/.ssh/config 2>/dev/null || :
+fi
 
 %files
 %doc readme.md

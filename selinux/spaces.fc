@@ -1,5 +1,8 @@
 /usr/bin/spaces\.priv	--	gen_context(system_u:object_r:spaces_exec_t,s0)
 
+HOME_DIR/\.ssh/config	--	gen_context(system_u:object_r:ssh_home_config_t,s0)
+/root/\.ssh/config	--	gen_context(system_u:object_r:ssh_home_config_t,s0)
+
 /usr/lib/spaces/guest(/.*)?	gen_context(system_u:object_r:spaces_apifs_file_t,s0)
 /usr/share/spaces/portal(/.*)?	gen_context(system_u:object_r:spaces_apifs_file_t,s0)
 

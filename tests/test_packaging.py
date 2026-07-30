@@ -148,6 +148,12 @@ class PackagingTests(unittest.TestCase):
             "%{_localstatedir}/lib/spaces",
             spec,
         )
+        self.assertEqual(
+            spec.count(
+                "restorecon -F /home/*/.ssh/config /root/.ssh/config"
+            ),
+            2,
+        )
         self.assertIn(
             "%{_prefix}/local/share/applications/spaces",
             spec,
@@ -171,6 +177,18 @@ class PackagingTests(unittest.TestCase):
         self.assertIn(
             "allow systemd_machined_t "
             "spaces_apifs_file_t:{ file dir } mounton;",
+            type_enforcement,
+        )
+        self.assertIn(
+            "allow spaces_container_t ssh_home_config_t:file {",
+            type_enforcement,
+        )
+        self.assertIn(
+            "allow ssh_t ssh_home_config_t:file manage_file_perms;",
+            type_enforcement,
+        )
+        self.assertNotIn(
+            "allow spaces_container_t ssh_home_t:file",
             type_enforcement,
         )
         self.assertIn(
@@ -329,6 +347,14 @@ class PackagingTests(unittest.TestCase):
         )
         self.assertIn(
             "/usr/share/spaces/portal(/.*)?",
+            file_contexts,
+        )
+        self.assertIn(
+            "HOME_DIR/\\.ssh/config",
+            file_contexts,
+        )
+        self.assertIn(
+            "/root/\\.ssh/config",
             file_contexts,
         )
         self.assertIn(
