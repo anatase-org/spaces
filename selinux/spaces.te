@@ -191,6 +191,7 @@ allow spaces_container_t self:bpf {
 gen_require(`
 	attribute domain;
 	type cgroup_t;
+	type devpts_t;
 	type device_t;
 	type hugetlbfs_t;
 	type mtrr_device_t;
@@ -199,6 +200,7 @@ gen_require(`
 	type tmpfs_t;
 ')
 allow spaces_container_t cgroup_t:file mounton;
+allow spaces_container_t devpts_t:chr_file mounton;
 allow spaces_container_t device_t:filesystem { remount unmount };
 allow spaces_container_t hugetlbfs_t:filesystem { mount remount unmount };
 allow spaces_container_t mtrr_device_t:file mounton;

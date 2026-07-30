@@ -191,6 +191,10 @@ class PackagingTests(unittest.TestCase):
             type_enforcement,
         )
         self.assertIn(
+            "allow spaces_container_t devpts_t:chr_file mounton;",
+            type_enforcement,
+        )
+        self.assertIn(
             "allow spaces_container_t hugetlbfs_t:filesystem "
             "{ mount remount unmount };",
             type_enforcement,
