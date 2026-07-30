@@ -169,6 +169,7 @@ fs_manage_tmpfs_sockets(spaces_container_t)
 fs_manage_tmpfs_chr_files(spaces_container_t)
 fs_manage_tmpfs_blk_files(spaces_container_t)
 fs_mounton_tmpfs(spaces_container_t)
+allow spaces_container_t tmpfs_t:file execute;
 
 # systemd builds mount namespaces and BPF filters for guest services.
 dev_getattr_all_chr_files(spaces_container_t)
@@ -191,20 +192,80 @@ allow spaces_container_t self:bpf {
 gen_require(`
 	attribute domain;
 	type cgroup_t;
+	type container_runtime_tmpfs_t;
 	type devpts_t;
 	type device_t;
+	type fixed_disk_device_t;
+	type fonts_t;
 	type hugetlbfs_t;
+	type lvm_control_t;
 	type mtrr_device_t;
 	type proc_t;
+	type proc_security_t;
+	type rpc_pipefs_t;
+	type sound_device_t;
 	type sysctl_t;
 	type tmpfs_t;
+	type tty_device_t;
+	type user_tty_device_t;
 ')
 allow spaces_container_t cgroup_t:file mounton;
 allow spaces_container_t devpts_t:chr_file mounton;
 allow spaces_container_t device_t:filesystem { remount unmount };
+# Newer container-selinux releases give some nspawn runtime tmpfs mounts a
+# dedicated type.  Guest systemd must be able to populate those mounts.
+manage_dirs_pattern(
+	spaces_container_t,
+	container_runtime_tmpfs_t,
+	container_runtime_tmpfs_t
+)
+manage_files_pattern(
+	spaces_container_t,
+	container_runtime_tmpfs_t,
+	container_runtime_tmpfs_t
+)
+manage_lnk_files_pattern(
+	spaces_container_t,
+	container_runtime_tmpfs_t,
+	container_runtime_tmpfs_t
+)
+manage_fifo_files_pattern(
+	spaces_container_t,
+	container_runtime_tmpfs_t,
+	container_runtime_tmpfs_t
+)
+manage_sock_files_pattern(
+	spaces_container_t,
+	container_runtime_tmpfs_t,
+	container_runtime_tmpfs_t
+)
+# Explicit device binds and the service's dynamic cgroup policy decide which
+# host devices enter a space.  SELinux must then permit those selected devices
+# to function.
+allow spaces_container_t fixed_disk_device_t:blk_file rw_blk_file_perms;
+allow spaces_container_t lvm_control_t:chr_file rw_chr_file_perms;
+allow spaces_container_t sound_device_t:chr_file rw_chr_file_perms;
+allow spaces_container_t tty_device_t:chr_file open;
+allow spaces_container_t user_tty_device_t:chr_file {
+	open watch watch_reads
+};
+# Fontconfig and desktop applications watch the read-only font trees exported
+# into graphical spaces.
+allow spaces_container_t fonts_t:dir { watch watch_reads };
+# Libvirt creates its QEMU hierarchy and backing files in the hugetlbfs
+# mounted by systemd-nspawn at /dev/hugepages.
+manage_dirs_pattern(spaces_container_t, hugetlbfs_t, hugetlbfs_t)
+manage_files_pattern(spaces_container_t, hugetlbfs_t, hugetlbfs_t)
 allow spaces_container_t hugetlbfs_t:filesystem { mount remount unmount };
-allow spaces_container_t mtrr_device_t:file mounton;
+# TODO: Restrict /proc/mtrr access once the guest hardware policy can
+# distinguish the workloads that require it.
+allow spaces_container_t mtrr_device_t:file { mounton write };
 allow spaces_container_t proc_t:filesystem remount;
+# These sysctls are host-global rather than namespaced.  Guest systemd may
+# probe them, but a space must not change them.
+dontaudit spaces_container_t proc_security_t:file write;
+# Permit guest NFS services to mount their namespaced RPC pipe filesystem.
+allow spaces_container_t rpc_pipefs_t:filesystem mount;
 allow spaces_container_t sysctl_t:file mounton;
 allow spaces_container_t tmpfs_t:file map;
 # systemd falls back to bind-mounting standard device nodes onto regular

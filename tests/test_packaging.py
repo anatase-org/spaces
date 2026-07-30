@@ -224,6 +224,67 @@ class PackagingTests(unittest.TestCase):
             type_enforcement,
         )
         self.assertIn(
+            "manage_dirs_pattern("
+            "spaces_container_t, hugetlbfs_t, hugetlbfs_t)",
+            type_enforcement,
+        )
+        self.assertIn(
+            "manage_files_pattern("
+            "spaces_container_t, hugetlbfs_t, hugetlbfs_t)",
+            type_enforcement,
+        )
+        self.assertIn(
+            "manage_dirs_pattern(\n"
+            "\tspaces_container_t,\n"
+            "\tcontainer_runtime_tmpfs_t,\n"
+            "\tcontainer_runtime_tmpfs_t\n"
+            ")",
+            type_enforcement,
+        )
+        self.assertIn(
+            "allow spaces_container_t fixed_disk_device_t:blk_file "
+            "rw_blk_file_perms;",
+            type_enforcement,
+        )
+        self.assertIn(
+            "allow spaces_container_t lvm_control_t:chr_file "
+            "rw_chr_file_perms;",
+            type_enforcement,
+        )
+        self.assertIn(
+            "allow spaces_container_t sound_device_t:chr_file "
+            "rw_chr_file_perms;",
+            type_enforcement,
+        )
+        self.assertIn(
+            "allow spaces_container_t user_tty_device_t:chr_file {\n"
+            "\topen watch watch_reads\n"
+            "};",
+            type_enforcement,
+        )
+        self.assertIn(
+            "allow spaces_container_t fonts_t:dir "
+            "{ watch watch_reads };",
+            type_enforcement,
+        )
+        self.assertIn(
+            "dontaudit spaces_container_t proc_security_t:file write;",
+            type_enforcement,
+        )
+        self.assertIn(
+            "allow spaces_container_t rpc_pipefs_t:filesystem mount;",
+            type_enforcement,
+        )
+        self.assertIn(
+            "allow spaces_container_t mtrr_device_t:file "
+            "{ mounton write };",
+            type_enforcement,
+        )
+        self.assertIn(
+            "allow spaces_container_t tmpfs_t:file execute;",
+            type_enforcement,
+        )
+        self.assertIn(
             "allow spaces_container_t spaces_var_run_t:dir "
             "list_dir_perms;",
             type_enforcement,
