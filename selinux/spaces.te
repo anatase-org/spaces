@@ -257,6 +257,11 @@ optional_policy(`
 	unconfined_use_fds(spaces_container_t)
 ')
 
+# Host-home paths are exposed only when the user selects them in a space's
+# permissions and need write access.
+userdom_manage_user_home_content(spaces_container_t)
+userdom_exec_user_home_content_files(spaces_container_t)
+
 # systemd-machined opens the container's /dev/ptmx when machinectl starts an
 # interactive or command shell.
 gen_require(`

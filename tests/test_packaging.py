@@ -232,6 +232,14 @@ class PackagingTests(unittest.TestCase):
             type_enforcement,
         )
         self.assertIn(
+            "userdom_manage_user_home_content(spaces_container_t)",
+            type_enforcement,
+        )
+        self.assertIn(
+            "userdom_exec_user_home_content_files(spaces_container_t)",
+            type_enforcement,
+        )
+        self.assertIn(
             "dbus_write_session_tmp_sock_files(spaces_t)",
             type_enforcement,
         )
