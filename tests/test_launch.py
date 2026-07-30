@@ -139,10 +139,21 @@ class LaunchTests(unittest.TestCase):
         self.assertTrue((self.rootfs / "usr/share/vendor").is_dir())
         self.assertTrue((self.rootfs / "etc/vendor.conf").is_file())
 
-    def test_custom_library_overlays_are_read_only_and_pre_launch(self) -> None:
+    def test_custom_library_overlays_keep_guest_directory_writable(
+        self,
+    ) -> None:
         source = Path(self.temporary.name) / "nvidia" / "lib"
         source.mkdir(parents=True)
-        (self.rootfs / "usr/lib64").mkdir(parents=True)
+        library = source / "libnvidia.so.1"
+        library.write_text("nvidia\n", encoding="utf-8")
+        (source / "libnvidia.so").symlink_to(library.name)
+        driver = source / "dri/nvidia_dri.so"
+        driver.parent.mkdir()
+        driver.write_text("nvidia\n", encoding="utf-8")
+        destination = self.rootfs / "usr/lib64"
+        destination.mkdir(parents=True)
+        unrelated = destination / "libguest.so"
+        unrelated.write_text("guest\n", encoding="utf-8")
         overlays = (
             host_config.Overlay(
                 source,
@@ -158,10 +169,17 @@ class LaunchTests(unittest.TestCase):
         self.assertEqual(
             arguments,
             (
-                f"--overlay-ro=+/usr/lib64:{source}:/usr/lib64",
+                f"--bind-ro={source / 'libnvidia.so'}:"
+                "/usr/lib64/libnvidia.so",
+                f"--bind-ro={library}:/usr/lib64/libnvidia.so.1",
+                f"--bind-ro={driver}:/usr/lib64/dri/nvidia_dri.so",
             ),
         )
-        self.assertTrue((self.rootfs / "usr/lib64").is_dir())
+        self.assertTrue(destination.is_dir())
+        self.assertEqual(unrelated.read_text(encoding="utf-8"), "guest\n")
+        self.assertTrue((destination / "libnvidia.so").is_file())
+        self.assertTrue((destination / "libnvidia.so.1").is_file())
+        self.assertTrue((destination / "dri/nvidia_dri.so").is_file())
         command = launch_module._command(
             "work",
             self.rootfs,

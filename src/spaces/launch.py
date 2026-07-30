@@ -1015,26 +1015,14 @@ def _prepare_custom_mounts(
     return tuple(arguments)
 
 
-def _overlay_argument(
-    source: Path,
-    destination: PurePosixPath,
-) -> str:
-    def escape(value: str) -> str:
-        return value.replace("\\", "\\\\").replace(":", "\\:")
-
-    return (
-        "--overlay-ro="
-        f"+{escape(str(destination))}:"
-        f"{escape(str(source))}:"
-        f"{escape(str(destination))}"
-    )
-
-
 def _prepare_custom_overlays(
     rootfs: Path,
     overlays: tuple[host_config.Overlay, ...],
 ) -> tuple[str, ...]:
-    """Prepare safe overlay targets for the booting nspawn container."""
+    """Expose overlay entries without making their whole destination read-only."""
+
+    def raise_walk_error(error: OSError) -> None:
+        raise error
 
     arguments: list[str] = []
     resolved_rootfs = rootfs.resolve(strict=True)
@@ -1072,13 +1060,41 @@ def _prepare_custom_overlays(
                     raise OSError(_("overlay destination escapes the rootfs"))
             if not destination_available:
                 continue
-            arguments.append(
-                _overlay_argument(overlay.source, overlay.destination)
+            mounts: list[host_config.Mount] = []
+            for parent, directories, files in os.walk(
+                overlay.source,
+                followlinks=False,
+                onerror=raise_walk_error,
+            ):
+                parent_path = Path(parent)
+                directories.sort()
+                files.sort()
+                linked_directories = {
+                    name
+                    for name in directories
+                    if (parent_path / name).is_symlink()
+                }
+                directories[:] = [
+                    name for name in directories if name not in linked_directories
+                ]
+                for name in sorted((*files, *linked_directories)):
+                    source = parent_path / name
+                    relative_source = source.relative_to(overlay.source)
+                    mounts.append(
+                        host_config.Mount(
+                            source,
+                            overlay.destination.joinpath(
+                                *relative_source.parts
+                            ),
+                        )
+                    )
+            arguments.extend(
+                _prepare_custom_mounts(rootfs, tuple(mounts))
             )
         except (OSError, RuntimeError, ValueError) as error:
             logger.warning(
                 _(
-                    "Could not prepare read-only overlay {source} at "
+                    "Could not prepare overlay {source} at "
                     "{destination}; skipping it: {error}",
                     source=overlay.source,
                     destination=overlay.destination,
