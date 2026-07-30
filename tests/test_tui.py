@@ -376,6 +376,29 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                 marker_style = radio.get_visual_style("toggle--button")
                 self.assertEqual(marker_style.background.ansi, -1)
 
+    async def test_outer_scrollbar_uses_terminal_palette(self) -> None:
+        app = PermissionForm(
+            home=Path("/home/user"),
+            folders=[],
+            network="advanced",
+            selected_home=[],
+            include_system=True,
+            distribution_title="",
+            distribution_description="",
+            distribution_options=[],
+            distribution_value=None,
+        )
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            self.assertEqual(
+                app.screen.styles.scrollbar_color,
+                Color.parse(app.theme_variables["accent-muted"]),
+            )
+            self.assertEqual(
+                app.screen.styles.scrollbar_background.ansi,
+                -1,
+            )
+
     async def test_arch_distribution_options_are_checkboxes(self) -> None:
         app = PermissionForm(
             home=Path("/home/user"),

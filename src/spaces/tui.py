@@ -193,6 +193,13 @@ class PermissionForm(
         border: none;
         background: ansi_default;
         color: ansi_default;
+        scrollbar-color: $accent-muted;
+        scrollbar-color-hover: $accent;
+        scrollbar-color-active: $accent;
+        scrollbar-background: ansi_default;
+        scrollbar-background-hover: ansi_default;
+        scrollbar-background-active: ansi_default;
+        scrollbar-corner-color: ansi_default;
     }
     #form {
         width: 100%;
