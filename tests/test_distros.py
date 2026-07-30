@@ -17,6 +17,32 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class DistributionDriverTests(unittest.TestCase):
+    def test_configured_packages_append_without_changing_builtin_tuples(
+        self,
+    ) -> None:
+        snapshots = {
+            "arch": arch.PACKAGES,
+            "fedora": fedora.PACKAGES,
+            "ubuntu": ubuntu.PACKAGES,
+            "kali": kali.PACKAGES,
+        }
+        arch_command = arch.DISTRIBUTION.command(
+            {"id": "arch", "options": []},
+            Path("/rootfs"),
+            ("screen",),
+        )
+        fedora_command = fedora.DISTRIBUTION.command(
+            {"id": "fedora", "version": "44"},
+            Path("/rootfs"),
+            ("tmux",),
+        )
+        self.assertEqual(arch_command[-1], "screen")
+        self.assertEqual(fedora_command[-1], "tmux")
+        self.assertEqual(arch.PACKAGES, snapshots["arch"])
+        self.assertEqual(fedora.PACKAGES, snapshots["fedora"])
+        self.assertEqual(ubuntu.PACKAGES, snapshots["ubuntu"])
+        self.assertEqual(kali.PACKAGES, snapshots["kali"])
+
     def test_desktop_drivers_install_xdg_mime_detector(self) -> None:
         for packages in (
             arch.PACKAGES,

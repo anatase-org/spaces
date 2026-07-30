@@ -9,7 +9,7 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Any, Iterator, Mapping, Sequence
 
 from .. import _
 from .model import Distribution, DistributionError
@@ -213,7 +213,12 @@ class FedoraDistribution(Distribution):
         self.validate(metadata)
         return _("Fedora {version}", version=metadata["version"])
 
-    def command(self, metadata: Mapping[str, Any], rootfs: Path) -> list[str]:
+    def command(
+        self,
+        metadata: Mapping[str, Any],
+        rootfs: Path,
+        additional_packages: Sequence[str] = (),
+    ) -> list[str]:
         self.validate(metadata)
         version = str(metadata["version"])
         return [
@@ -226,9 +231,15 @@ class FedoraDistribution(Distribution):
             f"--setopt=reposdir={HOST_REPOSITORY_DIRECTORY}",
             "install",
             *PACKAGES,
+            *additional_packages,
         ]
 
-    def bootstrap(self, metadata: Mapping[str, Any], rootfs: Path) -> None:
+    def bootstrap(
+        self,
+        metadata: Mapping[str, Any],
+        rootfs: Path,
+        additional_packages: Sequence[str] = (),
+    ) -> None:
         version = str(metadata["version"])
         print(
             _("Bootstrapping Fedora {version}...", version=version),
@@ -238,7 +249,7 @@ class FedoraDistribution(Distribution):
             with hidden_selinuxfs():
                 with _rpm_environment(rootfs) as environment:
                     subprocess.run(
-                        self.command(metadata, rootfs),
+                        self.command(metadata, rootfs, additional_packages),
                         check=True,
                         env=environment,
                     )

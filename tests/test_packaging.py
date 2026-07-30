@@ -17,6 +17,28 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class PackagingTests(unittest.TestCase):
+    def test_git_spec_tracks_checkout_without_changing_release_spec(self) -> None:
+        release_spec = (ROOT / "spaces.spec").read_text(encoding="utf-8")
+        git_spec = (ROOT / "spaces-git.spec").read_text(encoding="utf-8")
+        sync = (ROOT / "sync.sh").read_text(encoding="utf-8")
+
+        self.assertIn("Version:        0.0.1", release_spec)
+        self.assertNotIn("%global commit", release_spec)
+        self.assertIn("%global commit %(git rev-parse --verify HEAD)", git_spec)
+        self.assertIn("%global shortcommit", git_spec)
+        self.assertIn("%global gitversion", git_spec)
+        self.assertIn("Version:        %{gitversion}", git_spec)
+        self.assertIn(
+            "Source:         %{url}/archive/%{commit}/"
+            "%{name}-%{commit}.tar.gz",
+            git_spec,
+        )
+        self.assertIn("%autosetup -n %{name}-%{commit}", git_spec)
+        self.assertIn(
+            "awk '$1 == \"Version:\" { print $2; exit }' spaces.spec",
+            sync,
+        )
+
     def test_console_scripts_and_package_data(self) -> None:
         project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         scripts = project["project"]["entry-points"]["console_scripts"]
@@ -64,6 +86,7 @@ class PackagingTests(unittest.TestCase):
             unit["Service"]["ExecStart"],
             "/usr/bin/spaces.priv launch %I",
         )
+        self.assertNotIn("ExecStartPost", unit["Service"])
         self.assertEqual(unit["Install"]["WantedBy"], "multi-user.target")
 
         project = tomllib.loads(
@@ -106,6 +129,7 @@ class PackagingTests(unittest.TestCase):
         spec = (ROOT / "spaces.spec").read_text(encoding="utf-8")
         self.assertIn("%{_unitdir}/spaces@.service", spec)
         self.assertIn("%{_userunitdir}/spaces@.service", spec)
+        self.assertIn("%dir %{_sysconfdir}/spaces", spec)
         self.assertIn("%systemd_post spaces@.service", spec)
         self.assertIn("%systemd_preun spaces@.service", spec)
         self.assertIn("%systemd_postun_with_restart spaces@.service", spec)

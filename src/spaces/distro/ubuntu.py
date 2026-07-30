@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from .. import _
 from .debian import chroot_command, prepared_chroot
@@ -110,9 +110,18 @@ class UbuntuDistribution(Distribution):
             DEBOOTSTRAP_SCRIPT,
         ]
 
-    def bootstrap(self, metadata: Mapping[str, Any], rootfs: Path) -> None:
+    def bootstrap(
+        self,
+        metadata: Mapping[str, Any],
+        rootfs: Path,
+        additional_packages: Sequence[str] = (),
+    ) -> None:
         version = str(metadata["version"])
-        packages = (*PACKAGES, *SECRET_PACKAGES[version])
+        packages = (
+            *PACKAGES,
+            *SECRET_PACKAGES[version],
+            *additional_packages,
+        )
         print(
             _(
                 "Bootstrapping Ubuntu {version}...",

@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from spaces import core
+from spaces import host_config
 from spaces import launch as launch_module
 from spaces import shortcuts
 
@@ -106,6 +107,113 @@ class LaunchTests(unittest.TestCase):
         self.state_root_patch.stop()
         self.shortcuts_root_patch.stop()
         self.temporary.cleanup()
+
+    def test_custom_mounts_are_always_read_only(self) -> None:
+        source_directory = Path(self.temporary.name) / "vendor"
+        source_directory.mkdir()
+        source_file = Path(self.temporary.name) / "vendor.conf"
+        source_file.write_text("test\n", encoding="utf-8")
+        mounts = (
+            host_config.Mount(
+                source_directory,
+                launch_module.PurePosixPath("/usr/share/vendor"),
+            ),
+            host_config.Mount(
+                source_file,
+                launch_module.PurePosixPath("/etc/vendor.conf"),
+            ),
+        )
+
+        arguments = launch_module._prepare_custom_mounts(
+            self.rootfs,
+            mounts,
+        )
+
+        self.assertEqual(
+            arguments,
+            (
+                f"--bind-ro={source_directory}:/usr/share/vendor",
+                f"--bind-ro={source_file}:/etc/vendor.conf",
+            ),
+        )
+        self.assertTrue((self.rootfs / "usr/share/vendor").is_dir())
+        self.assertTrue((self.rootfs / "etc/vendor.conf").is_file())
+
+    def test_custom_library_overlays_are_read_only_and_pre_launch(self) -> None:
+        source = Path(self.temporary.name) / "nvidia" / "lib"
+        source.mkdir(parents=True)
+        (self.rootfs / "usr/lib64").mkdir(parents=True)
+        overlays = (
+            host_config.Overlay(
+                source,
+                launch_module.PurePosixPath("/usr/lib64"),
+            ),
+        )
+
+        arguments = launch_module._prepare_custom_overlays(
+            self.rootfs,
+            overlays,
+        )
+
+        self.assertEqual(
+            arguments,
+            (
+                f"--overlay-ro=+/usr/lib64:{source}:/usr/lib64",
+            ),
+        )
+        self.assertTrue((self.rootfs / "usr/lib64").is_dir())
+        command = launch_module._command(
+            "work",
+            self.rootfs,
+            self.home,
+            "basic",
+            "basic",
+            custom_overlays=arguments,
+        )
+        self.assertLess(command.index(arguments[0]), command.index("--boot"))
+
+    def test_custom_overlay_with_missing_guest_destination_is_skipped(
+        self,
+    ) -> None:
+        source = Path(self.temporary.name) / "nvidia" / "lib"
+        source.mkdir(parents=True)
+        destination = self.rootfs / "usr/lib/aarch64-linux-gnu"
+
+        with self.assertNoLogs(launch_module.logger, "WARNING"):
+            arguments = launch_module._prepare_custom_overlays(
+                self.rootfs,
+                (
+                    host_config.Overlay(
+                        source,
+                        launch_module.PurePosixPath(
+                            "/usr/lib/aarch64-linux-gnu"
+                        ),
+                    ),
+                ),
+            )
+
+        self.assertEqual(arguments, ())
+        self.assertFalse(destination.exists())
+
+    def test_custom_mount_with_missing_source_is_silently_skipped(
+        self,
+    ) -> None:
+        source = Path(self.temporary.name) / "missing"
+        destination = self.rootfs / "etc/missing"
+
+        with self.assertNoLogs(launch_module.logger, "WARNING"):
+            arguments = launch_module._prepare_custom_mounts(
+                self.rootfs,
+                (
+                    host_config.Mount(
+                        source,
+                        launch_module.PurePosixPath("/etc/missing"),
+                    ),
+                ),
+            )
+
+        self.assertEqual(arguments, ())
+        self.assertFalse(destination.exists())
 
     def _write_info(
         self,
@@ -1155,6 +1263,32 @@ class UserFixupTests(unittest.TestCase):
             (self.etc / "shadow").write_text(shadow_text, encoding="utf-8")
         if gshadow_text:
             (self.etc / "gshadow").write_text(gshadow_text, encoding="utf-8")
+
+    def test_preferred_shell_is_used_only_when_executable(self) -> None:
+        zsh = self.rootfs / "usr/bin/zsh"
+        zsh.parent.mkdir(parents=True)
+        zsh.write_text("", encoding="utf-8")
+        zsh.chmod(0o755)
+        bash = self.rootfs / "bin/bash"
+        bash.parent.mkdir(parents=True)
+        bash.write_text("", encoding="utf-8")
+        bash.chmod(0o755)
+
+        self.assertEqual(
+            launch_module._default_user_shell(
+                self.rootfs,
+                "/usr/bin/zsh",
+            ),
+            "/usr/bin/zsh",
+        )
+        zsh.chmod(0o644)
+        self.assertEqual(
+            launch_module._default_user_shell(
+                self.rootfs,
+                "/usr/bin/zsh",
+            ),
+            "/bin/bash",
+        )
 
     def test_reconcile_renames_and_locks_existing_uid(self) -> None:
         uid = os.getuid()

@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from spaces import core, priv, session, shortcuts
+from spaces import core, host_config, priv, session, shortcuts
 from spaces.distro import ubuntu
 
 
@@ -114,6 +114,7 @@ class PrivilegedTests(unittest.TestCase):
                 ),
             ]
         )
+
         self.assertEqual(run.call_count, 8)
         self.assertEqual(
             run.call_args_list[-2],
@@ -169,6 +170,30 @@ class PrivilegedTests(unittest.TestCase):
         print_output.assert_any_call(
             "Bootstrapping Ubuntu Resolute (26.04)...",
             flush=True,
+        )
+
+    def test_create_passes_only_selected_distro_packages(self) -> None:
+        driver = mock.Mock()
+        configuration = host_config.HostConfig(
+            version=1,
+            distros={
+                "arch": host_config.DistroConfig(packages=("screen",)),
+                "ubuntu": host_config.DistroConfig(
+                    packages=("tmux", "zsh")
+                ),
+            },
+        )
+        with (
+            mock.patch.object(priv, "get_driver", return_value=driver),
+            mock.patch.object(host_config, "load", return_value=configuration),
+            mock.patch.object(priv.subprocess, "run"),
+        ):
+            priv.create(self.info)
+
+        driver.bootstrap.assert_called_once_with(
+            self.info["distribution"],
+            self.state_root / "ubuntu" / "rootfs",
+            additional_packages=("tmux", "zsh"),
         )
 
     def test_space_lock_owns_the_specific_space_directory(self) -> None:

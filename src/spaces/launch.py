@@ -25,6 +25,7 @@ from . import _
 from . import auth
 from . import core
 from . import devices
+from . import host_config
 from . import session
 from . import shortcuts
 from .distro import get_driver
@@ -553,9 +554,17 @@ def _ensure_administrator_group(
         gshadow_records.append([group_name, "!", "", ""])
 
 
-def _default_user_shell(rootfs: Path) -> str:
+def _default_user_shell(
+    rootfs: Path,
+    preferred_shell: str | None = None,
+) -> str:
     resolved_rootfs = rootfs.resolve(strict=True)
-    for shell in ("/bin/bash", "/usr/bin/bash"):
+    shells = (
+        (preferred_shell, "/bin/bash", "/usr/bin/bash")
+        if preferred_shell is not None
+        else ("/bin/bash", "/usr/bin/bash")
+    )
+    for shell in shells:
         candidate = rootfs / shell.removeprefix("/")
         try:
             resolved = candidate.resolve(strict=True)
@@ -574,6 +583,7 @@ def _reconcile_accounts(
     rootfs: Path,
     users: tuple[SpaceUser, ...],
     administrator_group: str = "wheel",
+    preferred_shell: str | None = None,
 ) -> None:
     non_root_users = tuple(user for user in users if user.uid != 0)
     if not non_root_users:
@@ -616,7 +626,7 @@ def _reconcile_accounts(
             _("Unsafe account database path: {path}.", path=gshadow_path)
         )
 
-    shell = _default_user_shell(rootfs)
+    shell = _default_user_shell(rootfs, preferred_shell)
     _ensure_administrator_group(
         group_records,
         gshadow_records,
@@ -924,6 +934,158 @@ def _path_bind_argument(
 
     option = "--bind-ro" if read_only else "--bind"
     return f"{option}={escape(str(source))}:{escape(str(destination))}"
+
+
+def _prepare_custom_mounts(
+    rootfs: Path,
+    mounts: tuple[host_config.Mount, ...],
+) -> tuple[str, ...]:
+    """Create safe bind targets and return read-only nspawn arguments."""
+
+    arguments: list[str] = []
+    resolved_rootfs = rootfs.resolve(strict=True)
+    for mount in mounts:
+        try:
+            if not mount.source.exists():
+                continue
+            if not mount.source.is_dir() and not mount.source.is_file():
+                raise OSError(_("the source is not a regular file or directory"))
+            relative = Path(str(mount.destination)).relative_to("/")
+            parent = rootfs
+            for component in relative.parts[:-1]:
+                parent /= component
+                try:
+                    parent.mkdir(mode=0o755)
+                except FileExistsError:
+                    pass
+                if parent.is_symlink() or not parent.is_dir():
+                    raise OSError(
+                        _("unsafe destination parent {path}", path=parent)
+                    )
+                if not parent.resolve(strict=True).is_relative_to(resolved_rootfs):
+                    raise OSError(
+                        _("destination parent escapes the rootfs")
+                    )
+
+            destination = parent / relative.name
+            if mount.source.is_dir():
+                try:
+                    destination.mkdir(mode=0o755)
+                except FileExistsError:
+                    pass
+                if destination.is_symlink() or not destination.is_dir():
+                    raise OSError(
+                        _("destination is not a safe directory")
+                    )
+            else:
+                try:
+                    descriptor = os.open(
+                        destination,
+                        os.O_WRONLY
+                        | os.O_CREAT
+                        | os.O_EXCL
+                        | os.O_NOFOLLOW
+                        | os.O_CLOEXEC,
+                        0o644,
+                    )
+                except FileExistsError:
+                    if destination.is_symlink() or not destination.is_file():
+                        raise OSError(
+                            _("destination is not a safe regular file")
+                        )
+                else:
+                    os.close(descriptor)
+            arguments.append(
+                _path_bind_argument(
+                    mount.source,
+                    mount.destination,
+                    read_only=True,
+                )
+            )
+        except (OSError, RuntimeError, ValueError) as error:
+            logger.warning(
+                _(
+                    "Could not prepare read-only mount {source} at "
+                    "{destination}; skipping it: {error}",
+                    source=mount.source,
+                    destination=mount.destination,
+                    error=error,
+                )
+            )
+    return tuple(arguments)
+
+
+def _overlay_argument(
+    source: Path,
+    destination: PurePosixPath,
+) -> str:
+    def escape(value: str) -> str:
+        return value.replace("\\", "\\\\").replace(":", "\\:")
+
+    return (
+        "--overlay-ro="
+        f"+{escape(str(destination))}:"
+        f"{escape(str(source))}:"
+        f"{escape(str(destination))}"
+    )
+
+
+def _prepare_custom_overlays(
+    rootfs: Path,
+    overlays: tuple[host_config.Overlay, ...],
+) -> tuple[str, ...]:
+    """Prepare safe overlay targets for the booting nspawn container."""
+
+    arguments: list[str] = []
+    resolved_rootfs = rootfs.resolve(strict=True)
+    for overlay in overlays:
+        try:
+            if not overlay.source.exists():
+                continue
+            if not overlay.source.is_dir():
+                raise OSError(_("the overlay source is not a directory"))
+            relative = Path(str(overlay.destination)).relative_to("/")
+            destination = rootfs
+            destination_available = True
+            for component in relative.parts:
+                destination /= component
+                if destination.is_symlink():
+                    raise OSError(
+                        _(
+                            "overlay destination is unsafe: {path}",
+                            path=destination,
+                        )
+                    )
+                if not destination.exists():
+                    destination_available = False
+                    break
+                if not destination.is_dir():
+                    raise OSError(
+                        _(
+                            "overlay destination is not a directory: {path}",
+                            path=destination,
+                        )
+                    )
+                if not destination.resolve(strict=True).is_relative_to(
+                    resolved_rootfs
+                ):
+                    raise OSError(_("overlay destination escapes the rootfs"))
+            if not destination_available:
+                continue
+            arguments.append(
+                _overlay_argument(overlay.source, overlay.destination)
+            )
+        except (OSError, RuntimeError, ValueError) as error:
+            logger.warning(
+                _(
+                    "Could not prepare read-only overlay {source} at "
+                    "{destination}; skipping it: {error}",
+                    source=overlay.source,
+                    destination=overlay.destination,
+                    error=error,
+                )
+            )
+    return tuple(arguments)
 
 
 def _unit_mask_bind_arguments() -> tuple[str, ...]:
@@ -1816,6 +1978,8 @@ def _command(
     kernel_capabilities: str,
     mounts: tuple[HomeMount, ...] = (),
     authentication_binds: tuple[str, ...] = (),
+    custom_binds: tuple[str, ...] = (),
+    custom_overlays: tuple[str, ...] = (),
 ) -> list[str]:
     network_caps = NETWORK_CAPS[network]
     kernel_caps = KERNEL_CAPS[kernel_capabilities]
@@ -1834,6 +1998,8 @@ def _command(
         f"--bind={home / 'root'}:/root",
         *_unit_mask_bind_arguments(),
         *authentication_binds,
+        *custom_binds,
+        *custom_overlays,
         *(_bind_argument(mount) for mount in mounts),
         "--boot",
         "--setenv=SYSTEMD_GETTY_AUTO=no",
@@ -1859,6 +2025,7 @@ def launch(space_name: str) -> int:
 
     configure_logging(rich=False)
     rootfs, home, info = _load_space(space_name)
+    configuration = host_config.load()
     network = info["permissions"]["system"]["network"]
     kernel_capabilities = info["permissions"]["system"].get(
         "kernel_capabilities",
@@ -1883,7 +2050,21 @@ def launch(space_name: str) -> int:
     administrator_group = (
         driver.administrator_group if driver is not None else "wheel"
     )
-    _reconcile_accounts(rootfs, users, administrator_group)
+    _reconcile_accounts(
+        rootfs,
+        users,
+        administrator_group,
+        configuration.default_shell,
+    )
+    distro_id = info["distribution"]["id"]
+    custom_binds = _prepare_custom_mounts(
+        rootfs,
+        configuration.mounts_for(distro_id),
+    )
+    custom_overlays = _prepare_custom_overlays(
+        rootfs,
+        configuration.overlays_for(distro_id),
+    )
     _ensure_user_homes(rootfs, users)
     session.initialize_status(space_name, users)
     authentication_supported = (
@@ -2027,6 +2208,8 @@ def launch(space_name: str) -> int:
                         initial_devices,
                     ),
                 ),
+                custom_binds,
+                custom_overlays,
             ),
             env=environment,
         )

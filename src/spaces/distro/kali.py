@@ -7,7 +7,7 @@ import os
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from .. import _
 from .debian import (
@@ -93,7 +93,12 @@ class KaliDistribution(Distribution):
             MIRROR,
         ]
 
-    def bootstrap(self, metadata: Mapping[str, Any], rootfs: Path) -> None:
+    def bootstrap(
+        self,
+        metadata: Mapping[str, Any],
+        rootfs: Path,
+        additional_packages: Sequence[str] = (),
+    ) -> None:
         self.validate(metadata)
         print(_("Bootstrapping Kali Linux..."), flush=True)
         try:
@@ -123,7 +128,7 @@ class KaliDistribution(Distribution):
             print(
                 _(
                     "Adding additional packages:\n{packages}",
-                    packages=", ".join(PACKAGES),
+                    packages=", ".join((*PACKAGES, *additional_packages)),
                 ),
                 flush=True,
             )
@@ -135,6 +140,7 @@ class KaliDistribution(Distribution):
                     "--yes",
                     "--no-install-recommends",
                     *PACKAGES,
+                    *additional_packages,
                 ),
                 check=True,
             )

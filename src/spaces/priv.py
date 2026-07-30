@@ -421,6 +421,7 @@ def enter_as_user(
 
 
 def create(info: dict[str, Any]) -> None:
+    from . import host_config
     from . import shortcuts
     from .distro import DistributionError
 
@@ -459,7 +460,18 @@ def create(info: dict[str, Any]) -> None:
                 )
             )
         try:
-            driver.bootstrap(distribution, rootfs)
+            configuration = host_config.load()
+            additional_packages = configuration.packages_for(
+                distribution["id"]
+            )
+            if additional_packages:
+                driver.bootstrap(
+                    distribution,
+                    rootfs,
+                    additional_packages=additional_packages,
+                )
+            else:
+                driver.bootstrap(distribution, rootfs)
         except (Exception, KeyboardInterrupt) as error:
             _preserve_failed_rootfs(rootfs, failed_rootfs)
             if isinstance(error, DistributionError):

@@ -5,7 +5,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from .. import _
 from .model import Distribution, DistributionError
@@ -264,17 +264,31 @@ class ArchDistribution(Distribution):
         self.validate(metadata)
         return _("Arch Linux")
 
-    def command(self, metadata: Mapping[str, Any], rootfs: Path) -> list[str]:
+    def command(
+        self,
+        metadata: Mapping[str, Any],
+        rootfs: Path,
+        additional_packages: Sequence[str] = (),
+    ) -> list[str]:
         self.validate(metadata)
         packages = list(PACKAGES)
         if {"yay", "shelly"} & set(metadata["options"]):
             packages.extend(AUR_BUILD_PACKAGES)
+        packages.extend(additional_packages)
         return ["pacstrap", "-K", str(rootfs), *packages]
 
-    def bootstrap(self, metadata: Mapping[str, Any], rootfs: Path) -> None:
+    def bootstrap(
+        self,
+        metadata: Mapping[str, Any],
+        rootfs: Path,
+        additional_packages: Sequence[str] = (),
+    ) -> None:
         self.validate(metadata)
         print(_("Bootstrapping Arch Linux..."), flush=True)
-        subprocess.run(self.command(metadata, rootfs), check=True)
+        subprocess.run(
+            self.command(metadata, rootfs, additional_packages),
+            check=True,
+        )
         options = metadata["options"]
         if options:
             with mounted_rootfs(rootfs, "Arch"):

@@ -134,7 +134,12 @@ class Distribution:
                     )
                 )
 
-    def bootstrap(self, metadata: Mapping[str, Any], rootfs: Path) -> None:
+    def bootstrap(
+        self,
+        metadata: Mapping[str, Any],
+        rootfs: Path,
+        additional_packages: Sequence[str] = (),
+    ) -> None:
         self.validate(metadata)
 
     def reconcile_host_authentication(
