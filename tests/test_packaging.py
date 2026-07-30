@@ -208,6 +208,10 @@ class PackagingTests(unittest.TestCase):
             type_enforcement,
         )
         self.assertIn(
+            "allow spaces_container_t user_tmp_t:file map;",
+            type_enforcement,
+        )
+        self.assertIn(
             "allow spaces_container_t config_home_t:file read_file_perms;",
             type_enforcement,
         )
@@ -229,6 +233,14 @@ class PackagingTests(unittest.TestCase):
         )
         self.assertIn(
             "unconfined_use_fds(spaces_container_t)",
+            type_enforcement,
+        )
+        self.assertIn(
+            "dev_rw_dma_dev(spaces_container_t)",
+            type_enforcement,
+        )
+        self.assertIn(
+            "kernel_io_uring_use(spaces_container_t)",
             type_enforcement,
         )
         self.assertIn(

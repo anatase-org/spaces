@@ -249,6 +249,7 @@ gen_require(`
 	type config_home_t;
 ')
 allow spaces_container_t user_tmp_t:file write;
+allow spaces_container_t user_tmp_t:file map;
 allow spaces_container_t config_home_t:file read_file_perms;
 userdom_write_user_tmp_sockets(spaces_container_t)
 xserver_stream_connect(spaces_container_t)
@@ -256,6 +257,11 @@ optional_policy(`
 	unconfined_stream_connect(spaces_container_t)
 	unconfined_use_fds(spaces_container_t)
 ')
+
+# Electron and other Wayland clients use the explicitly exposed udmabuf
+# device for graphics buffers and io_uring for their internal event loops.
+dev_rw_dma_dev(spaces_container_t)
+kernel_io_uring_use(spaces_container_t)
 
 # Host-home paths are exposed only when the user selects them in a space's
 # permissions and need write access.
