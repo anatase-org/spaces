@@ -308,7 +308,8 @@ class PermissionForm(
         "basic": _("Basic — Essentials for daily work"),
         "development": _(
             "Development — required for Docker; adds CAP_AUDIT_CONTROL, "
-            "CAP_AUDIT_WRITE, CAP_PERFMON, CAP_BPF, and perf_event_open"
+            "CAP_AUDIT_WRITE, CAP_SYS_PTRACE, CAP_PERFMON, CAP_BPF, and "
+            "perf_event_open"
         ),
         "admin": _(
             "System Administrator — Development plus /sys is writeable"

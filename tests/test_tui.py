@@ -164,8 +164,8 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                 [
                     "Basic — Essentials for daily work",
                     "Development — required for Docker; adds "
-                    "CAP_AUDIT_CONTROL, CAP_AUDIT_WRITE, CAP_PERFMON, "
-                    "CAP_BPF, and perf_event_open",
+                    "CAP_AUDIT_CONTROL, CAP_AUDIT_WRITE, CAP_SYS_PTRACE, "
+                    "CAP_PERFMON, CAP_BPF, and perf_event_open",
                     "System Administrator — Development plus /sys is "
                     "writeable",
                 ],

@@ -424,7 +424,7 @@ class LaunchTests(unittest.TestCase):
                 self.assertTrue(
                     capability_argument.endswith(
                         "CAP_AUDIT_CONTROL,CAP_AUDIT_WRITE,"
-                        "CAP_PERFMON,CAP_BPF"
+                        "CAP_SYS_PTRACE,CAP_PERFMON,CAP_BPF"
                     ),
                     capability_argument,
                 )
@@ -439,6 +439,10 @@ class LaunchTests(unittest.TestCase):
                 )
                 self.assertNotIn(
                     "CAP_AUDIT_WRITE",
+                    dropped_capability_argument,
+                )
+                self.assertNotIn(
+                    "CAP_SYS_PTRACE",
                     dropped_capability_argument,
                 )
 
@@ -457,6 +461,7 @@ class LaunchTests(unittest.TestCase):
         )
         self.assertNotIn("CAP_PERFMON", basic_capability_argument)
         self.assertNotIn("CAP_BPF", basic_capability_argument)
+        self.assertNotIn("CAP_SYS_PTRACE", basic_capability_argument)
         basic_dropped_capability_argument = next(
             argument
             for argument in basic_arguments
@@ -468,6 +473,10 @@ class LaunchTests(unittest.TestCase):
         )
         self.assertIn(
             "CAP_AUDIT_WRITE",
+            basic_dropped_capability_argument,
+        )
+        self.assertIn(
+            "CAP_SYS_PTRACE",
             basic_dropped_capability_argument,
         )
 
