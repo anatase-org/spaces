@@ -40,13 +40,15 @@ class PackagingTests(unittest.TestCase):
         )
         self.assertIn("-name 'spaces-selinux-*.rpm'", sync)
         self.assertIn(
-            'scp "$spaces_rpm_path" "$selinux_rpm_path" "$remote_host:"',
+            'rpm_paths+=("$selinux_rpm_path")',
             sync,
         )
         self.assertIn(
-            "~/$spaces_rpm_name ~/$selinux_rpm_name",
+            'remote_rpms+=" ~/$selinux_rpm_name"',
             sync,
         )
+        self.assertIn('if [[ $install_selinux == true ]]', sync)
+        self.assertIn('scp "${rpm_paths[@]}" "$remote_host:"', sync)
         for spec in (release_spec, git_spec):
             self.assertIn(
                 "Requires:       %{name}-selinux = "

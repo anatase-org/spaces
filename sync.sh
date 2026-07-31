@@ -3,7 +3,7 @@
 set -euo pipefail
 
 usage() {
-    echo "Usage: $0 <ssh-host>" >&2
+    echo "Usage: $0 [--selinux] <ssh-host>" >&2
 }
 
 die() {
@@ -11,12 +11,33 @@ die() {
     exit 1
 }
 
-if (( $# != 1 )); then
+install_selinux=false
+remote_host=
+while (( $# > 0 )); do
+    case $1 in
+        --selinux)
+            install_selinux=true
+            ;;
+        -*)
+            usage
+            die "unknown option: $1"
+            ;;
+        *)
+            [[ -z $remote_host ]] || {
+                usage
+                die "multiple SSH hosts specified"
+            }
+            remote_host=$1
+            ;;
+    esac
+    shift
+done
+
+if [[ -z $remote_host ]]; then
     usage
     exit 2
 fi
 
-remote_host=$1
 if [[ -z $remote_host || $remote_host == -* || $remote_host == *[[:space:]]* ]]; then
     die "invalid SSH host: $remote_host"
 fi
@@ -109,12 +130,21 @@ spaces_rpm_name=${spaces_rpm_path##*/}
 selinux_rpm_path=${selinux_rpm_candidates[0]}
 selinux_rpm_name=${selinux_rpm_path##*/}
 
-echo "Copying $spaces_rpm_name and $selinux_rpm_name to $remote_host:~/..."
-scp "$spaces_rpm_path" "$selinux_rpm_path" "$remote_host:"
+rpm_paths=("$spaces_rpm_path")
+rpm_names=("$spaces_rpm_name")
+remote_rpms="~/$spaces_rpm_name"
+if [[ $install_selinux == true ]]; then
+    rpm_paths+=("$selinux_rpm_path")
+    rpm_names+=("$selinux_rpm_name")
+    remote_rpms+=" ~/$selinux_rpm_name"
+fi
 
-echo "Installing $spaces_rpm_name and $selinux_rpm_name on $remote_host..."
+echo "Copying ${rpm_names[*]} to $remote_host:~/..."
+scp "${rpm_paths[@]}" "$remote_host:"
+
+echo "Installing ${rpm_names[*]} on $remote_host..."
 ssh -t "$remote_host" "sudo rpm-ostree usroverlay || true
-sudo dnf5 install -y ~/$spaces_rpm_name ~/$selinux_rpm_name &&
+sudo dnf5 install -y $remote_rpms &&
 sudo systemctl try-reload-or-restart polkit.service &&
 sudo systemctl stop 'spaces@*'"
 
