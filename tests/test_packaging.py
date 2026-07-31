@@ -51,8 +51,11 @@ class PackagingTests(unittest.TestCase):
         self.assertIn('scp "${rpm_paths[@]}" "$remote_host:"', sync)
         for spec in (release_spec, git_spec):
             self.assertIn(
-                "Requires:       %{name}-selinux = "
-                "%{version}-%{release}",
+                "Requires:       %{name}-selinux",
+                spec,
+            )
+            self.assertNotIn(
+                "%{name}-selinux = %{version}-%{release}",
                 spec,
             )
             self.assertIn("%package selinux", spec)

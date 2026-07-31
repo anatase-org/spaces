@@ -407,6 +407,7 @@ def _safe_user_name(name: str) -> bool:
 def _resolve_users(info: dict[str, Any], home: Path) -> tuple[SpaceUser, ...]:
     users: list[SpaceUser] = []
     for uid_key, record in info["permissions"]["users"].items():
+        user_permissions = core.effective_user_permissions(record)
         uid = int(uid_key)
         try:
             host_user = pwd.getpwuid(uid)
@@ -441,13 +442,13 @@ def _resolve_users(info: dict[str, Any], home: Path) -> tuple[SpaceUser, ...]:
                 host_home=host_home,
                 space_home=space_home,
                 guest_home=guest_home,
-                permitted_home=tuple(record["permissions"]["home"]),
-                administrator=record["permissions"].get("administrator", True),
-                desktop=record["permissions"].get("desktop", True),
-                credential_agents=record["permissions"].get(
+                permitted_home=tuple(user_permissions["home"]),
+                administrator=user_permissions.get("administrator", True),
+                desktop=user_permissions.get("desktop", True),
+                credential_agents=user_permissions.get(
                     "credential_agents", True
                 ),
-                mounted_drives=record["permissions"].get(
+                mounted_drives=user_permissions.get(
                     "mounted_drives", True
                 ),
             )
@@ -2234,17 +2235,20 @@ def launch(space_name: str) -> int:
     configure_logging(rich=False)
     rootfs, home, info = _load_space(space_name)
     configuration = host_config.load()
-    network = info["permissions"]["system"]["network"]
-    kernel_capabilities = info["permissions"]["system"].get(
+    system_permissions = core.effective_system_permissions(
+        info["permissions"]["system"]
+    )
+    network = system_permissions["network"]
+    kernel_capabilities = system_permissions.get(
         "kernel_capabilities",
         "basic",
     )
-    device_level = info["permissions"]["system"].get("devices", "basic")
-    host_authentication = info["permissions"]["system"].get(
+    device_level = system_permissions.get("devices", "basic")
+    host_authentication = system_permissions.get(
         "host_authentication",
         True,
     )
-    shortcut_export = info["permissions"]["system"].get("shortcuts", True)
+    shortcut_export = system_permissions.get("shortcuts", True)
     environment = os.environ.copy()
     environment.pop(API_VFS_WRITABLE, None)
     if kernel_capabilities == "admin":

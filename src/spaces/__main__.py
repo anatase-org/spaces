@@ -331,6 +331,7 @@ def _create(distro_id: str, *, missing: bool = False) -> int:
     ) = core.defaults_from_info(
         existing_info, identity
     )
+    preset = core.selected_preset(existing_info, identity)
     existing_distribution = (
         existing_info.get("distribution") if existing_info else None
     )
@@ -371,6 +372,7 @@ def _create(distro_id: str, *, missing: bool = False) -> int:
         override=override,
         missing=missing and not override,
         space_name=name,
+        preset=preset,
     )
     if result is None:
         return 130
@@ -398,6 +400,7 @@ def _create(distro_id: str, *, missing: bool = False) -> int:
         desktop=result.get("desktop", True),
         credential_agents=result.get("credential_agents", True),
         mounted_drives=result.get("mounted_drives", True),
+        preset=result.get("preset", "custom"),
     )
     configure_logging(rich=True)
     log(
@@ -462,6 +465,7 @@ def _configure(name: str, *, user: str | None) -> int:
         credential_agents,
         mounted_drives,
     ) = core.defaults_from_info(info, identity)
+    preset = core.selected_preset(info, identity)
     driver = get_driver(info["distribution"]["id"])
     administrator_group = (
         driver.administrator_group if driver is not None else "wheel"
@@ -486,6 +490,7 @@ def _configure(name: str, *, user: str | None) -> int:
         distribution_options=[],
         distribution_value=None,
         submit_label=_("Configure"),
+        preset=preset,
     )
     if result is None:
         return 130
@@ -495,6 +500,7 @@ def _configure(name: str, *, user: str | None) -> int:
             "uid": identity.uid,
             "gid": identity.gid,
             "permissions": {
+                "preset": result.get("preset", "custom"),
                 "home": sorted(result["home"], key=str.casefold),
                 "administrator": result.get("administrator", True),
                 "desktop": result.get("desktop", True),
@@ -505,6 +511,7 @@ def _configure(name: str, *, user: str | None) -> int:
     }
     if not user_only:
         permissions["system"] = {
+            "preset": result.get("preset", "custom"),
             "network": result["network"],
             "kernel_capabilities": result.get(
                 "kernel_capabilities", "basic"

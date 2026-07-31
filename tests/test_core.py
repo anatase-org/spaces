@@ -246,13 +246,95 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(devices, "basic")
         self.assertTrue(host_authentication)
         self.assertTrue(shortcuts)
-        self.assertEqual(selected_home, list(core.DEFAULT_HOME_MOUNTS))
+        self.assertEqual(selected_home, ["Downloads"])
         self.assertNotIn(".bashrc", selected_home)
         self.assertNotIn(".zshrc", selected_home)
         self.assertTrue(administrator)
         self.assertTrue(desktop)
-        self.assertTrue(credential_agents)
+        self.assertFalse(credential_agents)
         self.assertTrue(mounted_drives)
+
+    def test_permission_presets_have_expected_effective_values(self) -> None:
+        self.assertEqual(
+            core.PERMISSION_PRESETS,
+            {
+                "basic": {
+                    "system": {
+                        "network": "basic",
+                        "kernel_capabilities": "basic",
+                        "devices": "basic",
+                        "host_authentication": True,
+                        "shortcuts": True,
+                    },
+                    "user": {
+                        "home": ["Downloads"],
+                        "administrator": True,
+                        "desktop": True,
+                        "credential_agents": False,
+                        "mounted_drives": True,
+                    },
+                },
+                "develop": {
+                    "system": {
+                        "network": "admin",
+                        "kernel_capabilities": "development",
+                        "devices": "basic",
+                        "host_authentication": True,
+                        "shortcuts": True,
+                    },
+                    "user": {
+                        "home": [
+                            "Downloads",
+                            "Projects",
+                            ".bashrc",
+                            ".zshrc",
+                            ".bash_history",
+                            ".zhistory",
+                            ".ssh/config",
+                        ],
+                        "administrator": True,
+                        "desktop": True,
+                        "credential_agents": True,
+                        "mounted_drives": True,
+                    },
+                },
+            },
+        )
+        identity = core.Identity(1000, 1000, Path("/home/user"))
+        info = core.create_info(
+            "work",
+            {"id": "custom"},
+            identity,
+            "advanced",
+            ["Documents"],
+            preset="develop",
+        )
+
+        self.assertEqual(
+            core.effective_system_permissions(info["permissions"]["system"]),
+            core.PERMISSION_PRESETS["develop"]["system"],
+        )
+        self.assertEqual(
+            core.effective_user_permissions(
+                info["permissions"]["users"]["1000"]
+            ),
+            core.PERMISSION_PRESETS["develop"]["user"],
+        )
+        self.assertEqual(core.selected_preset(info, identity), "develop")
+
+    def test_legacy_and_unknown_presets(self) -> None:
+        identity = core.Identity(1000, 1000, Path("/home/user"))
+        info = core.create_info(
+            "work", {"id": "custom"}, identity, "basic", []
+        )
+        del info["permissions"]["system"]["preset"]
+        del info["permissions"]["users"]["1000"]["permissions"]["preset"]
+        core.validate_info(info)
+        self.assertEqual(core.selected_preset(info, identity), "custom")
+
+        info["permissions"]["system"]["preset"] = "unknown"
+        with self.assertRaises(core.SpacesError):
+            core.validate_info(info)
 
     def test_space_name_validation(self) -> None:
         self.assertEqual(core.validate_space_name("project-1"), "project-1")

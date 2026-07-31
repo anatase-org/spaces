@@ -242,6 +242,7 @@ class CliTests(unittest.TestCase):
             wizard.call_args.kwargs["administrator_group"],
             "sudo",
         )
+        self.assertEqual(wizard.call_args.kwargs["preset"], "basic")
         self.assertFalse(wizard.call_args.kwargs["missing"])
         self.assertTrue(
             payload["permissions"]["users"]["1000"]["permissions"][
@@ -288,11 +289,55 @@ class CliTests(unittest.TestCase):
             ):
                 self.assertEqual(cli._create("ubuntu", missing=True), 130)
 
-        self.assertTrue(wizard.call_args.kwargs["missing"])
-        self.assertFalse(wizard.call_args.kwargs["override"])
-        self.assertEqual(wizard.call_args.kwargs["space_name"], "ubuntu")
-        invoke.assert_not_called()
+                self.assertTrue(wizard.call_args.kwargs["missing"])
+                self.assertFalse(wizard.call_args.kwargs["override"])
+                self.assertEqual(wizard.call_args.kwargs["space_name"], "ubuntu")
+                invoke.assert_not_called()
 
+    def test_create_persists_basic_preset_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary) / "home"
+            home.mkdir()
+            identity = core.Identity(1000, 1000, home)
+            result = {
+                "preset": "basic",
+                **core.PERMISSION_PRESETS["basic"]["system"],
+                **core.PERMISSION_PRESETS["basic"]["user"],
+                "distribution_option": "resolute",
+            }
+            with (
+                mock.patch.object(
+                    core, "STATE_ROOT", Path(temporary) / "state"
+                ),
+                mock.patch.object(
+                    core, "initiating_identity", return_value=identity
+                ),
+                mock.patch.object(
+                    cli, "run_permission_wizard", return_value=result
+                ),
+                mock.patch.object(cli, "configure_logging"),
+                mock.patch.object(cli, "log"),
+                mock.patch.object(
+                    cli, "_invoke_helper", return_value=0
+                ) as invoke,
+            ):
+                self.assertEqual(cli.main(["create", "ubuntu"]), 0)
+
+        payload = invoke.call_args.args[1]
+        self.assertEqual(
+            payload["permissions"]["system"],
+            {
+                "preset": "basic",
+                **core.PERMISSION_PRESETS["basic"]["system"],
+            },
+        )
+        self.assertEqual(
+            payload["permissions"]["users"]["1000"]["permissions"],
+            {
+                "preset": "basic",
+                **core.PERMISSION_PRESETS["basic"]["user"],
+            },
+        )
     def test_create_from_enter_replaces_partial_rootfs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary) / "state"
@@ -503,6 +548,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(
             invoke.call_args.args[1]["permissions"]["system"],
             {
+                "preset": "custom",
                 "network": "advanced",
                 "kernel_capabilities": "development",
                 "devices": "admin",
@@ -584,6 +630,7 @@ class CliTests(unittest.TestCase):
         lookup.assert_called_once_with("alice")
         self.assertEqual(wizard.call_args.kwargs["home"], target_home)
         self.assertFalse(wizard.call_args.kwargs["include_system"])
+        self.assertEqual(wizard.call_args.kwargs["preset"], "basic")
         patch = invoke.call_args.args[1]
         self.assertNotIn("system", patch["permissions"])
         self.assertEqual(
@@ -592,6 +639,7 @@ class CliTests(unittest.TestCase):
                 "uid": 1001,
                 "gid": 1002,
                 "permissions": {
+                    "preset": "custom",
                     "home": ["Documents"],
                     "administrator": False,
                     "desktop": True,

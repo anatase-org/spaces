@@ -357,14 +357,15 @@ def enter(
             )
         )
 
+    user_permissions = core.effective_user_permissions(record)
     returncode = _ensure_space_started(space_name)
     if returncode != 0:
         return returncode
     if caller_uid == 0:
         return _machine_shell(user.pw_name, space_name, command)
-    desktop = record["permissions"].get("desktop", True) and caller_uid != 0
+    desktop = user_permissions.get("desktop", True) and caller_uid != 0
     credential_agents = (
-        record["permissions"].get("credential_agents", True)
+        user_permissions.get("credential_agents", True)
         and caller_uid != 0
     )
     environment = (
@@ -543,7 +544,10 @@ def configure(patch: dict[str, Any]) -> None:
             ],
             check=True,
         )
-        if permissions["system"].get("shortcuts", True):
+        system_permissions = core.effective_system_permissions(
+            permissions["system"]
+        )
+        if system_permissions.get("shortcuts", True):
             shortcuts.reconcile(
                 patch["name"],
                 space / "rootfs",

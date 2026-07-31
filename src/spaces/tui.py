@@ -31,6 +31,7 @@ from .core import (
     DEVICE_LEVELS,
     KERNEL_CAPABILITY_LEVELS,
     NETWORK_LEVELS,
+    PERMISSION_PRESETS,
     SpacesError,
     validate_space_name,
 )
@@ -344,6 +345,13 @@ class PermissionForm(
             "Full — all devices"
         ),
     }
+    PRESET_LABELS = {
+        "basic": _("Basic — Install applications"),
+        "develop": _("Development — Develop with access to VMs, docker"),
+        "custom": _(
+            "Customise — Select permissions settings based on your usage"
+        ),
+    }
 
     def __init__(
         self,
@@ -372,6 +380,7 @@ class PermissionForm(
         override: bool = False,
         missing: bool = False,
         space_name: str = "",
+        preset: str = "custom",
     ) -> None:
         super().__init__(ansi_color=True)
         self.home = home
@@ -385,6 +394,7 @@ class PermissionForm(
         self.initial_desktop = desktop
         self.initial_credential_agents = credential_agents
         self.initial_mounted_drives = mounted_drives
+        self.initial_preset = preset
         self.administrator_group = administrator_group
         file_names = {
             name
@@ -430,9 +440,8 @@ class PermissionForm(
             notice_steps.append("override")
         elif missing:
             notice_steps.append("missing")
-        self.steps = (
-            notice_steps
-            + (
+        detail_steps = (
+            (
                 [
                     "system",
                     "kernel-capabilities",
@@ -450,9 +459,27 @@ class PermissionForm(
                 "desktop",
                 "administrator",
             ]
-            + (["distribution"] if distribution_options else [])
         )
+        distribution_steps = ["distribution"] if distribution_options else []
+        self.notice_steps = notice_steps
+        self.detail_steps = detail_steps
+        self.distribution_steps = distribution_steps
+        self.available_steps = [
+            *notice_steps,
+            "preset",
+            *detail_steps,
+            *distribution_steps,
+        ]
+        self.steps = self._steps_for_preset(preset)
         self.step_index = 0
+
+    def _steps_for_preset(self, preset: str) -> list[str]:
+        return [
+            *self.notice_steps,
+            "preset",
+            *(self.detail_steps if preset == "custom" else []),
+            *self.distribution_steps,
+        ]
 
     def compose(self) -> ComposeResult:
         with Vertical(id="form"):
@@ -476,6 +503,14 @@ class PermissionForm(
                         ),
                         classes="description",
                     )
+            with Vertical(id="preset-step", classes="step"):
+                with RadioSet(id="preset"):
+                    for preset in ("basic", "develop", "custom"):
+                        yield CleanRadioButton(
+                            self.PRESET_LABELS[preset],
+                            value=preset == self.initial_preset,
+                            id=f"preset-{preset}",
+                        )
             if self.include_system:
                 with Vertical(id="system-step", classes="step"):
                     yield Static(
@@ -741,14 +776,31 @@ class PermissionForm(
     def action_cancel(self) -> None:
         self.exit(None)
 
+    def on_radio_set_changed(self, event: RadioSet.Changed) -> None:
+        """Update the visible route when the permission preset changes."""
+
+        if (
+            event.radio_set.id != "preset"
+            or not self.is_mounted
+            or self.steps[self.step_index] != "preset"
+            or event.pressed.id is None
+        ):
+            return
+        self.steps = self._steps_for_preset(
+            event.pressed.id.removeprefix("preset-")
+        )
+        self.step_index = self.steps.index("preset")
+        self._show_step()
+
     def _show_step(self) -> None:
         current = self.steps[self.step_index]
-        for step in self.steps:
+        for step in self.available_steps:
             self.query_one(f"#{step}-step").set_class(step != current, "hidden")
 
         titles = {
             "override": _("Space already exists"),
             "missing": _("Space does not exist"),
+            "preset": _("Select permissions based on intended use"),
             "system": _("System permissions"),
             "kernel-capabilities": _("Kernel capabilities"),
             "devices": _("Device permissions"),
@@ -784,6 +836,7 @@ class PermissionForm(
         select_button = self.query_one("#select", Button)
         select_button.disabled = current in {"override", "missing"}
         focus_targets = {
+            "preset": "#preset",
             "system": "#network",
             "kernel-capabilities": "#kernel-capabilities",
             "devices": "#devices",
@@ -826,6 +879,7 @@ class PermissionForm(
             ).action_select()
         else:
             targets = {
+                "preset": "#preset",
                 "system": "#network",
                 "kernel-capabilities": "#kernel-capabilities",
                 "devices": "#devices",
@@ -843,6 +897,12 @@ class PermissionForm(
     def action_advance(self) -> None:
         """Advance to the next step or submit the completed form."""
 
+        if self.steps[self.step_index] == "preset":
+            preset = self._radio_value(
+                self.query_one("#preset", RadioSet), "preset-"
+            )
+            self.steps = self._steps_for_preset(preset)
+            self.step_index = self.steps.index("preset")
         if self.step_index < len(self.steps) - 1:
             self.step_index += 1
             self._show_step()
@@ -864,32 +924,45 @@ class PermissionForm(
         return pressed.id.removeprefix(prefix)
 
     def _result(self) -> dict[str, Any]:
-        result: dict[str, Any] = {
-            "home": list(
-                self.query_one("#home-folders", FolderSelectionList).selected
-            ),
-            "administrator": self._radio_value(
-                self.query_one("#administrator", RadioSet),
-                "administrator-",
+        preset = self._radio_value(
+            self.query_one("#preset", RadioSet), "preset-"
+        )
+        result: dict[str, Any] = {"preset": preset}
+        if preset == "custom":
+            result.update(
+                {
+                    "home": list(
+                        self.query_one(
+                            "#home-folders", FolderSelectionList
+                        ).selected
+                    ),
+                    "administrator": self._radio_value(
+                        self.query_one("#administrator", RadioSet),
+                        "administrator-",
+                    )
+                    == "true",
+                    "desktop": self._radio_value(
+                        self.query_one("#desktop", RadioSet),
+                        "desktop-",
+                    )
+                    == "true",
+                    "credential_agents": self._radio_value(
+                        self.query_one("#credential-agents", RadioSet),
+                        "credential-agents-",
+                    )
+                    == "true",
+                    "mounted_drives": self._radio_value(
+                        self.query_one("#mounted-drives", RadioSet),
+                        "mounted-drives-",
+                    )
+                    == "true",
+                }
             )
-            == "true",
-            "desktop": self._radio_value(
-                self.query_one("#desktop", RadioSet),
-                "desktop-",
-            )
-            == "true",
-            "credential_agents": self._radio_value(
-                self.query_one("#credential-agents", RadioSet),
-                "credential-agents-",
-            )
-            == "true",
-            "mounted_drives": self._radio_value(
-                self.query_one("#mounted-drives", RadioSet),
-                "mounted-drives-",
-            )
-            == "true",
-        }
-        if self.include_system:
+        else:
+            user_permissions = dict(PERMISSION_PRESETS[preset]["user"])
+            user_permissions["home"] = list(user_permissions["home"])
+            result.update(user_permissions)
+        if self.include_system and preset == "custom":
             result["network"] = self._radio_value(
                 self.query_one("#network", RadioSet), "network-"
             )
@@ -908,6 +981,8 @@ class PermissionForm(
                 self.query_one("#shortcuts", RadioSet),
                 "shortcuts-",
             ) == "true"
+        elif self.include_system:
+            result.update(PERMISSION_PRESETS[preset]["system"])
         if self.distribution_options:
             if self.distribution_multiple:
                 result["distribution_options"] = list(

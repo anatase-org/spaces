@@ -32,6 +32,49 @@ DEFAULT_HOME_FILES = (
     ".bash_history",
 )
 DEFAULT_HOME_MOUNTS = (*DEFAULT_HOME_FOLDERS, *DEFAULT_HOME_FILES)
+PRESET_NAMES = ("basic", "develop", "custom")
+PERMISSION_PRESETS: dict[str, dict[str, dict[str, Any]]] = {
+    "basic": {
+        "system": {
+            "network": "basic",
+            "kernel_capabilities": "basic",
+            "devices": "basic",
+            "host_authentication": True,
+            "shortcuts": True,
+        },
+        "user": {
+            "home": ["Downloads"],
+            "administrator": True,
+            "desktop": True,
+            "credential_agents": False,
+            "mounted_drives": True,
+        },
+    },
+    "develop": {
+        "system": {
+            "network": "admin",
+            "kernel_capabilities": "development",
+            "devices": "basic",
+            "host_authentication": True,
+            "shortcuts": True,
+        },
+        "user": {
+            "home": [
+                "Downloads",
+                "Projects",
+                ".bashrc",
+                ".zshrc",
+                ".bash_history",
+                ".zhistory",
+                ".ssh/config",
+            ],
+            "administrator": True,
+            "desktop": True,
+            "credential_agents": True,
+            "mounted_drives": True,
+        },
+    },
+}
 SPACE_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
 
 
@@ -141,6 +184,61 @@ def _require_mapping(value: object, label: str) -> dict[str, Any]:
     return value
 
 
+def _validate_preset(value: Mapping[str, Any], label: str) -> str:
+    preset = value.get("preset", "custom")
+    if preset not in PRESET_NAMES:
+        raise SpacesError(
+            _("Unknown {label} preset: {preset!r}.", label=label, preset=preset)
+        )
+    return str(preset)
+
+
+def effective_system_permissions(
+    permissions: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return the system permissions that should be applied at runtime."""
+
+    preset = _validate_preset(permissions, "system permission")
+    if preset == "custom":
+        return dict(permissions)
+    return dict(PERMISSION_PRESETS[preset]["system"])
+
+
+def effective_user_permissions(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the user permissions that should be applied at runtime."""
+
+    permissions = record.get("permissions", {})
+    if not isinstance(permissions, dict):
+        return {}
+    preset = _validate_preset(permissions, "user permission")
+    if preset == "custom":
+        return dict(permissions)
+    effective = dict(PERMISSION_PRESETS[preset]["user"])
+    effective["home"] = list(effective["home"])
+    return effective
+
+
+def selected_preset(
+    info: Mapping[str, Any] | None,
+    identity: Identity,
+) -> str:
+    """Return the user preset initially selected by the permission wizard."""
+
+    if info is None:
+        return "basic"
+    record = (
+        info.get("permissions", {})
+        .get("users", {})
+        .get(str(identity.uid))
+    )
+    if not isinstance(record, dict):
+        return "basic"
+    permissions = record.get("permissions", {})
+    if not isinstance(permissions, dict):
+        return "basic"
+    return _validate_preset(permissions, "user permission")
+
+
 def _validate_distribution(value: object) -> dict[str, Any]:
     distribution = _require_mapping(value, "distribution")
     distro_id = distribution.get("id")
@@ -159,6 +257,7 @@ def _validate_distribution(value: object) -> dict[str, Any]:
 
 def _validate_system_permissions(value: object) -> dict[str, Any]:
     system = _require_mapping(value, "system permissions")
+    _validate_preset(system, "system permission")
     network = system.get("network")
     if network not in NETWORK_LEVELS:
         raise SpacesError(
@@ -201,6 +300,7 @@ def _validate_user_record(value: object, uid_key: str) -> dict[str, Any]:
     permissions = _require_mapping(
         record.get("permissions"), f"user {uid_key} permissions"
     )
+    _validate_preset(permissions, f"user {uid_key} permission")
     home = permissions.get("home")
     if not isinstance(home, list):
         raise SpacesError(
@@ -382,10 +482,10 @@ def defaults_from_info(
     devices = "basic"
     host_authentication = True
     shortcuts = True
-    selected_home = list(DEFAULT_HOME_MOUNTS)
+    selected_home = list(PERMISSION_PRESETS["basic"]["user"]["home"])
     administrator = True
     desktop = True
-    credential_agents = True
+    credential_agents = False
     mounted_drives = True
     if not info:
         return (
@@ -402,7 +502,9 @@ def defaults_from_info(
         )
 
     permissions = info.get("permissions", {})
-    system_permissions = permissions.get("system", {})
+    system_permissions = effective_system_permissions(
+        permissions.get("system", {})
+    )
     existing_network = system_permissions.get("network")
     if existing_network in NETWORK_LEVELS:
         network = existing_network
@@ -422,8 +524,12 @@ def defaults_from_info(
     existing_shortcuts = system_permissions.get("shortcuts")
     if isinstance(existing_shortcuts, bool):
         shortcuts = existing_shortcuts
-    user = permissions.get("users", {}).get(str(identity.uid), {})
-    user_permissions = user.get("permissions", {})
+    user = permissions.get("users", {}).get(str(identity.uid))
+    user_permissions = (
+        effective_user_permissions(user)
+        if isinstance(user, dict)
+        else dict(PERMISSION_PRESETS["basic"]["user"])
+    )
     home = user_permissions.get("home")
     if isinstance(home, list):
         selected_home = []
@@ -441,6 +547,8 @@ def defaults_from_info(
     existing_credential_agents = user_permissions.get("credential_agents")
     if isinstance(existing_credential_agents, bool):
         credential_agents = existing_credential_agents
+    elif isinstance(user, dict):
+        credential_agents = True
     existing_mounted_drives = user_permissions.get("mounted_drives")
     if isinstance(existing_mounted_drives, bool):
         mounted_drives = existing_mounted_drives
@@ -472,6 +580,7 @@ def create_info(
     mounted_drives: bool = True,
     devices: str = "basic",
     kernel_capabilities: str = "basic",
+    preset: str = "custom",
 ) -> dict[str, Any]:
     value = {
         "schema_version": SCHEMA_VERSION,
@@ -479,6 +588,7 @@ def create_info(
         "distribution": distribution,
         "permissions": {
             "system": {
+                "preset": preset,
                 "network": network,
                 "kernel_capabilities": kernel_capabilities,
                 "devices": devices,
@@ -489,6 +599,7 @@ def create_info(
                 str(identity.uid): {
                     "gid": identity.gid,
                     "permissions": {
+                        "preset": preset,
                         "home": sorted(home, key=str.casefold),
                         "administrator": administrator,
                         "desktop": desktop,

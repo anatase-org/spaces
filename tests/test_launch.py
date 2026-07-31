@@ -268,6 +268,62 @@ class LaunchTests(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def test_users_resolve_their_presets_independently(self) -> None:
+        info = core.create_info(
+            "work",
+            {"id": "custom"},
+            self.identity,
+            "basic",
+            ["Projects"],
+        )
+        permissions = info["permissions"]["users"]["1000"]["permissions"]
+        permissions.update(
+            {
+                "preset": "basic",
+                "home": ["Projects"],
+                "credential_agents": True,
+            }
+        )
+        info["permissions"]["users"]["1001"] = {
+            "gid": 1001,
+            "permissions": {
+                "preset": "develop",
+                "home": [],
+                "administrator": False,
+                "desktop": False,
+                "credential_agents": False,
+                "mounted_drives": False,
+            },
+        }
+        develop_home = Path(self.temporary.name) / "develop-home"
+        accounts = [
+            pwd.struct_passwd(
+                ("user", "x", 1000, 1000, "", str(self.host_home), "/bin/sh")
+            ),
+            pwd.struct_passwd(
+                ("dev", "x", 1001, 1001, "", str(develop_home), "/bin/sh")
+            ),
+        ]
+
+        with mock.patch.object(
+            launch_module.pwd, "getpwuid", side_effect=accounts
+        ):
+            user, developer = launch_module._resolve_users(info, self.home)
+
+        self.assertEqual(user.permitted_home, ("Downloads",))
+        self.assertTrue(user.administrator)
+        self.assertTrue(user.desktop)
+        self.assertFalse(user.credential_agents)
+        self.assertTrue(user.mounted_drives)
+        self.assertEqual(
+            developer.permitted_home,
+            tuple(core.PERMISSION_PRESETS["develop"]["user"]["home"]),
+        )
+        self.assertTrue(developer.administrator)
+        self.assertTrue(developer.desktop)
+        self.assertTrue(developer.credential_agents)
+        self.assertTrue(developer.mounted_drives)
+
     def test_enabled_shortcuts_are_reconciled_and_monitored(self) -> None:
         self._write_info()
         process = mock.Mock()
