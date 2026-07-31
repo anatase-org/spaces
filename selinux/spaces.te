@@ -174,7 +174,8 @@ fs_manage_tmpfs_sockets(spaces_container_t)
 fs_manage_tmpfs_chr_files(spaces_container_t)
 fs_manage_tmpfs_blk_files(spaces_container_t)
 fs_mounton_tmpfs(spaces_container_t)
-allow spaces_container_t tmpfs_t:file execute;
+# Qt QML and other guest runtimes execute JIT code from modified memfds.
+allow spaces_container_t tmpfs_t:file { execute execmod };
 # Libvirt relabels device nodes in each QEMU process's private /dev namespace.
 allow spaces_container_t tmpfs_t:chr_file relabelfrom;
 allow spaces_container_t tmpfs_t:lnk_file relabelfrom;

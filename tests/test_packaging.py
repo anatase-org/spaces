@@ -359,7 +359,7 @@ class PackagingTests(unittest.TestCase):
             type_enforcement,
         )
         self.assertIn(
-            "allow spaces_container_t tmpfs_t:file execute;",
+            "allow spaces_container_t tmpfs_t:file { execute execmod };",
             type_enforcement,
         )
         self.assertIn(
