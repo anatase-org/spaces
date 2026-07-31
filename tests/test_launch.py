@@ -2090,6 +2090,88 @@ class LoginAndMountWorkerTests(unittest.TestCase):
         )
         worker._desktop.reconcile.assert_called_once_with(user, (), ())
 
+    def test_desktop_setup_failure_is_retried_without_stopping_space(
+        self,
+    ) -> None:
+        user = self._user(1000, desktop=True)
+        graphical = launch_module.session.LoginSession(
+            "2", True, False, "wayland", "user"
+        )
+        monitor = mock.Mock()
+        monitor.state.return_value = "active"
+        monitor.sessions.return_value = (graphical,)
+        monitor.wait.side_effect = [True, False]
+        worker = launch_module._MountWorker(
+            "work",
+            (user,),
+            monitor,
+            (),
+            (),
+            frozenset({user.uid}),
+        )
+        worker._registered = True
+        process = mock.Mock()
+        process.poll.return_value = None
+        worker.attach(process)
+        worker._desktop.reconcile = mock.Mock(
+            side_effect=[
+                launch_module.session.DesktopSetupError(
+                    "session socket was replaced"
+                ),
+                None,
+            ]
+        )
+
+        with (
+            mock.patch.object(
+                worker._stopping, "wait", return_value=False
+            ),
+            mock.patch.object(worker._desktop, "close"),
+            self.assertLogs(launch_module.logger, level="WARNING"),
+        ):
+            worker._run()
+
+        self.assertEqual(worker._desktop.reconcile.call_count, 2)
+        self.assertEqual(
+            worker._login_snapshot,
+            launch_module._login_snapshot(monitor, (user,)),
+        )
+        process.send_signal.assert_not_called()
+
+    def test_changed_session_resource_does_not_escape_mount_worker(
+        self,
+    ) -> None:
+        monitor = mock.Mock()
+        monitor.wait.side_effect = [True, False]
+        worker = launch_module._MountWorker(
+            "work", (), monitor, (), (), frozenset()
+        )
+        worker._registered = True
+        process = mock.Mock()
+        process.poll.return_value = None
+        worker.attach(process)
+        worker._reconcile = mock.Mock(
+            side_effect=[
+                launch_module.session.SessionResourceChangedError(
+                    "host socket changed"
+                ),
+                None,
+            ]
+        )
+
+        with (
+            mock.patch.object(
+                worker._stopping, "wait", return_value=False
+            ),
+            mock.patch.object(worker._desktop, "close"),
+            self.assertLogs(launch_module.logger, level="WARNING") as logs,
+        ):
+            worker._run()
+
+        self.assertEqual(worker._reconcile.call_count, 2)
+        self.assertIn("retrying without stopping", "\n".join(logs.output))
+        process.send_signal.assert_not_called()
+
     def test_lingering_keeps_mount_until_user_is_closing(self) -> None:
         user = self._user(1000)
         mount = launch_module.HomeMount(

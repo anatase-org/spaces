@@ -927,6 +927,32 @@ class DesktopControllerTests(unittest.TestCase):
         self.assertEqual(command[-1], binding.destination)
         self.assertTrue(command[-2].startswith(f"/proc/{os.getpid()}/fd/"))
 
+    def test_mount_reports_replaced_resource_and_destination(self) -> None:
+        source = self.root / "socket"
+        source.write_text("old", encoding="utf-8")
+        metadata = source.stat()
+        binding = session.DesktopBind(
+            "/run/spaces/desktop/1000/socket",
+            source,
+            metadata.st_dev,
+            metadata.st_ino,
+        )
+        replacement = self.root / "replacement"
+        replacement.write_text("new", encoding="utf-8")
+        replacement.replace(source)
+
+        with (
+            mock.patch.object(session.subprocess, "run") as run,
+            self.assertRaises(
+                session.SessionResourceChangedError
+            ) as raised,
+        ):
+            self.controller._mount(self.desktop_user.uid, binding)
+
+        run.assert_not_called()
+        self.assertIn(str(source), str(raised.exception))
+        self.assertIn(binding.destination, str(raised.exception))
+
     def test_shared_destination_is_mounted_and_unmounted_once(self) -> None:
         binding = session.DesktopBind(
             "/tmp/.X11-unix/X0", Path("/source"), 1, 2

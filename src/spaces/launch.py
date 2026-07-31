@@ -1709,7 +1709,7 @@ class _MountWorker:
                 return
             if self._eligible_uids:
                 self._log_initial_mounts()
-            self._reconcile()
+            self._reconcile_retryable()
             self._last_reconcile_at = time.monotonic()
             while (
                 not self._stopping.is_set()
@@ -1729,7 +1729,7 @@ class _MountWorker:
                     break
                 if not self._wait_for_reconcile_slot():
                     break
-                self._reconcile()
+                self._reconcile_retryable()
                 self._last_reconcile_at = time.monotonic()
         except Exception as error:
             logger.error(_("User mount monitor failed: {error}", error=error))
@@ -1750,6 +1750,23 @@ class _MountWorker:
                 process = self._process
                 if process is not None and process.poll() is None:
                     process.send_signal(signal.SIGTERM)
+
+    def _reconcile_retryable(self) -> None:
+        try:
+            self._reconcile()
+        except session.SessionResourceChangedError as error:
+            # Login-session sockets can legitimately be replaced while the
+            # host user manager is restarting.  Keep nspawn alive and rebuild
+            # the complete plan on the next periodic reconciliation instead
+            # of treating this narrow TOCTOU check as a worker failure.
+            self._login_snapshot = None
+            logger.warning(
+                _(
+                    "Host session resources changed during reconciliation; "
+                    "retrying without stopping the space: {error}",
+                    error=error,
+                )
+            )
 
     def _wait_for_reconcile_slot(self) -> bool:
         previous = self._last_reconcile_at
@@ -1815,7 +1832,8 @@ class _MountWorker:
         snapshot = _login_snapshot(self._monitor, self._users)
         if snapshot == self._login_snapshot:
             if any(user.credential_agents for user in self._users):
-                self._reconcile_desktops(snapshot)
+                if not self._reconcile_desktops(snapshot):
+                    self._login_snapshot = None
             self._desktop.reconcile_portals()
             return
         eligible_uids = snapshot.eligible_uids
@@ -1836,8 +1854,9 @@ class _MountWorker:
         if not additions and not removals:
             self._log_user_transitions(logged_in, logged_out, (), ())
             self._eligible_uids = eligible_uids
-            self._reconcile_desktops(snapshot)
-            self._login_snapshot = snapshot
+            self._login_snapshot = (
+                snapshot if self._reconcile_desktops(snapshot) else None
+            )
             return
         if not self._wait_until_registered():
             return
@@ -1865,10 +1884,12 @@ class _MountWorker:
             added.append(mount)
         self._log_user_transitions(logged_in, logged_out, added, removed)
         self._eligible_uids = eligible_uids
-        self._reconcile_desktops(snapshot)
-        self._login_snapshot = snapshot
+        self._login_snapshot = (
+            snapshot if self._reconcile_desktops(snapshot) else None
+        )
 
-    def _reconcile_desktops(self, snapshot: _LoginSnapshot) -> None:
+    def _reconcile_desktops(self, snapshot: _LoginSnapshot) -> bool:
+        successful = True
         for user in self._users:
             try:
                 arguments = (
@@ -1893,6 +1914,7 @@ class _MountWorker:
                 else:
                     self._desktop.reconcile(*arguments)
             except session.DesktopSetupError as error:
+                successful = False
                 logger.warning(
                     _(
                         "Could not enable host session forwarding for {user}: "
@@ -1901,6 +1923,7 @@ class _MountWorker:
                         error=error,
                     )
                 )
+        return successful
 
     def _log_initial_mounts(self) -> None:
         for user in self._users:

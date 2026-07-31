@@ -31,7 +31,7 @@ Automated fake-bus and packaging coverage lives primarily in `test_portal.py`
 and `test_packaging.py`.  Run the complete suite before the live probes:
 
 ```sh
-python3 -m unittest discover -s tests
+PYTHONPATH=src python3 -m unittest discover -s tests
 make -C native clean all
 make -C native check-guest-abi
 ```

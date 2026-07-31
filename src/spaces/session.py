@@ -257,6 +257,10 @@ class DesktopSetupError(Exception):
     """A forwarding setup failed but the space may continue safely."""
 
 
+class SessionResourceChangedError(DesktopSetupError):
+    """A pinned host session resource was replaced before it was mounted."""
+
+
 class DesktopRevocationError(Exception):
     """A stale host resource could not be removed safely."""
 
@@ -2556,8 +2560,13 @@ class DesktopController:
         try:
             metadata = os.fstat(descriptor)
             if (metadata.st_dev, metadata.st_ino) != identity:
-                raise core.SpacesError(
-                    _("Session resource changed while it was being mounted.")
+                raise SessionResourceChangedError(
+                    _(
+                        "Host session resource {source} changed before it "
+                        "could be mounted at {destination}.",
+                        source=binding.source,
+                        destination=binding.destination,
+                    )
                 )
             subprocess.run(
                 [
