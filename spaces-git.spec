@@ -40,7 +40,7 @@ Requires:       systemd
 Requires:       systemd-container
 Requires:       glib2
 Requires:       xdg-dbus-proxy
-Requires:       %{name}-selinux = %{version}-%{release}
+Requires:       %{name}-selinux
 
 %description
 Spaces provide a chroot-like sandboxing environment for you to access your favorite distributions: Arch, Fedora, Kali, and Ubuntu. A simple permission system ensures your local files and credentials remain secure, even if your space is compromised. Spaces are constructed directly using packages from your chosen distribution repositories with signature enforcement. No container middleman or surprises.
