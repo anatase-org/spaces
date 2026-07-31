@@ -379,6 +379,10 @@ class PackagingTests(unittest.TestCase):
             "allow spaces_container_t spaces_var_run_t:dir watch;",
             type_enforcement,
         )
+        self.assertIn(
+            "allow spaces_container_t spaces_var_run_t:file map;",
+            type_enforcement,
+        )
         file_contexts = (ROOT / "selinux" / "spaces.fc").read_text(
             encoding="utf-8"
         )

@@ -347,6 +347,9 @@ read_files_pattern(
 	spaces_var_run_t,
 	spaces_var_run_t
 )
+# dconf memory-maps its read-only database after the host file is bind-mounted
+# below /run/spaces.  read_files_pattern does not include mmap permission.
+allow spaces_container_t spaces_var_run_t:file map;
 allow spaces_container_t spaces_var_run_t:sock_file rw_sock_file_perms;
 allow spaces_container_t spaces_t:unix_stream_socket connectto;
 
