@@ -1281,18 +1281,34 @@ class PrivilegedTests(unittest.TestCase):
             ],
         )
 
-    def test_enter_as_user_uses_privileged_target_without_host_lookup(
+    def test_enter_as_user_checks_target_instead_of_privileged_caller(
         self,
     ) -> None:
         space = self.state_root / "ubuntu"
         space.mkdir(parents=True)
-        self.info["permissions"]["system"]["host_authentication"] = False
-        priv._write_info(space, self.info)
+        info = core.create_info(
+            "ubuntu",
+            {"id": "ubuntu", "version": "resolute"},
+            core.Identity(1001, 1001, Path("/home/builder")),
+            "basic",
+            [],
+            host_authentication=False,
+        )
+        priv._write_info(space, info)
         unavailable = subprocess.CompletedProcess([], 1)
         started = subprocess.CompletedProcess([], 0)
         entered = subprocess.CompletedProcess([], 42)
         with (
-            mock.patch.object(priv.pwd, "getpwnam") as getpwnam,
+            mock.patch.object(
+                priv.pwd,
+                "getpwnam",
+                return_value=mock.Mock(pw_uid=1001),
+            ) as getpwnam,
+            mock.patch.object(
+                priv,
+                "_caller_uid",
+                side_effect=AssertionError("caller UID must not be checked"),
+            ),
             mock.patch.object(
                 priv.subprocess,
                 "run",
@@ -1308,7 +1324,7 @@ class PrivilegedTests(unittest.TestCase):
                 42,
         )
 
-        getpwnam.assert_not_called()
+        getpwnam.assert_called_once_with("builder")
         self.assertEqual(
             run.call_args_list,
             [
@@ -1342,6 +1358,38 @@ class PrivilegedTests(unittest.TestCase):
             ],
         )
 
+    def test_enter_as_user_rejects_unconfigured_target(self) -> None:
+        with (
+            mock.patch.object(priv, "_space_info", return_value=self.info),
+            mock.patch.object(
+                priv.pwd,
+                "getpwnam",
+                return_value=mock.Mock(pw_uid=1001),
+            ),
+            mock.patch.object(priv, "_ensure_space_started") as start,
+            self.assertRaisesRegex(
+                core.SpacesError,
+                "User 'builder' is not configured",
+            ),
+        ):
+            priv.enter_as_user("builder", "ubuntu", [])
+
+        start.assert_not_called()
+
+    def test_enter_as_user_rejects_unknown_host_target(self) -> None:
+        with (
+            mock.patch.object(priv, "_space_info", return_value=self.info),
+            mock.patch.object(priv.pwd, "getpwnam", side_effect=KeyError),
+            mock.patch.object(priv, "_ensure_space_started") as start,
+            self.assertRaisesRegex(
+                core.SpacesError,
+                "Host user 'builder' does not exist",
+            ),
+        ):
+            priv.enter_as_user("builder", "ubuntu", [])
+
+        start.assert_not_called()
+
     def test_enter_as_root_does_not_depend_on_guest_authentication_agent(
         self,
     ) -> None:
@@ -1350,11 +1398,14 @@ class PrivilegedTests(unittest.TestCase):
         priv._write_info(space, self.info)
         available = subprocess.CompletedProcess([], 0)
         entered = subprocess.CompletedProcess([], 42)
-        with mock.patch.object(
-            priv.subprocess,
-            "run",
-            side_effect=[available, entered],
-        ) as run:
+        with (
+            mock.patch.object(
+                priv.subprocess,
+                "run",
+                side_effect=[available, entered],
+            ) as run,
+            mock.patch.object(priv.pwd, "getpwnam") as getpwnam,
+        ):
             self.assertEqual(
                 priv.enter_as_user(
                     "root",
@@ -1364,6 +1415,7 @@ class PrivilegedTests(unittest.TestCase):
                 42,
             )
 
+        getpwnam.assert_not_called()
         self.assertEqual(
             run.call_args_list[1],
             mock.call(

@@ -422,12 +422,22 @@ def enter_as_user(
     ):
         raise core.SpacesError(
             _("Invalid target user name: {user!r}.", user=user_name)
-    )
+        )
     info = _space_info(space_name)
     if user_name != "root":
-        if str(_caller_uid()) not in info["permissions"]["users"]:
+        try:
+            target_user = pwd.getpwnam(user_name)
+        except KeyError as error:
             raise core.SpacesError(
-                _("Initiating user is not configured for this space.")
+                _("Host user {user!r} does not exist.", user=user_name)
+            ) from error
+        if str(target_user.pw_uid) not in info["permissions"]["users"]:
+            raise core.SpacesError(
+                _(
+                    "User {user!r} is not configured for space {space!r}.",
+                    user=user_name,
+                    space=space_name,
+                )
             )
     returncode = _ensure_space_started(space_name)
     if returncode != 0:
