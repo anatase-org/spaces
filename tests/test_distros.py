@@ -52,6 +52,15 @@ class DistributionDriverTests(unittest.TestCase):
         ):
             self.assertIn("file", packages)
 
+    def test_desktop_drivers_install_gsettings_backend(self) -> None:
+        for packages, backend in (
+            (arch.PACKAGES, "dconf"),
+            (fedora.PACKAGES, "dconf"),
+            (kali.PACKAGES, "dconf-gsettings-backend"),
+            (ubuntu.PACKAGES, "dconf-gsettings-backend"),
+        ):
+            self.assertIn(backend, packages)
+
     def test_managed_distros_install_git(self) -> None:
         for packages in (
             arch.PACKAGES,

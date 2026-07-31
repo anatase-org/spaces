@@ -39,6 +39,7 @@ PACKAGES = (
     "kf6-kwallet",
     "qca-qt6-ossl",
     "qt6-qtwayland",
+    "dconf",
     "file",
     "pipewire",
     "xdg-desktop-portal",

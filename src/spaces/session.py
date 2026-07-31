@@ -7,6 +7,7 @@ callers never supply paths, mount destinations, or systemd properties.
 
 from __future__ import annotations
 
+import configparser
 import hashlib
 import json
 import logging
@@ -32,6 +33,7 @@ MACHINECTL = "/usr/bin/machinectl"
 SYSTEMCTL = "/usr/bin/systemctl"
 SYSTEMD_RUN = "/usr/bin/systemd-run"
 XDG_DBUS_PROXY = "/usr/bin/xdg-dbus-proxy"
+DCONF = "/usr/bin/dconf"
 INTEGRATION_BROKER = "/usr/lib/spaces/spaces-integration-broker"
 RUNTIME_ROOT = Path("/run/spaces")
 DESKTOP_ROOT = PurePosixPath("/run/spaces/desktop")
@@ -48,6 +50,10 @@ MIME_TYPE_PATTERN = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*/"
     r"[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*$"
 )
+GTK_DECORATION_LAYOUT_PATTERN = re.compile(
+    r"^[A-Za-z0-9_-]*(?:,[A-Za-z0-9_-]+)*:"
+    r"[A-Za-z0-9_-]*(?:,[A-Za-z0-9_-]+)*$"
+)
 STATUS_STATES = frozenset({"active", "inactive", "pending"})
 
 # Do not add DBUS_SESSION_BUS_ADDRESS, XDG_RUNTIME_DIR, or XDG_SESSION_ID here.
@@ -58,6 +64,7 @@ DESKTOP_ENVIRONMENT = frozenset(
     {
         "BROWSER",
         "COLORTERM",
+        "DCONF_PROFILE",
         "DESKTOP_SESSION",
         "DISPLAY",
         "FONTCONFIG_FILE",
@@ -1185,6 +1192,90 @@ def _replace_text(path: Path, contents: str, mode: int = 0o644) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _gtk_decoration_layout(
+    config: Path,
+    home: Path,
+    host_user: pwd.struct_passwd,
+    uid: int,
+) -> str | None:
+    """Read the host GTK window-button layout without trusting keyfile paths."""
+
+    for toolkit in ("gtk-4.0", "gtk-3.0"):
+        checked = _validated_source(
+            config / toolkit / "settings.ini",
+            roots=(home,),
+            kinds=(stat.S_IFREG,),
+            user=host_user,
+            owner=uid,
+        )
+        if checked is None:
+            continue
+        path, metadata = checked
+        if metadata.st_size > 64 * 1024:
+            continue
+        parser = configparser.ConfigParser(interpolation=None)
+        try:
+            with path.open("r", encoding="utf-8") as stream:
+                parser.read_file(stream)
+            layout = parser.get("Settings", "gtk-decoration-layout")
+        except (OSError, UnicodeError, configparser.Error):
+            continue
+        if (
+            len(layout) <= 256
+            and GTK_DECORATION_LAYOUT_PATTERN.fullmatch(layout) is not None
+        ):
+            return layout
+    return None
+
+
+def _write_desktop_settings(
+    generated_root: Path,
+    guest_root: PurePosixPath,
+    layout: str,
+) -> tuple[Path, Path]:
+    """Build a session-only dconf default layered below guest user settings.
+
+    Chromium and several GTK-integrated clients read the GNOME window-manager
+    key directly instead of GtkSettings or the Settings portal.  A dconf
+    profile keeps that conventional API aligned with the host while leaving
+    explicit settings in the Space's user database at higher priority.
+    """
+
+    dconf_root = generated_root / "dconf"
+    keyfiles = dconf_root / "spaces-host.d"
+    _replace_text(
+        keyfiles / "00-window-buttons",
+        "[org/gnome/desktop/wm/preferences]\n"
+        f"button-layout='{layout}'\n",
+    )
+    database = dconf_root / "spaces-host"
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".spaces-host.", dir=dconf_root
+    )
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    try:
+        temporary.unlink()
+        subprocess.run(
+            [DCONF, "compile", str(temporary), str(keyfiles)],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=5,
+        )
+        os.chmod(temporary, 0o644)
+        os.replace(temporary, database)
+    finally:
+        temporary.unlink(missing_ok=True)
+    profile = dconf_root / "profile"
+    _replace_text(
+        profile,
+        "user-db:user\n"
+        f"file-db:{guest_root}/dconf/spaces-host\n",
+    )
+    return profile, database
+
+
 def _write_open_data(
     data_root: Path,
     mime_sources: tuple[tuple[Path, Path], ...],
@@ -1333,6 +1424,7 @@ def _plan(
     }
     for forbidden in (
         "DBUS_SESSION_BUS_ADDRESS",
+        "DCONF_PROFILE",
         "FONTCONFIG_FILE",
         "PIPEWIRE_RUNTIME_DIR",
         "SSH_AUTH_SOCK",
@@ -1484,6 +1576,33 @@ def _plan(
             kinds=(stat.S_IFDIR,),
             owner=user.uid,
         )
+    layout = _gtk_decoration_layout(config, home, host_user, user.uid)
+    if layout is not None:
+        try:
+            profile, database = _write_desktop_settings(
+                generated_root, root, layout
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            logger.warning(
+                _("Could not forward host desktop settings: %s."), error
+            )
+        else:
+            profile_added = add(
+                profile,
+                root / "dconf" / "profile",
+                roots=(generated_root,),
+                kinds=(stat.S_IFREG,),
+                require_access=False,
+            )
+            database_added = add(
+                database,
+                root / "dconf" / "spaces-host",
+                roots=(generated_root,),
+                kinds=(stat.S_IFREG,),
+                require_access=False,
+            )
+            if profile_added and database_added:
+                environment["DCONF_PROFILE"] = str(root / "dconf" / "profile")
 
     data_home_value = source_environment.get("XDG_DATA_HOME")
     data_home = Path(data_home_value) if data_home_value else home / ".local/share"

@@ -35,6 +35,7 @@ Requires:       arch-install-scripts
 Requires:       systemd
 Requires:       systemd-container
 Requires:       glib2
+Requires:       dconf
 Requires:       xdg-dbus-proxy
 Requires:       %{name}-selinux
 

@@ -35,6 +35,7 @@ PACKAGES = (
     "kwallet6",
     "libqca-qt6-plugins",
     "qt6-wayland",
+    "dconf-gsettings-backend",
     "file",
     "pipewire",
     "xdg-desktop-portal",

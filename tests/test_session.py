@@ -411,6 +411,78 @@ class DesktopPathTests(unittest.TestCase):
                 )
             )
 
+    @unittest.skipUnless(shutil.which("dconf"), "dconf is required")
+    def test_host_gtk_button_layout_is_a_session_dconf_default(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            home = root / "home"
+            settings = home / ".config/gtk-3.0/settings.ini"
+            settings.parent.mkdir(parents=True)
+            settings.write_text(
+                "[Settings]\n"
+                "gtk-decoration-layout=icon:minimize,maximize,close\n",
+                encoding="utf-8",
+            )
+            account = pwd.getpwuid(os.getuid())
+            layout = session._gtk_decoration_layout(
+                home / ".config", home, account, os.getuid()
+            )
+            self.assertEqual(layout, "icon:minimize,maximize,close")
+
+            generated = root / "generated"
+            profile, database = session._write_desktop_settings(
+                generated, PurePosixPath(str(generated)), layout
+            )
+            self.assertTrue(database.is_file())
+            self.assertGreater(database.stat().st_size, 0)
+            self.assertEqual(
+                profile.read_text(encoding="utf-8"),
+                "user-db:user\n"
+                f"file-db:{generated}/dconf/spaces-host\n",
+            )
+            config_home = root / "guest-config"
+            config_home.mkdir()
+            completed = subprocess.run(
+                [
+                    "/usr/bin/gsettings",
+                    "get",
+                    "org.gnome.desktop.wm.preferences",
+                    "button-layout",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "DCONF_PROFILE": str(profile),
+                    "XDG_CONFIG_HOME": str(config_home),
+                },
+            )
+            self.assertEqual(
+                completed.stdout.strip(),
+                "'icon:minimize,maximize,close'",
+            )
+
+    def test_invalid_host_gtk_button_layout_is_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            home = root / "home"
+            settings = home / ".config/gtk-4.0/settings.ini"
+            settings.parent.mkdir(parents=True)
+            settings.write_text(
+                "[Settings]\n"
+                "gtk-decoration-layout=close:'unsafe'\n",
+                encoding="utf-8",
+            )
+            self.assertIsNone(
+                session._gtk_decoration_layout(
+                    home / ".config",
+                    home,
+                    pwd.getpwuid(os.getuid()),
+                    os.getuid(),
+                )
+            )
+
     def test_generated_open_defaults_cover_mime_types_and_refresh(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

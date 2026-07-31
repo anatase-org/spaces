@@ -725,6 +725,7 @@ class PackagingTests(unittest.TestCase):
             "/usr/lib/spaces/guest/spaces-secret-helper", spec
         )
         self.assertIn("Requires:       glib2", spec)
+        self.assertIn("Requires:       dconf", spec)
         self.assertIn("Requires:       xdg-dbus-proxy", spec)
         self.assertIn("Requires:       python3-pillow", spec)
         self.assertIn("Requires:       librsvg2-tools", spec)
