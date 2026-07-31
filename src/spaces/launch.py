@@ -46,6 +46,7 @@ SELINUX_POLICY_PACKAGE = Path("/usr/share/selinux/packages/spaces.pp")
 SELINUX_PROCESS_CONTEXT = "system_u:system_r:spaces_container_t:s0"
 SELINUX_APIFS_CONTEXT = "system_u:object_r:spaces_apifs_file_t:s0"
 PING_GROUP_RANGE = Path("/proc/sys/net/ipv4/ping_group_range")
+HOST_MEDIA_ROOT = Path("/run/media")
 UNPRIVILEGED_PING_GROUP_RANGE = (0, 2_147_483_647)
 PING_EXECUTABLES = ("/usr/bin/ping", "/bin/ping")
 CAPABILITY_XATTR = "security.capability"
@@ -164,6 +165,7 @@ class SpaceUser:
     administrator: bool = True
     desktop: bool = True
     credential_agents: bool = False
+    mounted_drives: bool = False
 
 
 @dataclass(frozen=True, order=True)
@@ -444,6 +446,9 @@ def _resolve_users(info: dict[str, Any], home: Path) -> tuple[SpaceUser, ...]:
                 desktop=record["permissions"].get("desktop", True),
                 credential_agents=record["permissions"].get(
                     "credential_agents", True
+                ),
+                mounted_drives=record["permissions"].get(
+                    "mounted_drives", True
                 ),
             )
         )
@@ -984,6 +989,109 @@ def _prepare_mounts(users: tuple[SpaceUser, ...]) -> tuple[HomeMount, ...]:
                     uid=user.uid,
                 )
             )
+    return tuple(sorted(mounts))
+
+
+def _prepare_mounted_drive_mounts(
+    users: tuple[SpaceUser, ...],
+    media_root: Path | None = None,
+) -> tuple[HomeMount, ...]:
+    """Create and expose each permitted user's host media directory."""
+
+    permitted_users = tuple(user for user in users if user.mounted_drives)
+    if not permitted_users:
+        return ()
+    if media_root is None:
+        media_root = HOST_MEDIA_ROOT
+
+    try:
+        media_root.mkdir(mode=0o755)
+    except FileExistsError:
+        pass
+    except OSError as error:
+        raise core.SpacesError(
+            _(
+                "Could not prepare mounted drive directory {path}: {error}",
+                path=media_root,
+                error=error,
+            )
+        ) from error
+
+    try:
+        root_fd = os.open(
+            media_root,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+    except OSError as error:
+        raise core.SpacesError(
+            _(
+                "Mounted drive root {path} is unsafe: {error}",
+                path=media_root,
+                error=error,
+            )
+        ) from error
+
+    mounts: list[HomeMount] = []
+    try:
+        root_stat = os.fstat(root_fd)
+        if (
+            not stat.S_ISDIR(root_stat.st_mode)
+            or root_stat.st_uid != os.geteuid()
+        ):
+            raise core.SpacesError(
+                _("Mounted drive root {path} is not root-owned.", path=media_root)
+            )
+        for user in permitted_users:
+            created = False
+            try:
+                os.mkdir(user.name, mode=0o755, dir_fd=root_fd)
+                created = True
+            except FileExistsError:
+                pass
+            try:
+                user_fd = os.open(
+                    user.name,
+                    os.O_RDONLY
+                    | os.O_DIRECTORY
+                    | os.O_NOFOLLOW
+                    | os.O_CLOEXEC,
+                    dir_fd=root_fd,
+                )
+            except OSError as error:
+                raise core.SpacesError(
+                    _(
+                        "Mounted drive directory for {user} is unsafe: {error}",
+                        user=user.name,
+                        error=error,
+                    )
+                ) from error
+            try:
+                user_stat = os.fstat(user_fd)
+                if (
+                    not stat.S_ISDIR(user_stat.st_mode)
+                    or user_stat.st_uid != os.geteuid()
+                ):
+                    raise core.SpacesError(
+                        _(
+                            "Mounted drive directory for {user} is not root-owned.",
+                            user=user.name,
+                        )
+                    )
+                if created:
+                    os.fchmod(user_fd, 0o755)
+            finally:
+                os.close(user_fd)
+
+            source = media_root / user.name
+            mounts.append(
+                HomeMount(
+                    destination=str(PurePosixPath("/run/media") / user.name),
+                    source=source,
+                    uid=user.uid,
+                )
+            )
+    finally:
+        os.close(root_fd)
     return tuple(sorted(mounts))
 
 
@@ -2183,7 +2291,10 @@ def launch(space_name: str) -> int:
             )
         )
 
-    available_mounts = _prepare_mounts(users)
+    available_mounts = (
+        *_prepare_mounts(users),
+        *_prepare_mounted_drive_mounts(users),
+    )
     monitor: _LoginMonitor | None = None
     worker: _MountWorker | None = None
     device_udev: devices.Udev | None = None

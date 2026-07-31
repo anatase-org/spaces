@@ -327,6 +327,7 @@ def _create(distro_id: str, *, missing: bool = False) -> int:
         administrator,
         desktop,
         credential_agents,
+        mounted_drives,
     ) = core.defaults_from_info(
         existing_info, identity
     )
@@ -357,6 +358,7 @@ def _create(distro_id: str, *, missing: bool = False) -> int:
         administrator=administrator,
         desktop=desktop,
         credential_agents=credential_agents,
+        mounted_drives=mounted_drives,
         administrator_group=driver.administrator_group,
         include_system=True,
         distribution_title=driver.configuration_title,
@@ -395,6 +397,7 @@ def _create(distro_id: str, *, missing: bool = False) -> int:
         shortcuts=result.get("shortcuts", True),
         desktop=result.get("desktop", True),
         credential_agents=result.get("credential_agents", True),
+        mounted_drives=result.get("mounted_drives", True),
     )
     configure_logging(rich=True)
     log(
@@ -457,6 +460,7 @@ def _configure(name: str, *, user: str | None) -> int:
         administrator,
         desktop,
         credential_agents,
+        mounted_drives,
     ) = core.defaults_from_info(info, identity)
     driver = get_driver(info["distribution"]["id"])
     administrator_group = (
@@ -474,6 +478,7 @@ def _configure(name: str, *, user: str | None) -> int:
         administrator=administrator,
         desktop=desktop,
         credential_agents=credential_agents,
+        mounted_drives=mounted_drives,
         administrator_group=administrator_group,
         include_system=not user_only,
         distribution_title="",
@@ -494,6 +499,7 @@ def _configure(name: str, *, user: str | None) -> int:
                 "administrator": result.get("administrator", True),
                 "desktop": result.get("desktop", True),
                 "credential_agents": result.get("credential_agents", True),
+                "mounted_drives": result.get("mounted_drives", True),
             },
         }
     }

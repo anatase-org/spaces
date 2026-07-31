@@ -479,6 +479,19 @@ class PackagingTests(unittest.TestCase):
             type_enforcement,
         )
         self.assertIn(
+            "allow spaces_container_t { mnt_t removable_t unlabeled_t }:dir "
+            "manage_dir_perms;",
+            type_enforcement,
+        )
+        self.assertIn(
+            "allow spaces_container_t { mnt_t removable_t unlabeled_t }:file",
+            type_enforcement,
+        )
+        self.assertIn(
+            "allow systemd_machined_t { mnt_t removable_t unlabeled_t }:dir",
+            type_enforcement,
+        )
+        self.assertIn(
             "dbus_write_session_tmp_sock_files(spaces_t)",
             type_enforcement,
         )

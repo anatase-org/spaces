@@ -60,6 +60,12 @@ class LaunchTests(unittest.TestCase):
             Path(self.temporary.name) / "runtime",
         )
         self.session_runtime_patch.start()
+        self.media_root_patch = mock.patch.object(
+            launch_module,
+            "HOST_MEDIA_ROOT",
+            Path(self.temporary.name) / "media",
+        )
+        self.media_root_patch.start()
         host_user = pwd.struct_passwd(
             (
                 "user",
@@ -102,6 +108,7 @@ class LaunchTests(unittest.TestCase):
         self.device_policy_patch.stop()
         self.worker_patch.stop()
         self.session_runtime_patch.stop()
+        self.media_root_patch.stop()
         self.monitor_patch.stop()
         self.passwd_patch.stop()
         self.state_root_patch.stop()
@@ -967,8 +974,10 @@ class LaunchTests(unittest.TestCase):
             f"--bind={self.host_home}/Projects:/home/user/Projects",
         )
         mounts = self.worker_class.call_args.args[4]
-        self.assertEqual(len(mounts), 1)
-        self.assertEqual(mounts[0].destination, "/home/user/Projects")
+        self.assertEqual(
+            {mount.destination for mount in mounts},
+            {"/home/user/Projects", "/run/media/user"},
+        )
         self.assertEqual(
             self.worker_class.call_args.args[5],
             frozenset({1000}),
@@ -1266,6 +1275,7 @@ class UserFixupTests(unittest.TestCase):
         name: str = "alice",
         permitted: tuple[str, ...] = (),
         administrator: bool = True,
+        mounted_drives: bool = False,
     ) -> launch_module.SpaceUser:
         fixed_uid = os.getuid() if uid is None else uid
         fixed_gid = os.getgid() if gid is None else gid
@@ -1279,6 +1289,7 @@ class UserFixupTests(unittest.TestCase):
             permitted_home=permitted,
             administrator=administrator,
             desktop=False,
+            mounted_drives=mounted_drives,
         )
 
     def _write_accounts(
@@ -1626,6 +1637,49 @@ class UserFixupTests(unittest.TestCase):
             launch_module._plan_mounts(available, frozenset()),
             (),
         )
+
+    def test_mounted_drive_directory_is_created_and_bound_read_write(
+        self,
+    ) -> None:
+        media_root = self.root / "run" / "media"
+        media_root.parent.mkdir()
+        user = self._user(mounted_drives=True)
+
+        mounts = launch_module._prepare_mounted_drive_mounts(
+            (user,), media_root
+        )
+
+        self.assertEqual(len(mounts), 1)
+        self.assertEqual(mounts[0].source, media_root / "alice")
+        self.assertEqual(mounts[0].destination, "/run/media/alice")
+        self.assertEqual(mounts[0].uid, user.uid)
+        self.assertEqual(
+            launch_module._bind_argument(mounts[0]),
+            f"--bind={media_root}/alice:/run/media/alice",
+        )
+        self.assertEqual((media_root / "alice").stat().st_uid, os.geteuid())
+        self.assertEqual((media_root / "alice").stat().st_mode & 0o777, 0o755)
+
+    def test_disabled_mounted_drives_does_not_create_media_root(self) -> None:
+        media_root = self.root / "run" / "media"
+
+        self.assertEqual(
+            launch_module._prepare_mounted_drive_mounts(
+                (self._user(mounted_drives=False),), media_root
+            ),
+            (),
+        )
+        self.assertFalse(media_root.exists())
+
+    def test_symlinked_mounted_drive_directory_is_rejected(self) -> None:
+        media_root = self.root / "run" / "media"
+        media_root.mkdir(parents=True)
+        (media_root / "alice").symlink_to(self.root)
+
+        with self.assertRaises(core.SpacesError):
+            launch_module._prepare_mounted_drive_mounts(
+                (self._user(mounted_drives=True),), media_root
+            )
 
     def test_regular_home_files_are_prepared_as_read_write_mounts(self) -> None:
         user = self._user(permitted=(".bashrc", ".ssh/config"))

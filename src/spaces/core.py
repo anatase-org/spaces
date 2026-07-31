@@ -221,6 +221,14 @@ def _validate_user_record(value: object, uid_key: str) -> dict[str, Any]:
         raise SpacesError(
             _("User {uid} desktop permission must be a boolean.", uid=uid_key)
         )
+    mounted_drives = permissions.get("mounted_drives", True)
+    if not isinstance(mounted_drives, bool):
+        raise SpacesError(
+            _(
+                "User {uid} mounted drives permission must be a boolean.",
+                uid=uid_key,
+            )
+        )
     credential_agents = permissions.get("credential_agents", True)
     if not isinstance(credential_agents, bool):
         raise SpacesError(
@@ -368,7 +376,7 @@ def load_info(path: Path) -> dict[str, Any] | None:
 
 def defaults_from_info(
     info: Mapping[str, Any] | None, identity: Identity
-) -> tuple[str, str, str, bool, bool, list[str], bool, bool, bool]:
+) -> tuple[str, str, str, bool, bool, list[str], bool, bool, bool, bool]:
     network = "basic"
     kernel_capabilities = "basic"
     devices = "basic"
@@ -378,6 +386,7 @@ def defaults_from_info(
     administrator = True
     desktop = True
     credential_agents = True
+    mounted_drives = True
     if not info:
         return (
             network,
@@ -389,6 +398,7 @@ def defaults_from_info(
             administrator,
             desktop,
             credential_agents,
+            mounted_drives,
         )
 
     permissions = info.get("permissions", {})
@@ -431,6 +441,9 @@ def defaults_from_info(
     existing_credential_agents = user_permissions.get("credential_agents")
     if isinstance(existing_credential_agents, bool):
         credential_agents = existing_credential_agents
+    existing_mounted_drives = user_permissions.get("mounted_drives")
+    if isinstance(existing_mounted_drives, bool):
+        mounted_drives = existing_mounted_drives
     return (
         network,
         kernel_capabilities,
@@ -441,6 +454,7 @@ def defaults_from_info(
         administrator,
         desktop,
         credential_agents,
+        mounted_drives,
     )
 
 
@@ -455,6 +469,7 @@ def create_info(
     shortcuts: bool = True,
     desktop: bool = True,
     credential_agents: bool = True,
+    mounted_drives: bool = True,
     devices: str = "basic",
     kernel_capabilities: str = "basic",
 ) -> dict[str, Any]:
@@ -478,6 +493,7 @@ def create_info(
                         "administrator": administrator,
                         "desktop": desktop,
                         "credential_agents": credential_agents,
+                        "mounted_drives": mounted_drives,
                     },
                 }
             },

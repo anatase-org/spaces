@@ -236,6 +236,7 @@ class CoreTests(unittest.TestCase):
             administrator,
             desktop,
             credential_agents,
+            mounted_drives,
         ) = core.defaults_from_info(
             None,
             core.Identity(1000, 1000, Path("/home/user")),
@@ -251,6 +252,7 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(administrator)
         self.assertTrue(desktop)
         self.assertTrue(credential_agents)
+        self.assertTrue(mounted_drives)
 
     def test_space_name_validation(self) -> None:
         self.assertEqual(core.validate_space_name("project-1"), "project-1")
@@ -354,6 +356,11 @@ class CoreTests(unittest.TestCase):
                 "credential_agents"
             ]
         )
+        self.assertTrue(
+            info["permissions"]["users"]["1000"]["permissions"][
+                "mounted_drives"
+            ]
+        )
 
     def test_existing_administrator_permission_is_used_as_default(self) -> None:
         identity = core.Identity(1000, 1000, Path("/home/user"))
@@ -376,6 +383,7 @@ class CoreTests(unittest.TestCase):
             administrator,
             _desktop,
             _credential_agents,
+            _mounted_drives,
         ) = core.defaults_from_info(info, identity)
 
         self.assertFalse(administrator)
@@ -402,6 +410,7 @@ class CoreTests(unittest.TestCase):
             administrator,
             _desktop,
             _credential_agents,
+            _mounted_drives,
         ) = core.defaults_from_info(info, identity)
 
         self.assertTrue(administrator)
@@ -424,6 +433,7 @@ class CoreTests(unittest.TestCase):
             _administrator,
             _desktop,
             _credential_agents,
+            _mounted_drives,
         ) = core.defaults_from_info(info, identity)
 
         self.assertTrue(host_auth)
@@ -463,6 +473,32 @@ class CoreTests(unittest.TestCase):
 
         info["permissions"]["users"]["1000"]["permissions"][
             "credential_agents"
+        ] = 1
+        with self.assertRaises(core.SpacesError):
+            core.validate_info(info)
+
+    def test_mounted_drives_permission_defaults_validates_and_is_preserved(
+        self,
+    ) -> None:
+        identity = core.Identity(1000, 1000, Path("/home/user"))
+        info = core.create_info(
+            "work",
+            {"id": "custom"},
+            identity,
+            "basic",
+            [],
+            mounted_drives=False,
+        )
+        self.assertFalse(core.defaults_from_info(info, identity)[9])
+
+        del info["permissions"]["users"]["1000"]["permissions"][
+            "mounted_drives"
+        ]
+        core.validate_info(info)
+        self.assertTrue(core.defaults_from_info(info, identity)[9])
+
+        info["permissions"]["users"]["1000"]["permissions"][
+            "mounted_drives"
         ] = 1
         with self.assertRaises(core.SpacesError):
             core.validate_info(info)

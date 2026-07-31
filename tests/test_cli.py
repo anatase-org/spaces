@@ -254,6 +254,11 @@ class CliTests(unittest.TestCase):
             ]
         )
         self.assertTrue(
+            payload["permissions"]["users"]["1000"]["permissions"][
+                "mounted_drives"
+            ]
+        )
+        self.assertTrue(
             payload["permissions"]["system"]["host_authentication"]
         )
         self.assertTrue(payload["permissions"]["system"]["shortcuts"])
@@ -591,6 +596,7 @@ class CliTests(unittest.TestCase):
                     "administrator": False,
                     "desktop": True,
                     "credential_agents": False,
+                    "mounted_drives": True,
                 },
             },
         )

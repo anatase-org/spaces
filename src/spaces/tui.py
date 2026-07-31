@@ -366,6 +366,7 @@ class PermissionForm(
         administrator: bool = True,
         desktop: bool = True,
         credential_agents: bool = True,
+        mounted_drives: bool = True,
         administrator_group: str = "wheel",
         submit_label: str = _("Create"),
         override: bool = False,
@@ -383,6 +384,7 @@ class PermissionForm(
         self.initial_administrator = administrator
         self.initial_desktop = desktop
         self.initial_credential_agents = credential_agents
+        self.initial_mounted_drives = mounted_drives
         self.administrator_group = administrator_group
         file_names = {
             name
@@ -441,7 +443,13 @@ class PermissionForm(
                 if include_system
                 else []
             )
-            + ["user", "credential-agents", "desktop", "administrator"]
+            + [
+                "user",
+                "mounted-drives",
+                "credential-agents",
+                "desktop",
+                "administrator",
+            ]
             + (["distribution"] if distribution_options else [])
         )
         self.step_index = 0
@@ -631,6 +639,26 @@ class PermissionForm(
                         value=self.initial_credential_agents,
                         id="credential-agents-true",
                     )
+            with Vertical(id="mounted-drives-step", classes="step"):
+                yield Static(
+                    _(
+                        "Choose whether drives mounted for {user} "
+                        "(/run/media/{user}) are available in the space.",
+                        user=self.home.name,
+                    ),
+                    classes="description",
+                )
+                with RadioSet(id="mounted-drives"):
+                    yield CleanRadioButton(
+                        _("Do not share mounted drives"),
+                        value=not self.initial_mounted_drives,
+                        id="mounted-drives-false",
+                    )
+                    yield CleanRadioButton(
+                        _("Share mounted drives read-write"),
+                        value=self.initial_mounted_drives,
+                        id="mounted-drives-true",
+                    )
             with Vertical(id="administrator-step", classes="step"):
                 yield Static(
                     _(
@@ -727,6 +755,7 @@ class PermissionForm(
             "host-authentication": _("Host authentication permissions"),
             "shortcuts": _("Application shortcuts permissions"),
             "user": _("User permissions"),
+            "mounted-drives": _("Mounted drives permissions"),
             "credential-agents": _("Forward Credentials Agents"),
             "desktop": _("Desktop permissions"),
             "administrator": _("Administrator permissions"),
@@ -761,6 +790,7 @@ class PermissionForm(
             "host-authentication": "#host-authentication",
             "shortcuts": "#shortcuts",
             "user": "#home-folders",
+            "mounted-drives": "#mounted-drives",
             "credential-agents": "#credential-agents",
             "desktop": "#desktop",
             "administrator": "#administrator",
@@ -801,6 +831,7 @@ class PermissionForm(
                 "devices": "#devices",
                 "host-authentication": "#host-authentication",
                 "shortcuts": "#shortcuts",
+                "mounted-drives": "#mounted-drives",
                 "credential-agents": "#credential-agents",
                 "desktop": "#desktop",
                 "administrator": "#administrator",
@@ -850,6 +881,11 @@ class PermissionForm(
             "credential_agents": self._radio_value(
                 self.query_one("#credential-agents", RadioSet),
                 "credential-agents-",
+            )
+            == "true",
+            "mounted_drives": self._radio_value(
+                self.query_one("#mounted-drives", RadioSet),
+                "mounted-drives-",
             )
             == "true",
         }

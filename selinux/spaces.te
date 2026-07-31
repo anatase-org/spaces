@@ -392,6 +392,23 @@ kernel_io_uring_use(spaces_container_t)
 userdom_manage_user_home_content(spaces_container_t)
 userdom_exec_user_home_content_files(spaces_container_t)
 
+# A user's selected /run/media directory is bind-mounted read-write. Native
+# Linux filesystems without host labels appear as unlabeled_t, while removable
+# media commonly uses removable_t and the user mount directory itself uses
+# mnt_t.
+gen_require(`
+	type mnt_t;
+	type removable_t;
+	type unlabeled_t;
+')
+allow spaces_t { mnt_t removable_t unlabeled_t }:dir {
+	getattr open read search
+};
+allow spaces_container_t { mnt_t removable_t unlabeled_t }:dir manage_dir_perms;
+allow spaces_container_t { mnt_t removable_t unlabeled_t }:file manage_file_perms;
+allow spaces_container_t { mnt_t removable_t unlabeled_t }:file { execute execute_no_trans map };
+allow spaces_container_t { mnt_t removable_t unlabeled_t }:lnk_file manage_lnk_file_perms;
+
 # Keep ~/.ssh/config separate from keys and other files labeled ssh_home_t.
 # Spaces mounts this one file read-write, while the host SSH client and normal
 # user domains retain their expected access.
@@ -436,4 +453,7 @@ allow systemd_machined_t user_home_type:file getattr;
 allow systemd_machined_t ssh_home_t:dir search_dir_perms;
 allow systemd_machined_t ssh_home_config_t:file getattr;
 allow systemd_machined_t spaces_var_run_t:{ dir file sock_file } getattr;
+allow systemd_machined_t { mnt_t removable_t unlabeled_t }:dir {
+	getattr open read search
+};
 userdom_search_user_home_content(systemd_machined_t)
