@@ -1707,7 +1707,11 @@ class UserFixupTests(unittest.TestCase):
 
 class LoginAndMountWorkerTests(unittest.TestCase):
     def _user(
-        self, uid: int, *, desktop: bool = False
+        self,
+        uid: int,
+        *,
+        desktop: bool = False,
+        credential_agents: bool = False,
     ) -> launch_module.SpaceUser:
         return launch_module.SpaceUser(
             uid=uid,
@@ -1718,6 +1722,7 @@ class LoginAndMountWorkerTests(unittest.TestCase):
             guest_home=launch_module.PurePosixPath(f"/home/user{uid}"),
             permitted_home=(),
             desktop=desktop,
+            credential_agents=credential_agents,
         )
 
     def test_eligible_states_include_lingering(self) -> None:
@@ -1916,6 +1921,33 @@ class LoginAndMountWorkerTests(unittest.TestCase):
 
         worker._desktop.reconcile.assert_called_once_with(
             user, (graphical,), ()
+        )
+
+    def test_credential_agents_are_rechecked_on_unchanged_login(self) -> None:
+        user = self._user(1000, credential_agents=True)
+        monitor = mock.Mock()
+        monitor.state.return_value = "active"
+        worker = launch_module._MountWorker(
+            "work",
+            (user,),
+            monitor,
+            (),
+            (),
+            frozenset({user.uid}),
+        )
+        worker._registered = True
+        worker._process = mock.Mock()
+        worker._desktop.reconcile = mock.Mock()
+
+        worker._reconcile()
+        worker._reconcile()
+
+        self.assertEqual(worker._desktop.reconcile.call_count, 2)
+        worker._desktop.reconcile.assert_called_with(
+            user,
+            (),
+            (),
+            session_active=True,
         )
 
     def test_worker_rate_limits_monitor_reconciliation(self) -> None:

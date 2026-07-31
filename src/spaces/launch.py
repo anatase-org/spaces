@@ -53,7 +53,7 @@ CAPABILITY_XATTR = "security.capability"
 ELIGIBLE_USER_STATES = frozenset({"active", "online", "lingering"})
 INELIGIBLE_USER_STATES = frozenset({"closing", "offline"})
 LOGIN_RECONCILE_INTERVAL_SECONDS = 1.0
-PORTAL_RECONCILE_INTERVAL_SECONDS = 5.0
+SESSION_RECONCILE_INTERVAL_SECONDS = 5.0
 BASE_DEVICE_ALLOW = (
     ("/dev/net/tun", "rwm"),
     ("char-pts", "rw"),
@@ -164,6 +164,7 @@ class SpaceUser:
     permitted_home: tuple[str, ...]
     administrator: bool = True
     desktop: bool = True
+    credential_agents: bool = False
 
 
 @dataclass(frozen=True, order=True)
@@ -442,6 +443,9 @@ def _resolve_users(info: dict[str, Any], home: Path) -> tuple[SpaceUser, ...]:
                 permitted_home=tuple(record["permissions"]["home"]),
                 administrator=record["permissions"].get("administrator", True),
                 desktop=record["permissions"].get("desktop", True),
+                credential_agents=record["permissions"].get(
+                    "credential_agents", True
+                ),
             )
         )
     return tuple(users)
@@ -1602,8 +1606,14 @@ class _MountWorker:
             while (
                 not self._stopping.is_set()
                 and self._monitor.wait(
-                    PORTAL_RECONCILE_INTERVAL_SECONDS
-                    if self._portals_enabled
+                    SESSION_RECONCILE_INTERVAL_SECONDS
+                    if (
+                        self._portals_enabled
+                        or any(
+                            user.credential_agents
+                            for user in self._users
+                        )
+                    )
                     else None
                 )
             ):
@@ -1627,7 +1637,7 @@ class _MountWorker:
                     self._desktop.close()
             except Exception as error:
                 logger.error(
-                    _("Desktop forwarding cleanup failed: {error}", error=error)
+                    _("Host session forwarding cleanup failed: {error}", error=error)
                 )
                 process = self._process
                 if process is not None and process.poll() is None:
@@ -1696,6 +1706,8 @@ class _MountWorker:
     def _reconcile(self) -> None:
         snapshot = _login_snapshot(self._monitor, self._users)
         if snapshot == self._login_snapshot:
+            if any(user.credential_agents for user in self._users):
+                self._reconcile_desktops(snapshot)
             self._desktop.reconcile_portals()
             return
         eligible_uids = snapshot.eligible_uids
@@ -1751,7 +1763,7 @@ class _MountWorker:
     def _reconcile_desktops(self, snapshot: _LoginSnapshot) -> None:
         for user in self._users:
             try:
-                self._desktop.reconcile(
+                arguments = (
                     user,
                     snapshot.sessions(user.uid),
                     tuple(
@@ -1765,10 +1777,17 @@ class _MountWorker:
                         )
                     ),
                 )
+                if user.credential_agents:
+                    self._desktop.reconcile(
+                        *arguments,
+                        session_active=user.uid in snapshot.eligible_uids,
+                    )
+                else:
+                    self._desktop.reconcile(*arguments)
             except session.DesktopSetupError as error:
                 logger.warning(
                     _(
-                        "Could not enable desktop forwarding for {user}: "
+                        "Could not enable host session forwarding for {user}: "
                         "{error}",
                         user=user.name,
                         error=error,

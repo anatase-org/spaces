@@ -50,7 +50,7 @@ Spaces is a small daemon that escalates using polkits. The root inside spaces is
 
 Spaces only mounts users that have executed `spaces configure --user <space>` or were the ones to create the space and only after they log in. The root inside spaces is the same root as the host. This was chosen because user namespaces cannot do certain actions such as modify the host network (would need a bridge and would not be able to open ports) or change kernel settings. Even though the default priviledge level of spaces disallows these actions, a key requirement in design was making spaces able to change permissions without recreating them. However, this also means that spaces can be victim to a class of security issues such as improper mounts, kernel bugs, or other sandboxing holes that can cause the root inside the space to escape.
 
-It is not possible to mount SSH or GPG directories from the host into the space. Spaces can mount `~/.ssh/config`, but it does not expose private keys; use agent forwarding for authentication. The SSH config and selected top-level home files are mounted read-write.
+It is not possible to mount SSH or GPG directories from the host into the space. Spaces can mount `~/.ssh/config`, but it does not expose private keys. The per-user credential-agent permission can instead forward the active host login's SSH-compatible agent (including 1Password, KeePassXC, GNOME Keyring, or GPG SSH support) and GnuPG's restricted forwarding socket. Agent sockets are mounted read-only only while the host user session is eligible, and `SSH_AUTH_SOCK` is rewritten to a fixed path inside the space. The SSH config and selected top-level home files are mounted read-write.
 
 ### SELinux
 

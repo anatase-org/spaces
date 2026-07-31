@@ -348,6 +348,34 @@ optional_policy(`
 	unconfined_use_fds(spaces_container_t)
 ')
 
+# Credential-agent forwarding pins and bind-mounts only the explicitly
+# selected sockets.  Cover the dedicated labels used by confined OpenSSH and
+# GnuPG agents; unconfined and generic user-runtime agents are covered above.
+optional_policy(`
+	gen_require(`
+		attribute ssh_agent_type;
+		type ssh_agent_tmp_t;
+	')
+	allow spaces_t ssh_agent_tmp_t:dir search_dir_perms;
+	allow spaces_t ssh_agent_tmp_t:sock_file { getattr open };
+	stream_connect_pattern(
+		spaces_container_t,
+		ssh_agent_tmp_t,
+		ssh_agent_tmp_t,
+		ssh_agent_type
+	)
+')
+optional_policy(`
+	gen_require(`
+		type gpg_agent_tmp_t;
+		type gpg_runtime_t;
+		type gpg_secret_t;
+	')
+	allow spaces_t { gpg_runtime_t gpg_secret_t }:dir search_dir_perms;
+	allow spaces_t gpg_agent_tmp_t:sock_file { getattr open };
+	gpg_stream_connect_agent(spaces_container_t)
+')
+
 # Electron and other Wayland clients use the explicitly exposed udmabuf
 # device for graphics buffers and io_uring for their internal event loops.
 dev_rw_dma_dev(spaces_container_t)

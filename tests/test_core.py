@@ -237,6 +237,7 @@ class CoreTests(unittest.TestCase):
             selected_home,
             administrator,
             desktop,
+            credential_agents,
         ) = core.defaults_from_info(
             None,
             core.Identity(1000, 1000, Path("/home/user")),
@@ -249,6 +250,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(selected_home, list(core.DEFAULT_HOME_MOUNTS))
         self.assertTrue(administrator)
         self.assertTrue(desktop)
+        self.assertTrue(credential_agents)
 
     def test_space_name_validation(self) -> None:
         self.assertEqual(core.validate_space_name("project-1"), "project-1")
@@ -347,6 +349,11 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(
             info["permissions"]["users"]["1000"]["permissions"]["desktop"]
         )
+        self.assertTrue(
+            info["permissions"]["users"]["1000"]["permissions"][
+                "credential_agents"
+            ]
+        )
 
     def test_existing_administrator_permission_is_used_as_default(self) -> None:
         identity = core.Identity(1000, 1000, Path("/home/user"))
@@ -368,6 +375,7 @@ class CoreTests(unittest.TestCase):
             _home,
             administrator,
             _desktop,
+            _credential_agents,
         ) = core.defaults_from_info(info, identity)
 
         self.assertFalse(administrator)
@@ -393,6 +401,7 @@ class CoreTests(unittest.TestCase):
             _home,
             administrator,
             _desktop,
+            _credential_agents,
         ) = core.defaults_from_info(info, identity)
 
         self.assertTrue(administrator)
@@ -414,6 +423,7 @@ class CoreTests(unittest.TestCase):
             _home,
             _administrator,
             _desktop,
+            _credential_agents,
         ) = core.defaults_from_info(info, identity)
 
         self.assertTrue(host_auth)
@@ -428,6 +438,32 @@ class CoreTests(unittest.TestCase):
         )
         info["permissions"]["system"]["host_authentication"] = 1
 
+        with self.assertRaises(core.SpacesError):
+            core.validate_info(info)
+
+    def test_credential_agent_permission_defaults_validates_and_is_preserved(
+        self,
+    ) -> None:
+        identity = core.Identity(1000, 1000, Path("/home/user"))
+        info = core.create_info(
+            "work",
+            {"id": "custom"},
+            identity,
+            "basic",
+            [],
+            credential_agents=False,
+        )
+        self.assertFalse(core.defaults_from_info(info, identity)[8])
+
+        del info["permissions"]["users"]["1000"]["permissions"][
+            "credential_agents"
+        ]
+        core.validate_info(info)
+        self.assertTrue(core.defaults_from_info(info, identity)[8])
+
+        info["permissions"]["users"]["1000"]["permissions"][
+            "credential_agents"
+        ] = 1
         with self.assertRaises(core.SpacesError):
             core.validate_info(info)
 

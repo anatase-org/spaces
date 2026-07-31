@@ -363,16 +363,30 @@ def enter(
     if caller_uid == 0:
         return _machine_shell(user.pw_name, space_name, command)
     desktop = record["permissions"].get("desktop", True) and caller_uid != 0
+    credential_agents = (
+        record["permissions"].get("credential_agents", True)
+        and caller_uid != 0
+    )
     environment = (
         session.desktop_environment(
             space_name,
             user.pw_uid,
         )
-        if desktop
+        if desktop or credential_agents
         else {}
     )
     if not environment:
         return _machine_shell(user.pw_name, space_name, command)
+    graphical_environment = desktop and any(
+        name != "SSH_AUTH_SOCK" for name in environment
+    )
+    if not graphical_environment:
+        return _machine_shell(
+            user.pw_name,
+            space_name,
+            command,
+            environment=environment,
+        )
     agent: str | None = None
     agent = session.polkit_agent(
         _space_directory(space_name) / "rootfs"

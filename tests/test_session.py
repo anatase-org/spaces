@@ -36,7 +36,13 @@ def graphical(
     )
 
 
-def user(root: Path, *, desktop: bool = True, uid: int | None = None) -> object:
+def user(
+    root: Path,
+    *,
+    desktop: bool = True,
+    credential_agents: bool = False,
+    uid: int | None = None,
+) -> object:
     actual_uid = os.getuid() if uid is None else uid
     home = root / "home"
     home.mkdir(parents=True, exist_ok=True)
@@ -48,6 +54,7 @@ def user(root: Path, *, desktop: bool = True, uid: int | None = None) -> object:
         space_home=root / "space-home",
         guest_home=PurePosixPath(f"/home/{pwd.getpwuid(os.getuid()).pw_name}"),
         desktop=desktop,
+        credential_agents=credential_agents,
     )
 
 
@@ -128,6 +135,7 @@ class GraphicalSessionTests(unittest.TestCase):
                 "XDG_SESSION_ID": "2",
                 "XDG_RUNTIME_DIR": "/run/user/1000",
                 "DBUS_SESSION_BUS_ADDRESS": "unix:path=/host/bus",
+                "SSH_AUTH_SOCK": "/run/user/1000/agent",
             },
         )
         self.assertEqual(
@@ -153,6 +161,71 @@ class GraphicalSessionTests(unittest.TestCase):
 
 
 class DesktopPathTests(unittest.TestCase):
+    def test_credential_plan_forwards_ssh_and_only_restricted_gpg_extra_socket(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            credential_user = user(
+                root,
+                desktop=False,
+                credential_agents=True,
+            )
+            ssh_socket = socket.socket(socket.AF_UNIX)
+            gpg_socket = socket.socket(socket.AF_UNIX)
+            browser_socket = socket.socket(socket.AF_UNIX)
+            ssh_path = credential_user.host_home / "agent.sock"
+            gnupg = credential_user.host_home / ".gnupg"
+            gnupg.mkdir()
+            extra_path = gnupg / "S.gpg-agent.extra"
+            browser_path = gnupg / "S.gpg-agent.browser"
+            try:
+                ssh_socket.bind(str(ssh_path))
+                gpg_socket.bind(str(extra_path))
+                browser_socket.bind(str(browser_path))
+                original_validate = session._validated_source
+
+                def validate(path: Path, **kwargs: object) -> object:
+                    if not path.is_relative_to(credential_user.host_home):
+                        return None
+                    return original_validate(path, **kwargs)
+
+                with mock.patch.object(
+                    session,
+                    "_validated_source",
+                    side_effect=validate,
+                ):
+                    plan = session._credential_plan(
+                        credential_user,
+                        {"SSH_AUTH_SOCK": str(ssh_path)},
+                    )
+            finally:
+                ssh_socket.close()
+                gpg_socket.close()
+                browser_socket.close()
+
+        bindings = {
+            binding.destination: binding.source
+            for binding in plan.binds
+        }
+        credential_root = f"/run/spaces/credentials/{credential_user.uid}"
+        gpg_root = f"/run/user/{credential_user.uid}/gnupg"
+        self.assertEqual(
+            plan.environment,
+            {"SSH_AUTH_SOCK": f"{credential_root}/ssh-agent"},
+        )
+        self.assertEqual(
+            bindings[f"{credential_root}/ssh-agent"],
+            ssh_path,
+        )
+        self.assertEqual(
+            bindings[f"{gpg_root}/S.gpg-agent"],
+            extra_path,
+        )
+        self.assertNotIn(f"{gpg_root}/S.gpg-agent.browser", bindings)
+        self.assertNotIn(browser_path, bindings.values())
+        self.assertFalse(plan.desktop)
+
     def test_prepare_user_paths_are_owned_and_include_vscode_parent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)
@@ -584,6 +657,60 @@ class DesktopControllerTests(unittest.TestCase):
 
             deactivate.assert_called_once_with(self.desktop_user)
             plan.assert_not_called()
+
+    def test_credential_agents_follow_active_login_without_desktop(self) -> None:
+        credential_user = user(
+            self.root / "credential-user",
+            desktop=False,
+            credential_agents=True,
+        )
+        controller = session.DesktopController("work", (credential_user,))
+        binding = session.DesktopBind(
+            f"/run/spaces/credentials/{credential_user.uid}/ssh-agent",
+            Path("/host/agent"),
+            1,
+            2,
+        )
+        credential_plan = session.DesktopPlan(
+            "credentials",
+            (binding,),
+            {
+                "SSH_AUTH_SOCK": (
+                    f"/run/spaces/credentials/{credential_user.uid}/ssh-agent"
+                )
+            },
+            desktop=False,
+        )
+        active = session._ActiveDesktop(credential_plan)
+        with (
+            mock.patch.object(
+                session, "host_manager_environment", return_value={}
+            ),
+            mock.patch.object(
+                session,
+                "_credential_plan",
+                return_value=credential_plan,
+            ),
+            mock.patch.object(
+                controller, "_activate", return_value=active
+            ) as activate,
+        ):
+            controller.reconcile(
+                credential_user,
+                (),
+                session_active=True,
+            )
+
+        activate.assert_called_once_with(credential_user, credential_plan)
+        self.assertIs(controller.active[credential_user.uid], active)
+
+        with mock.patch.object(controller, "deactivate") as deactivate:
+            controller.reconcile(
+                credential_user,
+                (),
+                session_active=False,
+            )
+        deactivate.assert_called_once_with(credential_user)
 
     def test_mount_pins_identity_and_is_read_only(self) -> None:
         source = self.root / "socket"

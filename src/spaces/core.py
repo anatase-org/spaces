@@ -223,6 +223,14 @@ def _validate_user_record(value: object, uid_key: str) -> dict[str, Any]:
         raise SpacesError(
             _("User {uid} desktop permission must be a boolean.", uid=uid_key)
         )
+    credential_agents = permissions.get("credential_agents", True)
+    if not isinstance(credential_agents, bool):
+        raise SpacesError(
+            _(
+                "User {uid} credential agent permission must be a boolean.",
+                uid=uid_key,
+            )
+        )
     return record
 
 
@@ -362,7 +370,7 @@ def load_info(path: Path) -> dict[str, Any] | None:
 
 def defaults_from_info(
     info: Mapping[str, Any] | None, identity: Identity
-) -> tuple[str, str, str, bool, bool, list[str], bool, bool]:
+) -> tuple[str, str, str, bool, bool, list[str], bool, bool, bool]:
     network = "basic"
     kernel_capabilities = "basic"
     devices = "basic"
@@ -371,6 +379,7 @@ def defaults_from_info(
     selected_home = list(DEFAULT_HOME_MOUNTS)
     administrator = True
     desktop = True
+    credential_agents = True
     if not info:
         return (
             network,
@@ -381,6 +390,7 @@ def defaults_from_info(
             selected_home,
             administrator,
             desktop,
+            credential_agents,
         )
 
     permissions = info.get("permissions", {})
@@ -420,6 +430,9 @@ def defaults_from_info(
     existing_desktop = user_permissions.get("desktop")
     if isinstance(existing_desktop, bool):
         desktop = existing_desktop
+    existing_credential_agents = user_permissions.get("credential_agents")
+    if isinstance(existing_credential_agents, bool):
+        credential_agents = existing_credential_agents
     return (
         network,
         kernel_capabilities,
@@ -429,6 +442,7 @@ def defaults_from_info(
         selected_home,
         administrator,
         desktop,
+        credential_agents,
     )
 
 
@@ -442,6 +456,7 @@ def create_info(
     host_authentication: bool = True,
     shortcuts: bool = True,
     desktop: bool = True,
+    credential_agents: bool = True,
     devices: str = "basic",
     kernel_capabilities: str = "basic",
 ) -> dict[str, Any]:
@@ -464,6 +479,7 @@ def create_info(
                         "home": sorted(home, key=str.casefold),
                         "administrator": administrator,
                         "desktop": desktop,
+                        "credential_agents": credential_agents,
                     },
                 }
             },

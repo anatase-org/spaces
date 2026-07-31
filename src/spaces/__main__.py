@@ -326,6 +326,7 @@ def _create(distro_id: str, *, missing: bool = False) -> int:
         selected_home,
         administrator,
         desktop,
+        credential_agents,
     ) = core.defaults_from_info(
         existing_info, identity
     )
@@ -355,6 +356,7 @@ def _create(distro_id: str, *, missing: bool = False) -> int:
         selected_home=selected_home,
         administrator=administrator,
         desktop=desktop,
+        credential_agents=credential_agents,
         administrator_group=driver.administrator_group,
         include_system=True,
         distribution_title=driver.configuration_title,
@@ -392,6 +394,7 @@ def _create(distro_id: str, *, missing: bool = False) -> int:
         host_authentication=result.get("host_authentication", True),
         shortcuts=result.get("shortcuts", True),
         desktop=result.get("desktop", True),
+        credential_agents=result.get("credential_agents", True),
     )
     configure_logging(rich=True)
     log(
@@ -453,6 +456,7 @@ def _configure(name: str, *, user: str | None) -> int:
         selected_home,
         administrator,
         desktop,
+        credential_agents,
     ) = core.defaults_from_info(info, identity)
     driver = get_driver(info["distribution"]["id"])
     administrator_group = (
@@ -469,6 +473,7 @@ def _configure(name: str, *, user: str | None) -> int:
         selected_home=selected_home,
         administrator=administrator,
         desktop=desktop,
+        credential_agents=credential_agents,
         administrator_group=administrator_group,
         include_system=not user_only,
         distribution_title="",
@@ -488,6 +493,7 @@ def _configure(name: str, *, user: str | None) -> int:
                 "home": sorted(result["home"], key=str.casefold),
                 "administrator": result.get("administrator", True),
                 "desktop": result.get("desktop", True),
+                "credential_agents": result.get("credential_agents", True),
             },
         }
     }

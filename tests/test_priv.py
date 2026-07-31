@@ -878,6 +878,7 @@ class PrivilegedTests(unittest.TestCase):
             [],
             host_authentication=False,
             desktop=False,
+            credential_agents=False,
         )
         space = self.state_root / "work"
         space.mkdir(parents=True)
@@ -1106,6 +1107,7 @@ class PrivilegedTests(unittest.TestCase):
             [],
             host_authentication=False,
             desktop=False,
+            credential_agents=False,
         )
         account = mock.Mock(
             pw_uid=1000,
@@ -1122,6 +1124,43 @@ class PrivilegedTests(unittest.TestCase):
             self.assertEqual(priv.enter("alice@work", []), 0)
         environment.assert_not_called()
         shell.assert_called_once_with("alice", "work", [])
+
+    def test_credential_only_enter_injects_agent_without_gui_launcher(
+        self,
+    ) -> None:
+        info = core.create_info(
+            "work",
+            {"id": "custom"},
+            core.Identity(1000, 1000, Path("/home/alice")),
+            "basic",
+            [],
+            desktop=False,
+            credential_agents=True,
+        )
+        account = mock.Mock(pw_uid=1000, pw_name="alice")
+        forwarded = {
+            "SSH_AUTH_SOCK": "/run/spaces/credentials/1000/ssh-agent"
+        }
+        with (
+            mock.patch.object(priv, "_caller_uid", return_value=1000),
+            mock.patch.object(priv.pwd, "getpwnam", return_value=account),
+            mock.patch.object(priv, "_space_info", return_value=info),
+            mock.patch.object(priv, "_ensure_space_started", return_value=0),
+            mock.patch.object(
+                session,
+                "desktop_environment",
+                return_value=forwarded,
+            ),
+            mock.patch.object(priv, "_machine_shell", return_value=0) as shell,
+        ):
+            self.assertEqual(priv.enter("alice@work", ["ssh", "host"]), 0)
+
+        shell.assert_called_once_with(
+            "alice",
+            "work",
+            ["ssh", "host"],
+            environment=forwarded,
+        )
 
     def test_machine_shell_runs_direct(self) -> None:
         completed = subprocess.CompletedProcess([], 0)

@@ -369,6 +369,7 @@ class PermissionForm(
         distribution_values: list[str] | None = None,
         administrator: bool = True,
         desktop: bool = True,
+        credential_agents: bool = True,
         administrator_group: str = "wheel",
         submit_label: str = _("Create"),
         override: bool = False,
@@ -385,6 +386,7 @@ class PermissionForm(
         self.initial_home = set(selected_home)
         self.initial_administrator = administrator
         self.initial_desktop = desktop
+        self.initial_credential_agents = credential_agents
         self.administrator_group = administrator_group
         file_names = {
             name
@@ -441,7 +443,7 @@ class PermissionForm(
                 if include_system
                 else []
             )
-            + ["user", "desktop", "administrator"]
+            + ["user", "credential-agents", "desktop", "administrator"]
             + (["distribution"] if distribution_options else [])
         )
         self.step_index = 0
@@ -609,6 +611,28 @@ class PermissionForm(
                         value=self.initial_desktop,
                         id="desktop-true",
                     )
+            with Vertical(id="credential-agents-step", classes="step"):
+                yield Static(
+                    _(
+                        "Choose whether credential agents from your active "
+                        "host session are available inside the space."
+                    ),
+                    classes="description",
+                )
+                with RadioSet(id="credential-agents"):
+                    yield CleanRadioButton(
+                        _("No"),
+                        value=not self.initial_credential_agents,
+                        id="credential-agents-false",
+                    )
+                    yield CleanRadioButton(
+                        _(
+                            "Yes — Share my GPG, SSH, and compatible "
+                            "credential agents"
+                        ),
+                        value=self.initial_credential_agents,
+                        id="credential-agents-true",
+                    )
             with Vertical(id="administrator-step", classes="step"):
                 yield Static(
                     _(
@@ -705,6 +729,7 @@ class PermissionForm(
             "host-authentication": _("Host authentication permissions"),
             "shortcuts": _("Application shortcuts permissions"),
             "user": _("User permissions"),
+            "credential-agents": _("Forward Credentials Agents"),
             "desktop": _("Desktop permissions"),
             "administrator": _("Administrator permissions"),
             "distribution": _("Distribution settings"),
@@ -738,6 +763,7 @@ class PermissionForm(
             "host-authentication": "#host-authentication",
             "shortcuts": "#shortcuts",
             "user": "#home-folders",
+            "credential-agents": "#credential-agents",
             "desktop": "#desktop",
             "administrator": "#administrator",
             "distribution": (
@@ -777,6 +803,7 @@ class PermissionForm(
                 "devices": "#devices",
                 "host-authentication": "#host-authentication",
                 "shortcuts": "#shortcuts",
+                "credential-agents": "#credential-agents",
                 "desktop": "#desktop",
                 "administrator": "#administrator",
                 "distribution": "#distribution-option",
@@ -820,6 +847,11 @@ class PermissionForm(
             "desktop": self._radio_value(
                 self.query_one("#desktop", RadioSet),
                 "desktop-",
+            )
+            == "true",
+            "credential_agents": self._radio_value(
+                self.query_one("#credential-agents", RadioSet),
+                "credential-agents-",
             )
             == "true",
         }

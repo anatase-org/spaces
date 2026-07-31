@@ -412,6 +412,16 @@ class PackagingTests(unittest.TestCase):
             type_enforcement,
         )
         self.assertIn(
+            "gpg_stream_connect_agent(spaces_container_t)",
+            type_enforcement,
+        )
+        self.assertIn("attribute ssh_agent_type;", type_enforcement)
+        self.assertIn(
+            "spaces_container_t,\n\t\tssh_agent_tmp_t,\n"
+            "\t\tssh_agent_tmp_t,\n\t\tssh_agent_type",
+            type_enforcement,
+        )
+        self.assertIn(
             "dbus_connect_session_bus(spaces_t)",
             type_enforcement,
         )

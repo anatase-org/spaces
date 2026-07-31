@@ -1,4 +1,4 @@
-"""Login-scoped host desktop forwarding for running spaces.
+"""Login-scoped host session forwarding for running spaces.
 
 Only this module knows which host-session resources may cross into a space.
 The launch monitor supplies trusted logind records; terminal environments and
@@ -19,7 +19,7 @@ import stat
 import subprocess
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Protocol
 
@@ -35,6 +35,7 @@ XDG_DBUS_PROXY = "/usr/bin/xdg-dbus-proxy"
 OPEN_BROKER = "/usr/lib/spaces/spaces-open-broker"
 RUNTIME_ROOT = Path("/run/spaces")
 DESKTOP_ROOT = PurePosixPath("/run/spaces/desktop")
+CREDENTIAL_ROOT = PurePosixPath("/run/spaces/credentials")
 ENVIRONMENT_DIRECTORY = "env"
 PORTAL_SOCKET_NAME = "bus"
 PORTAL_READY_TIMEOUT = 5.0
@@ -99,6 +100,7 @@ DESKTOP_ENVIRONMENT = frozenset(
         "SDL_VIDEODRIVER",
         "SPACES_OPEN_BROKER",
         "SPACES_NAME",
+        "SSH_AUTH_SOCK",
         "WAYLAND_DISPLAY",
         "XAUTHORITY",
         "XCURSOR_PATH",
@@ -192,6 +194,7 @@ class DesktopUser(Protocol):
     space_home: Path
     guest_home: PurePosixPath
     desktop: bool
+    credential_agents: bool
 
 
 @dataclass(frozen=True)
@@ -232,6 +235,7 @@ class DesktopPlan:
     open_mappings: tuple[OpenPathMapping, ...] = ()
     mime_sources: tuple[tuple[Path, Path], ...] = ()
     open_data_root: Path | None = None
+    desktop: bool = True
 
 
 class DesktopSetupError(Exception):
@@ -843,7 +847,11 @@ def _validated_source(
         return None
     except OSError as error:
         raise core.SpacesError(
-            _("Could not inspect desktop resource {path}: {error}", path=path, error=error)
+            _(
+                "Could not inspect session resource {path}: {error}",
+                path=path,
+                error=error,
+            )
         ) from error
     try:
         resolved = path.resolve(strict=True)
@@ -857,16 +865,16 @@ def _validated_source(
         for root in resolved_roots
     ):
         raise core.SpacesError(
-            _("Desktop resource escapes its allowed directory: {path}.", path=path)
+            _("Session resource escapes its allowed directory: {path}.", path=path)
         )
     metadata = resolved.stat()
     if stat.S_IFMT(metadata.st_mode) not in kinds:
         raise core.SpacesError(
-            _("Desktop resource has an unexpected file type: {path}.", path=path)
+            _("Session resource has an unexpected file type: {path}.", path=path)
         )
     if owner is not None and metadata.st_uid != owner:
         raise core.SpacesError(
-            _("Desktop resource has the wrong owner: {path}.", path=path)
+            _("Session resource has the wrong owner: {path}.", path=path)
         )
     if require_access:
         required = (
@@ -878,13 +886,13 @@ def _validated_source(
         )
         if _permissions(metadata, user) & required != required:
             raise core.SpacesError(
-                _("Desktop resource is inaccessible to its user: {path}.", path=path)
+                _("Session resource is inaccessible to its user: {path}.", path=path)
             )
         for parent in resolved.parents:
             if _permissions(parent.stat(), user) & 0o1 == 0:
                 raise core.SpacesError(
                     _(
-                        "Desktop resource has an inaccessible parent: {path}.",
+                        "Session resource has an inaccessible parent: {path}.",
                         path=path,
                     )
                 )
@@ -999,6 +1007,88 @@ def _write_open_data(
     return changed
 
 
+def _credential_plan(
+    user: DesktopUser,
+    source_environment: dict[str, str],
+) -> DesktopPlan:
+    """Plan login-scoped credential sockets without exposing host paths."""
+
+    host_user = pwd.getpwuid(user.uid)
+    runtime = Path(f"/run/user/{user.uid}")
+    home = user.host_home
+    root = CREDENTIAL_ROOT / str(user.uid)
+    binds: list[DesktopBind] = []
+    environment: dict[str, str] = {}
+
+    def add(
+        source: Path,
+        destination: PurePosixPath | str,
+        *,
+        roots: tuple[Path, ...],
+    ) -> bool:
+        existing_roots = tuple(root for root in roots if root.exists())
+        if not existing_roots:
+            return False
+        checked = _validated_source(
+            source,
+            roots=existing_roots,
+            kinds=(stat.S_IFSOCK,),
+            user=host_user,
+            owner=user.uid,
+        )
+        if checked is None:
+            return False
+        resolved, metadata = checked
+        binds.append(
+            DesktopBind(
+                destination=str(destination),
+                source=resolved,
+                device=metadata.st_dev,
+                inode=metadata.st_ino,
+            )
+        )
+        return True
+
+    ssh_value = source_environment.get("SSH_AUTH_SOCK")
+    if ssh_value and _safe_value(ssh_value):
+        ssh_source = Path(ssh_value)
+        if not ssh_source.is_absolute():
+            raise core.SpacesError(_("SSH_AUTH_SOCK must be an absolute path."))
+        ssh_destination = root / "ssh-agent"
+        if add(
+            ssh_source,
+            ssh_destination,
+            roots=(runtime, home, Path("/tmp")),
+        ):
+            environment["SSH_AUTH_SOCK"] = str(ssh_destination)
+
+    # The extra socket is GnuPG's deliberately restricted forwarding
+    # interface. Present it at the guest's ordinary agent location so modern
+    # GnuPG clients use it without changing GNUPGHOME or deprecated variables.
+    socket_directories = (
+        runtime / "gnupg",
+        home / ".gnupg",
+    )
+    extra_candidates = [
+        *(directory / "S.gpg-agent.extra" for directory in socket_directories),
+        *sorted((runtime / "gnupg").glob("d.*/S.gpg-agent.extra")),
+    ]
+    for candidate in extra_candidates:
+        if add(
+            candidate,
+            PurePosixPath(f"/run/user/{user.uid}/gnupg/S.gpg-agent"),
+            roots=(runtime, home),
+        ):
+            break
+
+    return DesktopPlan(
+        session_id="credentials",
+        binds=tuple(sorted(binds)),
+        environment=environment,
+        desktop=False,
+    )
+
+
 def _plan(
     user: DesktopUser,
     selected: LoginSession,
@@ -1021,6 +1111,7 @@ def _plan(
         "DBUS_SESSION_BUS_ADDRESS",
         "FONTCONFIG_FILE",
         "PIPEWIRE_RUNTIME_DIR",
+        "SSH_AUTH_SOCK",
         "XCURSOR_PATH",
         "XDG_DATA_DIRS",
         "XDG_CONFIG_DIRS",
@@ -1509,7 +1600,15 @@ def initialize_status(space_name: str, users: tuple[DesktopUser, ...]) -> None:
         _write_record(
             space_name,
             user.uid,
-            "pending" if user.desktop and user.uid != 0 else "inactive",
+            (
+                "pending"
+                if (
+                    user.desktop
+                    or getattr(user, "credential_agents", False)
+                )
+                and user.uid != 0
+                else "inactive"
+            ),
             None,
             {},
         )
@@ -1534,7 +1633,7 @@ def desktop_environment(
     *,
     timeout: float = 30,
 ) -> dict[str, str]:
-    """Wait through reconciliation and read its root-only GUI environment."""
+    """Wait through reconciliation and read its root-only session environment."""
 
     deadline = time.monotonic() + timeout
     while True:
@@ -1549,7 +1648,7 @@ def desktop_environment(
             return environment
         if time.monotonic() >= deadline:
             raise core.SpacesError(
-                _("Timed out waiting for desktop forwarding to settle.")
+                _("Timed out waiting for host session forwarding to settle.")
             )
         time.sleep(0.05)
 
@@ -1601,28 +1700,35 @@ class DesktopController:
         user: DesktopUser,
         sessions: tuple[LoginSession, ...],
         open_mappings: tuple[OpenPathMapping, ...] = (),
+        *,
+        session_active: bool = True,
     ) -> None:
-        if not user.desktop or user.uid == 0:
+        credential_agents = getattr(user, "credential_agents", False)
+        if (
+            user.uid == 0
+            or (not user.desktop and not credential_agents)
+            or not session_active
+        ):
             if user.uid in self.active:
                 self.deactivate(user)
             return
         environment = host_manager_environment(user)
-        selected = select_graphical_session(sessions, environment)
+        selected = (
+            select_graphical_session(sessions, environment)
+            if user.desktop
+            else None
+        )
         current = self.active.get(user.uid)
-        if selected is None:
+        if selected is None and not credential_agents:
             self.deactivate(user)
-            return
-        if (
-            current is not None
-            and current.plan.session_id == selected.session_id
-            and current.plan.open_mappings == open_mappings
-        ):
-            self._repair_portal(user, current)
             return
 
         set_status(self.space_name, user.uid, "pending")
+        generation_id = (
+            selected.session_id if selected is not None else "credentials"
+        )
         generation = hashlib.sha256(
-            selected.session_id.encode("utf-8")
+            generation_id.encode("utf-8")
         ).hexdigest()[:16]
         generated = (
             RUNTIME_ROOT
@@ -1634,21 +1740,38 @@ class DesktopController:
         )
         previous = current
         try:
-            plan = _plan(
-                user,
-                selected,
-                environment,
-                generated,
-                rootfs=self.rootfs,
-                open_mappings=open_mappings,
-            )
-            plan.environment["SPACES_NAME"] = self.space_name
-            plan.environment["SPACES_OPEN_BROKER"] = _broker_name(
-                self.space_name, user.uid, selected.session_id
-            )
+            if selected is not None:
+                plan = _plan(
+                    user,
+                    selected,
+                    environment,
+                    generated,
+                    rootfs=self.rootfs,
+                    open_mappings=open_mappings,
+                )
+                plan.environment["SPACES_NAME"] = self.space_name
+                plan.environment["SPACES_OPEN_BROKER"] = _broker_name(
+                    self.space_name, user.uid, selected.session_id
+                )
+            else:
+                plan = DesktopPlan(
+                    "credentials", (), {}, desktop=False
+                )
+            if credential_agents:
+                credentials = _credential_plan(user, environment)
+                plan = replace(
+                    plan,
+                    binds=tuple(
+                        sorted((*plan.binds, *credentials.binds))
+                    ),
+                    environment={
+                        **plan.environment,
+                        **credentials.environment,
+                    },
+                )
         except Exception as error:
             self._remove_generated(
-                DesktopPlan(selected.session_id, (), {}, generated)
+                DesktopPlan(generation_id, (), {}, generated)
             )
             set_status(
                 self.space_name,
@@ -1659,6 +1782,15 @@ class DesktopController:
                 ),
             )
             raise DesktopSetupError(str(error)) from error
+        if current is not None and current.plan == plan:
+            set_status(
+                self.space_name,
+                user.uid,
+                "active",
+                session_id=current.plan.session_id,
+            )
+            self._repair_portal(user, current)
+            return
         if previous is not None:
             self._deactivate(user, previous, remove_generated=False)
         try:
@@ -1694,7 +1826,10 @@ class DesktopController:
         for user in self.users.values():
             if user.uid in self.active:
                 self.deactivate(user)
-            elif user.desktop and user.uid != 0:
+            elif (
+                user.desktop
+                or getattr(user, "credential_agents", False)
+            ) and user.uid != 0:
                 set_status(self.space_name, user.uid, "inactive")
 
     def reconcile_portals(self) -> None:
@@ -1729,7 +1864,10 @@ class DesktopController:
         self.destination_users.clear()
         self.destination_sources.clear()
         for user in self.users.values():
-            if user.desktop and user.uid != 0:
+            if (
+                user.desktop
+                or getattr(user, "credential_agents", False)
+            ) and user.uid != 0:
                 set_status(self.space_name, user.uid, "inactive")
 
     def _activate(
@@ -1743,7 +1881,7 @@ class DesktopController:
             for binding in plan.binds:
                 self._mount(user.uid, binding)
                 mounted.append(binding)
-            if self.portals_enabled:
+            if self.portals_enabled and plan.desktop:
                 try:
                     portal, portal_binding = start_portal_proxy(
                         self.space_name,
@@ -1807,7 +1945,7 @@ class DesktopController:
         user: DesktopUser,
         current: _ActiveDesktop,
     ) -> None:
-        if not self.portals_enabled:
+        if not self.portals_enabled or not current.plan.desktop:
             return
         if (
             current.portal is not None
@@ -1897,7 +2035,7 @@ class DesktopController:
         except Exception as error:
             raise DesktopRevocationError(
                 _(
-                    "Could not safely revoke desktop forwarding for {user}: "
+                    "Could not safely revoke host session forwarding for {user}: "
                     "{error}",
                     user=user.name,
                     error=error,
@@ -1942,6 +2080,9 @@ class DesktopController:
                 "-g",
                 str(user.gid),
                 str(DESKTOP_ROOT / str(user.uid)),
+                str(CREDENTIAL_ROOT / str(user.uid)),
+                f"/run/user/{user.uid}",
+                f"/run/user/{user.uid}/gnupg",
             ]
         )
 
@@ -1952,7 +2093,7 @@ class DesktopController:
             if self.destination_sources[binding.destination] != identity:
                 raise core.SpacesError(
                     _(
-                        "Desktop destination {path} is already bound to a "
+                        "Session destination {path} is already bound to a "
                         "different source.",
                         path=binding.destination,
                     )
@@ -1966,7 +2107,7 @@ class DesktopController:
             metadata = os.fstat(descriptor)
             if (metadata.st_dev, metadata.st_ino) != identity:
                 raise core.SpacesError(
-                    _("Desktop resource changed while it was being mounted.")
+                    _("Session resource changed while it was being mounted.")
                 )
             subprocess.run(
                 [

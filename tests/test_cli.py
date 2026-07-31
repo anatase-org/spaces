@@ -249,6 +249,11 @@ class CliTests(unittest.TestCase):
             ]
         )
         self.assertTrue(
+            payload["permissions"]["users"]["1000"]["permissions"][
+                "credential_agents"
+            ]
+        )
+        self.assertTrue(
             payload["permissions"]["system"]["host_authentication"]
         )
         self.assertTrue(payload["permissions"]["system"]["shortcuts"])
@@ -559,6 +564,7 @@ class CliTests(unittest.TestCase):
                     return_value={
                         "home": ["Documents"],
                         "administrator": False,
+                        "credential_agents": False,
                     },
                 ) as wizard,
                 mock.patch.object(cli, "_invoke_helper", return_value=0) as invoke,
@@ -584,6 +590,7 @@ class CliTests(unittest.TestCase):
                     "home": ["Documents"],
                     "administrator": False,
                     "desktop": True,
+                    "credential_agents": False,
                 },
             },
         )
