@@ -58,6 +58,8 @@ spaces = ["overlay/*.png"]
 "lib/systemd/user" = ["data/systemd/user/spaces@.service"]
 "share/spaces/portal/dbus-1/services" = [
   "data/portal/dbus-1/services/org.freedesktop.FileManager1.service",
+  "data/portal/dbus-1/services/org.freedesktop.Notifications.service",
+  "data/portal/dbus-1/services/org.freedesktop.ScreenSaver.service",
   "data/portal/dbus-1/services/org.freedesktop.impl.portal.desktop.spaces.service",
   "data/portal/dbus-1/services/org.freedesktop.secrets.service",
   "data/portal/dbus-1/services/org.kde.secretservicecompat.service",

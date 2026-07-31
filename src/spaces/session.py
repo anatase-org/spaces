@@ -536,6 +536,52 @@ def _portal_policy_arguments(broker_name: str | None = None) -> list[str]:
         arguments.append(
             f"--broadcast={name}=org.freedesktop.portal.{interface}.*@{subtree}"
         )
+    notifications = "org.freedesktop.Notifications"
+    notification_path = "/org/freedesktop/Notifications"
+    for method in (
+        "GetCapabilities",
+        "Notify",
+        "CloseNotification",
+        "GetServerInformation",
+    ):
+        arguments.append(
+            f"--call={notifications}={notifications}.{method}"
+            f"@{notification_path}"
+        )
+    for signal_name in (
+        "NotificationClosed",
+        "ActionInvoked",
+        "ActivationToken",
+    ):
+        arguments.append(
+            f"--broadcast={notifications}={notifications}.{signal_name}"
+            f"@{notification_path}"
+        )
+    screen_saver = "org.freedesktop.ScreenSaver"
+    for path in ("/org/freedesktop/ScreenSaver", "/ScreenSaver"):
+        arguments.append(
+            f"--call={screen_saver}="
+            f"org.freedesktop.DBus.Introspectable.Introspect@{path}"
+        )
+        for method in (
+            "Lock",
+            "SimulateUserActivity",
+            "GetActive",
+            "GetActiveTime",
+            "GetSessionIdleTime",
+            "SetActive",
+            "Inhibit",
+            "UnInhibit",
+            "Throttle",
+            "UnThrottle",
+        ):
+            arguments.append(
+                f"--call={screen_saver}={screen_saver}.{method}@{path}"
+            )
+        arguments.append(
+            f"--broadcast={screen_saver}="
+            f"{screen_saver}.ActiveChanged@{path}"
+        )
     return arguments
 
 

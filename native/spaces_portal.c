@@ -17,6 +17,11 @@
 #define BACKEND_NAME "org.freedesktop.impl.portal.desktop.spaces"
 #define FILE_MANAGER_NAME "org.freedesktop.FileManager1"
 #define FILE_MANAGER_PATH "/org/freedesktop/FileManager1"
+#define NOTIFICATIONS_NAME "org.freedesktop.Notifications"
+#define NOTIFICATIONS_PATH "/org/freedesktop/Notifications"
+#define SCREEN_SAVER_NAME "org.freedesktop.ScreenSaver"
+#define SCREEN_SAVER_PATH "/org/freedesktop/ScreenSaver"
+#define SCREEN_SAVER_LEGACY_PATH "/ScreenSaver"
 #define DBUS_NAME "org.freedesktop.DBus"
 #define DBUS_PATH "/org/freedesktop/DBus"
 #define INTERFACE_DIRECTORY "/usr/share/dbus-1/interfaces"
@@ -60,6 +65,82 @@ static const char file_manager_xml[] =
     "   <arg type='as' direction='in'/>"
     "   <arg type='s' direction='in'/>"
     "  </method>"
+    " </interface>"
+    "</node>";
+
+static const char notifications_xml[] =
+    "<node>"
+    " <interface name='" NOTIFICATIONS_NAME "'>"
+    "  <method name='GetCapabilities'>"
+    "   <arg type='as' direction='out'/>"
+    "  </method>"
+    "  <method name='Notify'>"
+    "   <arg type='s' direction='in'/>"
+    "   <arg type='u' direction='in'/>"
+    "   <arg type='s' direction='in'/>"
+    "   <arg type='s' direction='in'/>"
+    "   <arg type='s' direction='in'/>"
+    "   <arg type='as' direction='in'/>"
+    "   <arg type='a{sv}' direction='in'/>"
+    "   <arg type='i' direction='in'/>"
+    "   <arg type='u' direction='out'/>"
+    "  </method>"
+    "  <method name='CloseNotification'>"
+    "   <arg type='u' direction='in'/>"
+    "  </method>"
+    "  <method name='GetServerInformation'>"
+    "   <arg type='s' direction='out'/>"
+    "   <arg type='s' direction='out'/>"
+    "   <arg type='s' direction='out'/>"
+    "   <arg type='s' direction='out'/>"
+    "  </method>"
+    "  <signal name='NotificationClosed'>"
+    "   <arg type='u'/><arg type='u'/>"
+    "  </signal>"
+    "  <signal name='ActionInvoked'>"
+    "   <arg type='u'/><arg type='s'/>"
+    "  </signal>"
+    "  <signal name='ActivationToken'>"
+    "   <arg type='u'/><arg type='s'/>"
+    "  </signal>"
+    " </interface>"
+    "</node>";
+
+static const char screen_saver_xml[] =
+    "<node>"
+    " <interface name='" SCREEN_SAVER_NAME "'>"
+    "  <method name='Lock'/>"
+    "  <method name='SimulateUserActivity'/>"
+    "  <method name='GetActive'>"
+    "   <arg type='b' direction='out'/>"
+    "  </method>"
+    "  <method name='GetActiveTime'>"
+    "   <arg type='u' direction='out'/>"
+    "  </method>"
+    "  <method name='GetSessionIdleTime'>"
+    "   <arg type='u' direction='out'/>"
+    "  </method>"
+    "  <method name='SetActive'>"
+    "   <arg type='b' direction='in'/>"
+    "   <arg type='b' direction='out'/>"
+    "  </method>"
+    "  <method name='Inhibit'>"
+    "   <arg type='s' direction='in'/>"
+    "   <arg type='s' direction='in'/>"
+    "   <arg type='u' direction='out'/>"
+    "  </method>"
+    "  <method name='UnInhibit'>"
+    "   <arg type='u' direction='in'/>"
+    "  </method>"
+    "  <method name='Throttle'>"
+    "   <arg type='s' direction='in'/>"
+    "   <arg type='s' direction='in'/>"
+    "   <arg type='u' direction='out'/>"
+    "  </method>"
+    "  <method name='UnThrottle'>"
+    "   <arg type='u' direction='in'/>"
+    "  </method>"
+    "  <signal name='ActiveChanged'><arg type='b'/></signal>"
     " </interface>"
     "</node>";
 
@@ -128,6 +209,12 @@ typedef struct {
 } Session;
 
 typedef struct {
+    char *sender;
+    guint cookie;
+    gboolean throttle;
+} Inhibitor;
+
+typedef struct {
     GMainLoop *loop;
     GDBusConnection *guest;
     GDBusConnection *host;
@@ -137,10 +224,14 @@ typedef struct {
     GHashTable *pending_by_host;
     GHashTable *sessions_by_guest;
     GHashTable *guest_by_host;
+    GHashTable *inhibitors;
     GDBusInterfaceInfo *request_info;
     GDBusInterfaceInfo *session_info;
     char *app_id;
     char *bootstrap_portal_owner;
+    char *screen_saver_path;
+    gboolean notifications_owned;
+    gboolean screen_saver_owned;
     int exit_status;
 } Portal;
 
@@ -152,6 +243,15 @@ typedef struct {
     gboolean synthesize_response;
     gboolean persistent_request;
 } HostCall;
+
+typedef struct {
+    Portal *portal;
+    GDBusMethodInvocation *invocation;
+    char *sender;
+    char *inhibitor_key;
+    gboolean add_inhibitor;
+    gboolean throttle;
+} NativeCall;
 
 static GDBusInterfaceInfo *find_interface(Portal *portal, const char *name)
 {
@@ -191,6 +291,37 @@ static GDBusMethodInfo *find_method(
             return *methods;
     }
     return NULL;
+}
+
+static gboolean interface_has_signal(
+    GDBusInterfaceInfo *interface_info,
+    const char *name
+)
+{
+    GDBusSignalInfo **signals;
+
+    if (interface_info == NULL)
+        return FALSE;
+    for (signals = interface_info->signals;
+         signals != NULL && *signals != NULL;
+         signals++) {
+        if (g_str_equal((*signals)->name, name))
+            return TRUE;
+    }
+    return FALSE;
+}
+
+static void inhibitor_free(gpointer data)
+{
+    Inhibitor *inhibitor = data;
+
+    g_free(inhibitor->sender);
+    g_free(inhibitor);
+}
+
+static char *inhibitor_key(gboolean throttle, guint cookie)
+{
+    return g_strdup_printf("%c:%u", throttle ? 't' : 'i', cookie);
 }
 
 static void truncate_secret_fd(int descriptor)
@@ -638,6 +769,279 @@ static GVariantType *method_output_type(GDBusMethodInfo *method)
     g_string_free(signature, TRUE);
     return type;
 }
+
+static gboolean host_path_has_screen_saver(
+    Portal *portal,
+    const char *path
+)
+{
+    GVariant *reply;
+    GDBusNodeInfo *node;
+    const char *xml;
+    GError *error = NULL;
+    gboolean available = FALSE;
+
+    reply = g_dbus_connection_call_sync(
+        portal->host, SCREEN_SAVER_NAME, path,
+        "org.freedesktop.DBus.Introspectable", "Introspect", NULL,
+        G_VARIANT_TYPE("(s)"), G_DBUS_CALL_FLAGS_NONE, 3000, NULL,
+        &error
+    );
+    if (reply == NULL) {
+        g_clear_error(&error);
+        return FALSE;
+    }
+    g_variant_get(reply, "(&s)", &xml);
+    node = g_dbus_node_info_new_for_xml(xml, &error);
+    if (node != NULL) {
+        available = g_dbus_node_info_lookup_interface(
+            node, SCREEN_SAVER_NAME
+        ) != NULL;
+        g_dbus_node_info_unref(node);
+    }
+    g_clear_error(&error);
+    g_variant_unref(reply);
+    return available;
+}
+
+static void discover_screen_saver_path(Portal *portal)
+{
+    const char *path = NULL;
+
+    if (host_path_has_screen_saver(portal, SCREEN_SAVER_PATH))
+        path = SCREEN_SAVER_PATH;
+    else if (host_path_has_screen_saver(
+                 portal, SCREEN_SAVER_LEGACY_PATH
+             ))
+        path = SCREEN_SAVER_LEGACY_PATH;
+    g_free(portal->screen_saver_path);
+    portal->screen_saver_path = g_strdup(path);
+}
+
+static void native_call_free(NativeCall *call)
+{
+    g_clear_object(&call->invocation);
+    g_free(call->sender);
+    g_free(call->inhibitor_key);
+    g_free(call);
+}
+
+static gboolean guest_name_has_owner(Portal *portal, const char *name)
+{
+    GVariant *reply;
+    gboolean owned = FALSE;
+
+    reply = g_dbus_connection_call_sync(
+        portal->guest,
+        DBUS_NAME,
+        DBUS_PATH,
+        DBUS_NAME,
+        "NameHasOwner",
+        g_variant_new("(s)", name),
+        G_VARIANT_TYPE("(b)"),
+        G_DBUS_CALL_FLAGS_NONE,
+        3000,
+        NULL,
+        NULL
+    );
+    if (reply != NULL) {
+        g_variant_get(reply, "(b)", &owned);
+        g_variant_unref(reply);
+    }
+    return owned;
+}
+
+static void release_host_inhibitor(
+    Portal *portal,
+    gboolean throttle,
+    guint cookie
+)
+{
+    if (portal->screen_saver_path == NULL)
+        return;
+    g_dbus_connection_call(
+        portal->host,
+        SCREEN_SAVER_NAME,
+        portal->screen_saver_path,
+        SCREEN_SAVER_NAME,
+        throttle ? "UnThrottle" : "UnInhibit",
+        g_variant_new("(u)", cookie),
+        NULL,
+        G_DBUS_CALL_FLAGS_NONE,
+        -1,
+        NULL,
+        NULL,
+        NULL
+    );
+}
+
+static void native_call_done(
+    GObject *source,
+    GAsyncResult *result,
+    gpointer user_data
+)
+{
+    NativeCall *call = user_data;
+    GVariant *reply;
+    GError *error = NULL;
+
+    reply = g_dbus_connection_call_finish(
+        G_DBUS_CONNECTION(source), result, &error
+    );
+    if (reply == NULL) {
+        g_dbus_method_invocation_return_gerror(call->invocation, error);
+        g_clear_error(&error);
+        native_call_free(call);
+        return;
+    }
+    if (call->add_inhibitor) {
+        guint cookie;
+        Inhibitor *inhibitor;
+        char *key;
+
+        g_variant_get(reply, "(u)", &cookie);
+        inhibitor = g_new0(Inhibitor, 1);
+        inhibitor->sender = g_strdup(call->sender);
+        inhibitor->cookie = cookie;
+        inhibitor->throttle = call->throttle;
+        if (guest_name_has_owner(call->portal, call->sender)) {
+            key = inhibitor_key(call->throttle, cookie);
+            g_hash_table_replace(
+                call->portal->inhibitors, key, inhibitor
+            );
+        } else {
+            release_host_inhibitor(
+                call->portal, call->throttle, cookie
+            );
+            inhibitor_free(inhibitor);
+        }
+    } else if (call->inhibitor_key != NULL) {
+        g_hash_table_remove(
+            call->portal->inhibitors, call->inhibitor_key
+        );
+    }
+    g_dbus_method_invocation_return_value(call->invocation, reply);
+    g_variant_unref(reply);
+    native_call_free(call);
+}
+
+static void native_method_call(
+    GDBusConnection *connection,
+    const char *sender,
+    const char *object_path,
+    const char *interface_name,
+    const char *method_name,
+    GVariant *parameters,
+    GDBusMethodInvocation *invocation,
+    gpointer user_data
+)
+{
+    Portal *portal = user_data;
+    GDBusInterfaceInfo *interface_info;
+    GDBusMethodInfo *method;
+    GVariantType *reply_type;
+    const char *host_path;
+    NativeCall *call;
+
+    (void)connection;
+    (void)object_path;
+    interface_info = find_interface(portal, interface_name);
+    method = interface_info == NULL
+        ? NULL : find_method(interface_info, method_name);
+    if (method == NULL) {
+        g_dbus_method_invocation_return_error(
+            invocation, G_DBUS_ERROR, G_DBUS_ERROR_UNKNOWN_METHOD,
+            "Unknown desktop integration method"
+        );
+        return;
+    }
+    if (g_str_equal(interface_name, NOTIFICATIONS_NAME)) {
+        if (!portal->notifications_owned) {
+            g_dbus_method_invocation_return_error(
+                invocation,
+                G_DBUS_ERROR,
+                G_DBUS_ERROR_NAME_HAS_NO_OWNER,
+                "The guest Notifications bridge name is unavailable"
+            );
+            return;
+        }
+        host_path = NOTIFICATIONS_PATH;
+    } else {
+        if (!portal->screen_saver_owned) {
+            g_dbus_method_invocation_return_error(
+                invocation,
+                G_DBUS_ERROR,
+                G_DBUS_ERROR_NAME_HAS_NO_OWNER,
+                "The guest ScreenSaver bridge name is unavailable"
+            );
+            return;
+        }
+        host_path = portal->screen_saver_path;
+        if (host_path == NULL) {
+            g_dbus_method_invocation_return_error(
+                invocation,
+                G_DBUS_ERROR,
+                G_DBUS_ERROR_NAME_HAS_NO_OWNER,
+                "The host ScreenSaver service is unavailable"
+            );
+            return;
+        }
+    }
+
+    call = g_new0(NativeCall, 1);
+    call->portal = portal;
+    call->invocation = g_object_ref(invocation);
+    call->sender = g_strdup(sender);
+    if (g_str_equal(interface_name, SCREEN_SAVER_NAME)) {
+        if (g_str_equal(method_name, "Inhibit")
+            || g_str_equal(method_name, "Throttle")) {
+            call->add_inhibitor = TRUE;
+            call->throttle = g_str_equal(method_name, "Throttle");
+        } else if (g_str_equal(method_name, "UnInhibit")
+                   || g_str_equal(method_name, "UnThrottle")) {
+            gboolean throttle = g_str_equal(method_name, "UnThrottle");
+            Inhibitor *inhibitor;
+            guint cookie;
+
+            g_variant_get(parameters, "(u)", &cookie);
+            call->inhibitor_key = inhibitor_key(throttle, cookie);
+            inhibitor = g_hash_table_lookup(
+                portal->inhibitors, call->inhibitor_key
+            );
+            if (inhibitor == NULL) {
+                g_dbus_method_invocation_return_error(
+                    invocation,
+                    G_DBUS_ERROR,
+                    G_DBUS_ERROR_INVALID_ARGS,
+                    "Unknown ScreenSaver inhibitor cookie"
+                );
+                native_call_free(call);
+                return;
+            }
+            if (!g_str_equal(inhibitor->sender, sender)) {
+                g_dbus_method_invocation_return_error(
+                    invocation,
+                    G_DBUS_ERROR,
+                    G_DBUS_ERROR_ACCESS_DENIED,
+                    "The ScreenSaver inhibitor belongs to another client"
+                );
+                native_call_free(call);
+                return;
+            }
+        }
+    }
+    reply_type = method_output_type(method);
+    g_dbus_connection_call(
+        portal->host, interface_name, host_path, interface_name,
+        method_name, parameters, reply_type, G_DBUS_CALL_FLAGS_NONE, -1,
+        NULL, native_call_done, call
+    );
+    g_variant_type_free(reply_type);
+}
+
+static const GDBusInterfaceVTable native_vtable = {
+    .method_call = native_method_call,
+};
 
 static gboolean method_creates_session(
     const char *interface_name,
@@ -1588,6 +1992,103 @@ static void host_signal(
     g_free(backend_interface);
 }
 
+static void native_host_signal(
+    GDBusConnection *connection,
+    const char *sender_name,
+    const char *object_path,
+    const char *interface_name,
+    const char *signal_name,
+    GVariant *parameters,
+    gpointer user_data
+)
+{
+    Portal *portal = user_data;
+    GDBusInterfaceInfo *interface_info = find_interface(
+        portal, interface_name
+    );
+    GError *error = NULL;
+
+    (void)connection;
+    (void)sender_name;
+    (void)object_path;
+    if (!interface_has_signal(interface_info, signal_name))
+        return;
+    if (g_str_equal(interface_name, NOTIFICATIONS_NAME)) {
+        if (!portal->notifications_owned)
+            return;
+        g_dbus_connection_emit_signal(
+            portal->guest, NULL, NOTIFICATIONS_PATH, interface_name,
+            signal_name, parameters, &error
+        );
+    } else if (g_str_equal(interface_name, SCREEN_SAVER_NAME)) {
+        const char *paths[] = {
+            SCREEN_SAVER_PATH,
+            SCREEN_SAVER_LEGACY_PATH,
+        };
+        guint index;
+
+        if (!portal->screen_saver_owned)
+            return;
+        for (index = 0; index < G_N_ELEMENTS(paths); index++) {
+            g_dbus_connection_emit_signal(
+                portal->guest, NULL, paths[index], interface_name,
+                signal_name, parameters, &error
+            );
+            if (error != NULL)
+                break;
+        }
+    }
+    if (error != NULL) {
+        g_warning(
+            "Could not relay %s.%s: %s",
+            interface_name,
+            signal_name,
+            error->message
+        );
+        g_clear_error(&error);
+    }
+}
+
+static void guest_name_owner_changed(
+    GDBusConnection *connection,
+    const char *sender_name,
+    const char *object_path,
+    const char *interface_name,
+    const char *signal_name,
+    GVariant *parameters,
+    gpointer user_data
+)
+{
+    Portal *portal = user_data;
+    GHashTableIter iterator;
+    gpointer value;
+    const char *name;
+    const char *old_owner;
+    const char *new_owner;
+
+    (void)connection;
+    (void)sender_name;
+    (void)object_path;
+    (void)interface_name;
+    (void)signal_name;
+    g_variant_get(
+        parameters, "(&s&s&s)", &name, &old_owner, &new_owner
+    );
+    if (*old_owner == '\0' || *new_owner != '\0')
+        return;
+
+    g_hash_table_iter_init(&iterator, portal->inhibitors);
+    while (g_hash_table_iter_next(&iterator, NULL, &value)) {
+        Inhibitor *inhibitor = value;
+        if (!g_str_equal(inhibitor->sender, name))
+            continue;
+        release_host_inhibitor(
+            portal, inhibitor->throttle, inhibitor->cookie
+        );
+        g_hash_table_iter_remove(&iterator);
+    }
+}
+
 static GDBusNodeInfo *load_public_xml(const char *name)
 {
     char *filename;
@@ -1774,6 +2275,8 @@ static gboolean register_interfaces(Portal *portal)
     GDBusNodeInfo *backend;
     GDBusNodeInfo *chooser;
     GDBusNodeInfo *file_manager;
+    GDBusNodeInfo *notifications;
+    GDBusNodeInfo *screen_saver;
     GDBusNodeInfo *public;
     GError *error = NULL;
     guint index;
@@ -1801,6 +2304,24 @@ static gboolean register_interfaces(Portal *portal)
         return FALSE;
     }
     g_ptr_array_add(portal->node_infos, file_manager);
+    notifications = g_dbus_node_info_new_for_xml(
+        notifications_xml, &error
+    );
+    if (notifications == NULL) {
+        g_printerr("spaces-portal: %s\n", error->message);
+        g_clear_error(&error);
+        return FALSE;
+    }
+    g_ptr_array_add(portal->node_infos, notifications);
+    screen_saver = g_dbus_node_info_new_for_xml(
+        screen_saver_xml, &error
+    );
+    if (screen_saver == NULL) {
+        g_printerr("spaces-portal: %s\n", error->message);
+        g_clear_error(&error);
+        return FALSE;
+    }
+    g_ptr_array_add(portal->node_infos, screen_saver);
 
     public = introspect_host(portal);
     if (public != NULL) {
@@ -1872,6 +2393,37 @@ static gboolean register_interfaces(Portal *portal)
         return FALSE;
     }
     g_array_append_val(portal->registrations, registration);
+    registration = g_dbus_connection_register_object(
+        portal->guest, NOTIFICATIONS_PATH, notifications->interfaces[0],
+        &native_vtable, portal, NULL, &error
+    );
+    if (registration == 0) {
+        g_printerr("spaces-portal: %s\n", error->message);
+        g_clear_error(&error);
+        return FALSE;
+    }
+    g_array_append_val(portal->registrations, registration);
+    const char *screen_saver_paths[] = {
+        SCREEN_SAVER_PATH,
+        SCREEN_SAVER_LEGACY_PATH,
+    };
+    for (index = 0; index < G_N_ELEMENTS(screen_saver_paths); index++) {
+        registration = g_dbus_connection_register_object(
+            portal->guest,
+            screen_saver_paths[index],
+            screen_saver->interfaces[0],
+            &native_vtable,
+            portal,
+            NULL,
+            &error
+        );
+        if (registration == 0) {
+            g_printerr("spaces-portal: %s\n", error->message);
+            g_clear_error(&error);
+            return FALSE;
+        }
+        g_array_append_val(portal->registrations, registration);
+    }
     return count > 0;
 }
 
@@ -1885,6 +2437,40 @@ static void name_lost(
     (void)connection;
     (void)name;
     g_main_loop_quit(portal->loop);
+}
+
+static void optional_name_lost(
+    GDBusConnection *connection,
+    const char *name,
+    gpointer user_data
+)
+{
+    Portal *portal = user_data;
+
+    (void)connection;
+    if (g_str_equal(name, NOTIFICATIONS_NAME))
+        portal->notifications_owned = FALSE;
+    else if (g_str_equal(name, SCREEN_SAVER_NAME))
+        portal->screen_saver_owned = FALSE;
+    g_warning(
+        "Could not own optional desktop integration name %s; continuing",
+        name
+    );
+}
+
+static void optional_name_acquired(
+    GDBusConnection *connection,
+    const char *name,
+    gpointer user_data
+)
+{
+    Portal *portal = user_data;
+
+    (void)connection;
+    if (g_str_equal(name, NOTIFICATIONS_NAME))
+        portal->notifications_owned = TRUE;
+    else if (g_str_equal(name, SCREEN_SAVER_NAME))
+        portal->screen_saver_owned = TRUE;
 }
 
 static void host_closed(
@@ -1913,6 +2499,35 @@ static void host_name_appeared(
     (void)name;
     (void)owner;
     (void)user_data;
+}
+
+static void screen_saver_appeared(
+    GDBusConnection *connection,
+    const char *name,
+    const char *owner,
+    gpointer user_data
+)
+{
+    Portal *portal = user_data;
+
+    (void)connection;
+    (void)name;
+    (void)owner;
+    discover_screen_saver_path(portal);
+}
+
+static void screen_saver_vanished(
+    GDBusConnection *connection,
+    const char *name,
+    gpointer user_data
+)
+{
+    Portal *portal = user_data;
+
+    (void)connection;
+    (void)name;
+    g_clear_pointer(&portal->screen_saver_path, g_free);
+    g_hash_table_remove_all(portal->inhibitors);
 }
 
 static void host_name_vanished(
@@ -1953,8 +2568,14 @@ int main(void)
     const char *test_address;
     const char *space_name;
     guint host_watcher;
+    guint screen_saver_watcher;
     guint owner;
     guint file_manager_owner;
+    guint notifications_owner;
+    guint screen_saver_owner;
+    guint notification_subscription;
+    guint screen_saver_subscription;
+    guint guest_name_subscription;
 
     signal(SIGPIPE, SIG_IGN);
     space_name = g_getenv("SPACES_NAME");
@@ -2010,11 +2631,50 @@ int main(void)
     portal.guest_by_host = g_hash_table_new_full(
         g_str_hash, g_str_equal, g_free, g_free
     );
+    portal.inhibitors = g_hash_table_new_full(
+        g_str_hash, g_str_equal, g_free, inhibitor_free
+    );
     if (!register_interfaces(&portal))
         return 1;
     g_dbus_connection_signal_subscribe(
         portal.host, HOST_NAME, NULL, NULL, NULL, NULL,
         G_DBUS_SIGNAL_FLAGS_NONE, host_signal, &portal, NULL
+    );
+    notification_subscription = g_dbus_connection_signal_subscribe(
+        portal.host,
+        NOTIFICATIONS_NAME,
+        NOTIFICATIONS_NAME,
+        NULL,
+        NOTIFICATIONS_PATH,
+        NULL,
+        G_DBUS_SIGNAL_FLAGS_NONE,
+        native_host_signal,
+        &portal,
+        NULL
+    );
+    screen_saver_subscription = g_dbus_connection_signal_subscribe(
+        portal.host,
+        SCREEN_SAVER_NAME,
+        SCREEN_SAVER_NAME,
+        NULL,
+        NULL,
+        NULL,
+        G_DBUS_SIGNAL_FLAGS_NONE,
+        native_host_signal,
+        &portal,
+        NULL
+    );
+    guest_name_subscription = g_dbus_connection_signal_subscribe(
+        portal.guest,
+        DBUS_NAME,
+        DBUS_NAME,
+        "NameOwnerChanged",
+        DBUS_PATH,
+        NULL,
+        G_DBUS_SIGNAL_FLAGS_NONE,
+        guest_name_owner_changed,
+        &portal,
+        NULL
     );
     g_signal_connect(portal.host, "closed", G_CALLBACK(host_closed), &portal);
     host_watcher = g_bus_watch_name_on_connection(
@@ -2023,6 +2683,15 @@ int main(void)
         G_BUS_NAME_WATCHER_FLAGS_AUTO_START,
         host_name_appeared,
         host_name_vanished,
+        &portal,
+        NULL
+    );
+    screen_saver_watcher = g_bus_watch_name_on_connection(
+        portal.host,
+        SCREEN_SAVER_NAME,
+        G_BUS_NAME_WATCHER_FLAGS_AUTO_START,
+        screen_saver_appeared,
+        screen_saver_vanished,
         &portal,
         NULL
     );
@@ -2038,11 +2707,42 @@ int main(void)
             | G_BUS_NAME_OWNER_FLAGS_REPLACE,
         NULL, name_lost, &portal, NULL
     );
+    notifications_owner = g_bus_own_name_on_connection(
+        portal.guest,
+        NOTIFICATIONS_NAME,
+        G_BUS_NAME_OWNER_FLAGS_NONE,
+        optional_name_acquired,
+        optional_name_lost,
+        &portal,
+        NULL
+    );
+    screen_saver_owner = g_bus_own_name_on_connection(
+        portal.guest,
+        SCREEN_SAVER_NAME,
+        G_BUS_NAME_OWNER_FLAGS_NONE,
+        optional_name_acquired,
+        optional_name_lost,
+        &portal,
+        NULL
+    );
     g_main_loop_run(portal.loop);
+    g_bus_unown_name(screen_saver_owner);
+    g_bus_unown_name(notifications_owner);
     g_bus_unown_name(file_manager_owner);
     g_bus_unown_name(owner);
+    g_bus_unwatch_name(screen_saver_watcher);
     g_bus_unwatch_name(host_watcher);
+    g_dbus_connection_signal_unsubscribe(
+        portal.guest, guest_name_subscription
+    );
+    g_dbus_connection_signal_unsubscribe(
+        portal.host, screen_saver_subscription
+    );
+    g_dbus_connection_signal_unsubscribe(
+        portal.host, notification_subscription
+    );
     g_main_loop_unref(portal.loop);
+    g_hash_table_unref(portal.inhibitors);
     g_hash_table_unref(portal.guest_by_host);
     g_hash_table_unref(portal.sessions_by_guest);
     g_hash_table_unref(portal.pending_by_host);
@@ -2052,6 +2752,7 @@ int main(void)
     g_object_unref(portal.host);
     g_object_unref(portal.guest);
     g_free(portal.bootstrap_portal_owner);
+    g_free(portal.screen_saver_path);
     g_free(portal.app_id);
     return portal.exit_status;
 }

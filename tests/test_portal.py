@@ -11,6 +11,7 @@ import socket
 import stat
 import subprocess
 import tempfile
+import threading
 import time
 import tomllib
 import unittest
@@ -102,6 +103,64 @@ class PortalConfigurationTests(unittest.TestCase):
             self.assertNotIn(f"org.freedesktop.portal.{name}.*", policy)
         self.assertNotIn("org.freedesktop.portal.*=*", policy)
         self.assertNotIn("--talk=", policy)
+        for method in (
+            "GetCapabilities",
+            "Notify",
+            "CloseNotification",
+            "GetServerInformation",
+        ):
+            self.assertIn(
+                "--call=org.freedesktop.Notifications="
+                f"org.freedesktop.Notifications.{method}"
+                "@/org/freedesktop/Notifications",
+                arguments,
+            )
+        for signal_name in (
+            "NotificationClosed",
+            "ActionInvoked",
+            "ActivationToken",
+        ):
+            self.assertIn(
+                "--broadcast=org.freedesktop.Notifications="
+                f"org.freedesktop.Notifications.{signal_name}"
+                "@/org/freedesktop/Notifications",
+                arguments,
+            )
+        self.assertFalse(
+            any(
+                "org.freedesktop.Notifications.*" in argument
+                for argument in arguments
+            )
+        )
+        for path in ("/org/freedesktop/ScreenSaver", "/ScreenSaver"):
+            for method in (
+                "Lock",
+                "SimulateUserActivity",
+                "GetActive",
+                "GetActiveTime",
+                "GetSessionIdleTime",
+                "SetActive",
+                "Inhibit",
+                "UnInhibit",
+                "Throttle",
+                "UnThrottle",
+            ):
+                self.assertIn(
+                    "--call=org.freedesktop.ScreenSaver="
+                    f"org.freedesktop.ScreenSaver.{method}@{path}",
+                    arguments,
+                )
+            self.assertIn(
+                "--broadcast=org.freedesktop.ScreenSaver="
+                f"org.freedesktop.ScreenSaver.ActiveChanged@{path}",
+                arguments,
+            )
+        self.assertFalse(
+            any(
+                "org.freedesktop.ScreenSaver.*" in argument
+                for argument in arguments
+            )
+        )
         self.assertIn(
             "org.freedesktop.portal.OpenURI.OpenURI", policy
         )
@@ -143,6 +202,26 @@ class PortalConfigurationTests(unittest.TestCase):
             activation["D-BUS Service"]["SystemdService"],
             "spaces-portal.service",
         )
+        for name in (
+            "org.freedesktop.Notifications",
+            "org.freedesktop.ScreenSaver",
+        ):
+            shared = configparser.ConfigParser()
+            shared.optionxform = str
+            shared.read(
+                ROOT
+                / "data"
+                / "portal"
+                / "dbus-1"
+                / "services"
+                / f"{name}.service",
+                encoding="utf-8",
+            )
+            self.assertEqual(shared["D-BUS Service"]["Name"], name)
+            self.assertEqual(
+                shared["D-BUS Service"]["SystemdService"],
+                "spaces-portal.service",
+            )
 
         unit = configparser.ConfigParser()
         unit.optionxform = str
@@ -157,6 +236,22 @@ class PortalConfigurationTests(unittest.TestCase):
         )
         self.assertEqual(unit["Service"]["Restart"], "always")
         self.assertEqual(unit["Unit"]["StartLimitIntervalSec"], "0")
+        self.assertEqual(
+            unit["Unit"]["Description"],
+            "Spaces desktop integration bridge",
+        )
+        data_files = tomllib.loads(
+            (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        )["tool"]["setuptools"]["data-files"]
+        installed = data_files["share/spaces/portal/dbus-1/services"]
+        for name in (
+            "org.freedesktop.Notifications",
+            "org.freedesktop.ScreenSaver",
+        ):
+            self.assertIn(
+                f"data/portal/dbus-1/services/{name}.service",
+                installed,
+            )
 
     def test_graphical_session_target_pulls_in_systemd_session(self) -> None:
         target = configparser.ConfigParser()
@@ -542,6 +637,72 @@ class PortalNativeTests(unittest.TestCase):
                 self.assertIn("ShowItems", file_manager)
                 self.assertIn("ShowFolders", file_manager)
                 self.assertIn("ShowItemProperties", file_manager)
+                for name in (
+                    "org.freedesktop.Notifications",
+                    "org.freedesktop.ScreenSaver",
+                ):
+                    self.assertTrue(
+                        self._wait_for_bus_name(guest_address, name)
+                    )
+                notifications = subprocess.run(
+                    [
+                        "gdbus",
+                        "introspect",
+                        "--address",
+                        guest_address,
+                        "--dest",
+                        "org.freedesktop.Notifications",
+                        "--object-path",
+                        "/org/freedesktop/Notifications",
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout
+                for member in (
+                    "Notify",
+                    "CloseNotification",
+                    "GetCapabilities",
+                    "GetServerInformation",
+                    "NotificationClosed",
+                    "ActionInvoked",
+                    "ActivationToken",
+                ):
+                    self.assertIn(member, notifications)
+                self.assertNotIn("NotificationReplied", notifications)
+                for path in (
+                    "/org/freedesktop/ScreenSaver",
+                    "/ScreenSaver",
+                ):
+                    screen_saver = subprocess.run(
+                        [
+                            "gdbus",
+                            "introspect",
+                            "--address",
+                            guest_address,
+                            "--dest",
+                            "org.freedesktop.ScreenSaver",
+                            "--object-path",
+                            path,
+                        ],
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    ).stdout
+                    for member in (
+                        "Lock",
+                        "SetActive",
+                        "SimulateUserActivity",
+                        "GetActive",
+                        "GetActiveTime",
+                        "GetSessionIdleTime",
+                        "Inhibit",
+                        "UnInhibit",
+                        "Throttle",
+                        "UnThrottle",
+                        "ActiveChanged",
+                    ):
+                        self.assertIn(member, screen_saver)
 
                 denied = subprocess.run(
                     [
@@ -586,6 +747,597 @@ class PortalNativeTests(unittest.TestCase):
                 for pid in (host_pid, guest_pid):
                     try:
                         os.kill(pid, 15)
+                    except ProcessLookupError:
+                        pass
+
+    def test_native_desktop_services_forward_calls_signals_and_lifetimes(
+        self,
+    ) -> None:
+        try:
+            import gi
+
+            gi.require_version("Gio", "2.0")
+            from gi.repository import Gio, GLib
+        except ImportError:
+            self.skipTest("PyGObject is unavailable")
+
+        notifications_xml = """
+        <node><interface name='org.freedesktop.Notifications'>
+          <method name='GetCapabilities'><arg type='as' direction='out'/></method>
+          <method name='Notify'>
+            <arg type='s' direction='in'/><arg type='u' direction='in'/>
+            <arg type='s' direction='in'/><arg type='s' direction='in'/>
+            <arg type='s' direction='in'/><arg type='as' direction='in'/>
+            <arg type='a{sv}' direction='in'/><arg type='i' direction='in'/>
+            <arg type='u' direction='out'/>
+          </method>
+          <method name='CloseNotification'><arg type='u' direction='in'/></method>
+          <method name='GetServerInformation'>
+            <arg type='s' direction='out'/><arg type='s' direction='out'/>
+            <arg type='s' direction='out'/><arg type='s' direction='out'/>
+          </method>
+          <signal name='NotificationClosed'><arg type='u'/><arg type='u'/></signal>
+          <signal name='ActionInvoked'><arg type='u'/><arg type='s'/></signal>
+          <signal name='ActivationToken'><arg type='u'/><arg type='s'/></signal>
+          <signal name='NotificationReplied'><arg type='u'/><arg type='s'/></signal>
+        </interface></node>
+        """
+        screen_saver_xml = """
+        <node><interface name='org.freedesktop.ScreenSaver'>
+          <method name='Lock'/><method name='SimulateUserActivity'/>
+          <method name='GetActive'><arg type='b' direction='out'/></method>
+          <method name='GetActiveTime'><arg type='u' direction='out'/></method>
+          <method name='GetSessionIdleTime'><arg type='u' direction='out'/></method>
+          <method name='SetActive'><arg type='b' direction='in'/><arg type='b' direction='out'/></method>
+          <method name='Inhibit'><arg type='s' direction='in'/><arg type='s' direction='in'/><arg type='u' direction='out'/></method>
+          <method name='UnInhibit'><arg type='u' direction='in'/></method>
+          <method name='Throttle'><arg type='s' direction='in'/><arg type='s' direction='in'/><arg type='u' direction='out'/></method>
+          <method name='UnThrottle'><arg type='u' direction='in'/></method>
+          <signal name='ActiveChanged'><arg type='b'/></signal>
+        </interface></node>
+        """
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            host_address, host_pid = self._bus(root / "host-bus")
+            guest_address, guest_pid = self._bus(root / "guest-bus")
+            flags = (
+                Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT
+                | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION
+            )
+            host = Gio.DBusConnection.new_for_address_sync(
+                host_address, flags, None, None
+            )
+            events: list[tuple[str, tuple[object, ...]]] = []
+            next_cookie = {"inhibit": 40, "throttle": 80}
+
+            def request_name(name: str) -> None:
+                reply = host.call_sync(
+                    "org.freedesktop.DBus",
+                    "/org/freedesktop/DBus",
+                    "org.freedesktop.DBus",
+                    "RequestName",
+                    GLib.Variant("(su)", (name, 0)),
+                    GLib.VariantType.new("(u)"),
+                    Gio.DBusCallFlags.NONE,
+                    2000,
+                    None,
+                )
+                self.assertEqual(reply.unpack(), (1,))
+
+            def release_name(name: str) -> None:
+                reply = host.call_sync(
+                    "org.freedesktop.DBus",
+                    "/org/freedesktop/DBus",
+                    "org.freedesktop.DBus",
+                    "ReleaseName",
+                    GLib.Variant("(s)", (name,)),
+                    GLib.VariantType.new("(u)"),
+                    Gio.DBusCallFlags.NONE,
+                    2000,
+                    None,
+                )
+                self.assertEqual(reply.unpack(), (1,))
+
+            def notification_call(
+                _connection: object,
+                _sender: str,
+                _path: str,
+                _interface: str,
+                method: str,
+                parameters: object,
+                invocation: object,
+            ) -> None:
+                unpacked = parameters.unpack()
+                events.append((method, unpacked))
+                if method == "GetCapabilities":
+                    invocation.return_value(
+                        GLib.Variant("(as)", (["actions", "body"],))
+                    )
+                elif method == "GetServerInformation":
+                    invocation.return_value(
+                        GLib.Variant(
+                            "(ssss)", ("Host", "Spaces test", "1", "1.3")
+                        )
+                    )
+                elif method == "Notify":
+                    notification_id = unpacked[1] or 73
+                    invocation.return_value(
+                        GLib.Variant("(u)", (notification_id,))
+                    )
+                else:
+                    invocation.return_value(None)
+
+            def screen_saver_call(
+                _connection: object,
+                _sender: str,
+                _path: str,
+                _interface: str,
+                method: str,
+                parameters: object,
+                invocation: object,
+            ) -> None:
+                unpacked = parameters.unpack()
+                events.append((method, unpacked))
+                if method == "GetActive":
+                    invocation.return_value(GLib.Variant("(b)", (False,)))
+                elif method == "GetActiveTime":
+                    invocation.return_value(GLib.Variant("(u)", (12,)))
+                elif method == "GetSessionIdleTime":
+                    invocation.return_value(GLib.Variant("(u)", (34,)))
+                elif method == "SetActive":
+                    invocation.return_value(
+                        GLib.Variant("(b)", (unpacked[0],))
+                    )
+                elif method in ("Inhibit", "Throttle"):
+                    key = method.casefold()
+                    next_cookie[key] += 1
+                    invocation.return_value(
+                        GLib.Variant("(u)", (next_cookie[key],))
+                    )
+                else:
+                    invocation.return_value(None)
+
+            notifications_node = Gio.DBusNodeInfo.new_for_xml(
+                notifications_xml
+            )
+            screen_saver_node = Gio.DBusNodeInfo.new_for_xml(
+                screen_saver_xml
+            )
+            registrations = [
+                host.register_object(
+                    "/org/freedesktop/Notifications",
+                    notifications_node.interfaces[0],
+                    notification_call,
+                    None,
+                    None,
+                ),
+                host.register_object(
+                    "/ScreenSaver",
+                    screen_saver_node.interfaces[0],
+                    screen_saver_call,
+                    None,
+                    None,
+                ),
+            ]
+            for name in (
+                "org.freedesktop.portal.Desktop",
+                "org.freedesktop.Notifications",
+                "org.freedesktop.ScreenSaver",
+            ):
+                request_name(name)
+            loop = GLib.MainLoop()
+            loop_thread = threading.Thread(target=loop.run, daemon=True)
+            loop_thread.start()
+            process = subprocess.Popen(
+                [ROOT / "native" / "spaces-portal"],
+                env={
+                    **os.environ,
+                    "DBUS_SESSION_BUS_ADDRESS": guest_address,
+                    "SPACES_NAME": "work",
+                    "SPACES_PORTAL_TEST_ADDRESS": host_address,
+                },
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            clients: list[object] = []
+            try:
+                for name in (
+                    "org.freedesktop.Notifications",
+                    "org.freedesktop.ScreenSaver",
+                ):
+                    self.assertTrue(
+                        self._wait_for_bus_name(guest_address, name)
+                    )
+
+                def client() -> object:
+                    connection = Gio.DBusConnection.new_for_address_sync(
+                        guest_address, flags, None, None
+                    )
+                    clients.append(connection)
+                    return connection
+
+                def call(
+                    connection: object,
+                    name: str,
+                    path: str,
+                    method: str,
+                    parameters: object | None,
+                    signature: str,
+                ) -> tuple[object, ...]:
+                    reply = connection.call_sync(
+                        name,
+                        path,
+                        name,
+                        method,
+                        parameters,
+                        GLib.VariantType.new(signature),
+                        Gio.DBusCallFlags.NONE,
+                        3000,
+                        None,
+                    )
+                    return reply.unpack()
+
+                notification_client = client()
+                notification_path = "/org/freedesktop/Notifications"
+                self.assertEqual(
+                    call(
+                        notification_client,
+                        "org.freedesktop.Notifications",
+                        notification_path,
+                        "GetCapabilities",
+                        None,
+                        "(as)",
+                    ),
+                    (["actions", "body"],),
+                )
+                self.assertEqual(
+                    call(
+                        notification_client,
+                        "org.freedesktop.Notifications",
+                        notification_path,
+                        "GetServerInformation",
+                        None,
+                        "(ssss)",
+                    ),
+                    ("Host", "Spaces test", "1", "1.3"),
+                )
+                self.assertEqual(
+                    call(
+                        notification_client,
+                        "org.freedesktop.Notifications",
+                        notification_path,
+                        "Notify",
+                        GLib.Variant(
+                            "(susssasa{sv}i)",
+                            (
+                                "Guest app",
+                                0,
+                                "guest-icon",
+                                "Summary",
+                                "Body",
+                                ["default", "Open"],
+                                {"urgency": GLib.Variant("y", 1)},
+                                -1,
+                            ),
+                        ),
+                        "(u)",
+                    ),
+                    (73,),
+                )
+                notification_client.close_sync(None)
+                clients.remove(notification_client)
+                time.sleep(0.05)
+                self.assertFalse(
+                    any(event[0] == "CloseNotification" for event in events)
+                )
+
+                signal_client = client()
+                self.assertEqual(
+                    call(
+                        signal_client,
+                        "org.freedesktop.Notifications",
+                        notification_path,
+                        "CloseNotification",
+                        GLib.Variant("(u)", (73,)),
+                        "()",
+                    ),
+                    (),
+                )
+                received: list[tuple[str, tuple[object, ...], str]] = []
+
+                def receive(
+                    _connection: object,
+                    _sender: str,
+                    path: str,
+                    _interface: str,
+                    signal_name: str,
+                    parameters: object,
+                    _data: object,
+                ) -> None:
+                    received.append(
+                        (signal_name, parameters.unpack(), path)
+                    )
+
+                signal_client.signal_subscribe(
+                    "org.freedesktop.Notifications",
+                    "org.freedesktop.Notifications",
+                    None,
+                    notification_path,
+                    None,
+                    Gio.DBusSignalFlags.NONE,
+                    receive,
+                    None,
+                )
+                for signal_name, parameters in (
+                    ("NotificationClosed", GLib.Variant("(uu)", (73, 2))),
+                    ("ActionInvoked", GLib.Variant("(us)", (73, "default"))),
+                    ("ActivationToken", GLib.Variant("(us)", (73, "token"))),
+                ):
+                    host.emit_signal(
+                        None,
+                        notification_path,
+                        "org.freedesktop.Notifications",
+                        signal_name,
+                        parameters,
+                    )
+                deadline = time.monotonic() + 2
+                context = GLib.MainContext.default()
+                while len(received) < 3 and time.monotonic() < deadline:
+                    context.iteration(False)
+                    time.sleep(0.01)
+                self.assertEqual(
+                    {item[0] for item in received},
+                    {"NotificationClosed", "ActionInvoked", "ActivationToken"},
+                )
+
+                screen_client = client()
+                screen_name = "org.freedesktop.ScreenSaver"
+                standard_path = "/org/freedesktop/ScreenSaver"
+                legacy_path = "/ScreenSaver"
+                self.assertEqual(
+                    call(screen_client, screen_name, standard_path, "GetActive", None, "(b)"),
+                    (False,),
+                )
+                self.assertEqual(
+                    call(screen_client, screen_name, legacy_path, "GetActiveTime", None, "(u)"),
+                    (12,),
+                )
+                self.assertEqual(
+                    call(screen_client, screen_name, standard_path, "GetSessionIdleTime", None, "(u)"),
+                    (34,),
+                )
+                self.assertEqual(
+                    call(
+                        screen_client,
+                        screen_name,
+                        legacy_path,
+                        "SetActive",
+                        GLib.Variant("(b)", (True,)),
+                        "(b)",
+                    ),
+                    (True,),
+                )
+                for method in ("Lock", "SimulateUserActivity"):
+                    self.assertEqual(
+                        call(screen_client, screen_name, standard_path, method, None, "()"),
+                        (),
+                    )
+                inhibit_cookie = call(
+                    screen_client,
+                    screen_name,
+                    standard_path,
+                    "Inhibit",
+                    GLib.Variant("(ss)", ("app", "reason")),
+                    "(u)",
+                )[0]
+                intruder = client()
+                with self.assertRaises(GLib.Error) as denied:
+                    call(
+                        intruder,
+                        screen_name,
+                        standard_path,
+                        "UnInhibit",
+                        GLib.Variant("(u)", (inhibit_cookie,)),
+                        "()",
+                    )
+                self.assertIn("AccessDenied", str(denied.exception))
+                throttle_cookie = call(
+                    screen_client,
+                    screen_name,
+                    legacy_path,
+                    "Throttle",
+                    GLib.Variant("(ss)", ("app", "reason")),
+                    "(u)",
+                )[0]
+                self.assertEqual(
+                    call(
+                        screen_client,
+                        screen_name,
+                        standard_path,
+                        "UnThrottle",
+                        GLib.Variant("(u)", (throttle_cookie,)),
+                        "()",
+                    ),
+                    (),
+                )
+                screen_client.close_sync(None)
+                clients.remove(screen_client)
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline:
+                    if any(
+                        event == ("UnInhibit", (inhibit_cookie,))
+                        for event in events
+                    ):
+                        break
+                    time.sleep(0.01)
+                self.assertIn(("UnInhibit", (inhibit_cookie,)), events)
+
+                for path in (standard_path, legacy_path):
+                    signal_client.signal_subscribe(
+                        screen_name,
+                        screen_name,
+                        "ActiveChanged",
+                        path,
+                        None,
+                        Gio.DBusSignalFlags.NONE,
+                        receive,
+                        None,
+                    )
+                host.emit_signal(
+                    None,
+                    legacy_path,
+                    screen_name,
+                    "ActiveChanged",
+                    GLib.Variant("(b)", (True,)),
+                )
+                deadline = time.monotonic() + 2
+                while (
+                    len([item for item in received if item[0] == "ActiveChanged"]) < 2
+                    and time.monotonic() < deadline
+                ):
+                    context.iteration(False)
+                    time.sleep(0.01)
+                active_paths = {
+                    item[2]
+                    for item in received
+                    if item[0] == "ActiveChanged"
+                }
+                self.assertEqual(
+                    active_paths, {standard_path, legacy_path}
+                )
+
+                release_name(screen_name)
+                unavailable = False
+                deadline = time.monotonic() + 2
+                while not unavailable and time.monotonic() < deadline:
+                    try:
+                        call(
+                            signal_client,
+                            screen_name,
+                            standard_path,
+                            "GetActive",
+                            None,
+                            "(b)",
+                        )
+                    except GLib.Error as error:
+                        unavailable = "NameHasNoOwner" in str(error)
+                    if not unavailable:
+                        time.sleep(0.01)
+                self.assertTrue(unavailable)
+                request_name(screen_name)
+                recovered: tuple[object, ...] | None = None
+                deadline = time.monotonic() + 2
+                while recovered is None and time.monotonic() < deadline:
+                    try:
+                        recovered = call(
+                            signal_client,
+                            screen_name,
+                            legacy_path,
+                            "GetActive",
+                            None,
+                            "(b)",
+                        )
+                    except GLib.Error:
+                        time.sleep(0.01)
+                self.assertEqual(recovered, (False,))
+            finally:
+                for connection in clients:
+                    try:
+                        connection.close_sync(None)
+                    except GLib.Error:
+                        pass
+                if process.poll() is None:
+                    process.terminate()
+                process.wait(timeout=2)
+                if process.stderr is not None:
+                    process.stderr.close()
+                loop.quit()
+                loop_thread.join(timeout=2)
+                for registration in registrations:
+                    host.unregister_object(registration)
+                host.close_sync(None)
+                for pid in (host_pid, guest_pid):
+                    try:
+                        os.kill(pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+
+    def test_optional_native_name_conflict_does_not_stop_portal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            host_address, host_pid = self._bus(root / "host-bus")
+            guest_address, guest_pid = self._bus(root / "guest-bus")
+            host_portal = subprocess.Popen(
+                [
+                    "dbus-test-tool",
+                    "echo",
+                    "--name=org.freedesktop.portal.Desktop",
+                ],
+                env={**os.environ, "DBUS_SESSION_BUS_ADDRESS": host_address},
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            competitor = subprocess.Popen(
+                [
+                    "dbus-test-tool",
+                    "echo",
+                    "--name=org.freedesktop.Notifications",
+                ],
+                env={**os.environ, "DBUS_SESSION_BUS_ADDRESS": guest_address},
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            process: subprocess.Popen[str] | None = None
+            try:
+                self.assertTrue(
+                    self._wait_for_bus_name(
+                        host_address, "org.freedesktop.portal.Desktop"
+                    )
+                )
+                self.assertTrue(
+                    self._wait_for_bus_name(
+                        guest_address, "org.freedesktop.Notifications"
+                    )
+                )
+                process = subprocess.Popen(
+                    [ROOT / "native" / "spaces-portal"],
+                    env={
+                        **os.environ,
+                        "DBUS_SESSION_BUS_ADDRESS": guest_address,
+                        "SPACES_NAME": "work",
+                        "SPACES_PORTAL_TEST_ADDRESS": host_address,
+                    },
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                self.assertTrue(
+                    self._wait_for_bus_name(
+                        guest_address,
+                        "org.freedesktop.impl.portal.desktop.spaces",
+                    )
+                )
+                self.assertTrue(
+                    self._wait_for_bus_name(
+                        guest_address, "org.freedesktop.ScreenSaver"
+                    )
+                )
+                self.assertIsNone(process.poll())
+            finally:
+                if process is not None and process.poll() is None:
+                    process.terminate()
+                    process.wait(timeout=2)
+                if process is not None and process.stderr is not None:
+                    process.stderr.close()
+                for child in (competitor, host_portal):
+                    if child.poll() is None:
+                        child.terminate()
+                    child.wait(timeout=2)
+                for pid in (host_pid, guest_pid):
+                    try:
+                        os.kill(pid, signal.SIGTERM)
                     except ProcessLookupError:
                         pass
 

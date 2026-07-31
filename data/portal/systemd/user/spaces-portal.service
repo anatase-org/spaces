@@ -1,5 +1,5 @@
 [Unit]
-Description=Spaces host portal backend
+Description=Spaces desktop integration bridge
 StartLimitIntervalSec=0
 
 [Service]
