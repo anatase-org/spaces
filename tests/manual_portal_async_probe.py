@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import hashlib
+import socket
 import sys
 import tempfile
 import time
@@ -21,6 +22,26 @@ PATH = "/org/freedesktop/portal/desktop"
 REQUEST = "org.freedesktop.portal.Request"
 SESSION = "org.freedesktop.portal.Session"
 EMPTY = GLib.Variant("a{sv}", {})
+
+
+def probe_socket_access(descriptor: int) -> tuple[os.stat_result, str, str]:
+    """Exercise SELinux read/write checks without consuming protocol data."""
+
+    metadata = os.fstat(descriptor)
+    with socket.fromfd(descriptor, socket.AF_UNIX, socket.SOCK_STREAM) as remote:
+        written = remote.send(
+            b"",
+            socket.MSG_DONTWAIT | getattr(socket, "MSG_NOSIGNAL", 0),
+        )
+        try:
+            data = remote.recv(1, socket.MSG_DONTWAIT | socket.MSG_PEEK)
+        except BlockingIOError:
+            read_result = "would-block"
+        else:
+            if not data:
+                raise RuntimeError("PipeWire remote socket is disconnected")
+            read_result = "available"
+    return metadata, f"socket-write={written}", f"socket-read={read_result}"
 
 
 class Probe:
@@ -757,8 +778,10 @@ def main() -> int:
             metadata = None
             if returned_fds is not None and count:
                 descriptor = returned_fds.get(handle)
-                metadata = os.fstat(descriptor)
-                os.close(descriptor)
+                try:
+                    metadata = probe_socket_access(descriptor)
+                finally:
+                    os.close(descriptor)
             return reply.unpack(), f"fds={count}", metadata
 
         probe.simple("Camera PipeWire remote FD", camera_fd)
@@ -838,8 +861,10 @@ def main() -> int:
                 metadata = None
                 if returned_fds is not None and count:
                     descriptor = returned_fds.get(handle)
-                    metadata = os.fstat(descriptor)
-                    os.close(descriptor)
+                    try:
+                        metadata = probe_socket_access(descriptor)
+                    finally:
+                        os.close(descriptor)
                 return (
                     create_response,
                     select_response,
