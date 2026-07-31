@@ -326,6 +326,12 @@ class PortalConfigurationTests(unittest.TestCase):
 
 
 class PortalProxyTests(unittest.TestCase):
+    def test_portal_identity_uses_the_space_name(self) -> None:
+        self.assertEqual(
+            session._portal_app_id("work"),
+            "org.anatase.Spaces.work",
+        )
+
     def test_proxy_uses_app_scope_waits_for_socket_and_restricts_policy(
         self,
     ) -> None:

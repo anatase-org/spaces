@@ -70,6 +70,7 @@ static const char open_xml[] =
     "  <method name='PortalRequest'>"
     "   <arg type='s' direction='in' name='interface'/>"
     "   <arg type='s' direction='in' name='method'/>"
+    "   <arg type='s' direction='in' name='app_id'/>"
     "   <arg type='v' direction='in' name='parameters'/>"
     "   <arg type='u' direction='out' name='response'/>"
     "   <arg type='a{sv}' direction='out' name='results'/>"
@@ -578,7 +579,7 @@ static gboolean write_all(int descriptor, const guint8 *data, gsize size)
     return TRUE;
 }
 
-static gboolean finish_space_secret(Broker *broker, int host_descriptor,
+static gboolean finish_app_secret(const char *app_id, int host_descriptor,
     int guest_descriptor)
 {
     static const guint8 domain[] = "org.anatase.spaces.portal-secret.v1";
@@ -586,7 +587,7 @@ static gboolean finish_space_secret(Broker *broker, int host_descriptor,
     guint8 derived[SECRET_SIZE];
     guint8 length[4];
     gsize size = 0;
-    gsize app_id_size = strlen(broker->app_id);
+    gsize app_id_size = strlen(app_id);
     gsize derived_size = sizeof(derived);
     GHmac *hmac = NULL;
     gboolean success = FALSE;
@@ -610,7 +611,7 @@ static gboolean finish_space_secret(Broker *broker, int host_descriptor,
     if (hmac == NULL) goto out;
     g_hmac_update(hmac, domain, sizeof(domain));
     g_hmac_update(hmac, length, sizeof(length));
-    g_hmac_update(hmac, (const guint8 *)broker->app_id, app_id_size);
+    g_hmac_update(hmac, (const guint8 *)app_id, app_id_size);
     g_hmac_get_digest(hmac, derived, &derived_size);
     if (derived_size != sizeof(derived)) goto out;
     success = write_all(guest_descriptor, derived, sizeof(derived));
@@ -662,6 +663,7 @@ static void portal_request_method(Broker *broker, GVariant *parameters,
 {
     const char *interface;
     const char *method;
+    const char *app_id;
     GVariant *wrapped;
     GVariant *input;
     GVariant *host_parameters = NULL;
@@ -675,7 +677,8 @@ static void portal_request_method(Broker *broker, GVariant *parameters,
     int secret_guest_fd = -1;
     int secret_host_fd = -1;
     GError *error = NULL;
-    g_variant_get(parameters, "(&s&s@v)", &interface, &method, &wrapped);
+    g_variant_get(parameters, "(&s&s&s@v)", &interface, &method, &app_id,
+        &wrapped);
     input = g_variant_get_variant(wrapped); g_variant_unref(wrapped);
     if (g_str_equal(interface, "org.freedesktop.portal.Background")
         && g_str_equal(method, "RequestBackground")) {
@@ -700,6 +703,11 @@ static void portal_request_method(Broker *broker, GVariant *parameters,
         && g_str_equal(method, "RetrieveSecret")) {
         gint handle;
         gint host_handle;
+        if (strlen(app_id) > 255) {
+            g_set_error(&error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                "The portal application ID is invalid");
+            goto failed;
+        }
         g_variant_get(input, "(h@a{sv})", &handle, &options);
         secret_guest_fd = invocation_fd(invocation, handle, &error);
         if (secret_guest_fd < 0) { g_variant_unref(options); goto failed; }
@@ -767,7 +775,7 @@ static void portal_request_method(Broker *broker, GVariant *parameters,
             &response, &results,
             outgoing_fds == NULL ? fds : outgoing_fds, &error)) goto failed;
     if (response == 0 && secret_host_fd >= 0
-        && !finish_space_secret(broker, secret_host_fd, secret_guest_fd)) {
+        && !finish_app_secret(app_id, secret_host_fd, secret_guest_fd)) {
         response = 2;
         g_clear_pointer(&results, g_variant_unref);
         results = g_variant_ref_sink(g_variant_new_array(

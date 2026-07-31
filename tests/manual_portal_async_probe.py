@@ -157,6 +157,60 @@ class Probe:
         except Exception as error:  # manual probe: keep testing after a failure
             print(f"FAIL {label}: {type(error).__name__}: {error}", flush=True)
 
+    def broker_secret(self, app_id: str) -> bytes:
+        broker = os.environ.get("SPACES_INTEGRATION_BROKER")
+        if not broker:
+            raise RuntimeError("SPACES_INTEGRATION_BROKER is unavailable")
+        address = (
+            f"unix:path=/run/spaces/desktop/{os.getuid()}/portal/bus"
+        )
+        connection = Gio.DBusConnection.new_for_address_sync(
+            address,
+            Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT
+            | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION,
+            None,
+            None,
+        )
+        descriptor = os.memfd_create("spaces-secret-app-probe")
+        descriptors = Gio.UnixFDList.new()
+        handle = descriptors.append(descriptor)
+        token = self.token("secret_app")
+        try:
+            parameters = GLib.Variant(
+                "(ha{sv})", (handle, options(handle_token=token))
+            )
+            reply, _returned_fds = (
+                connection.call_with_unix_fd_list_sync(
+                    broker,
+                    "/org/anatase/Spaces/Integration",
+                    "org.anatase.Spaces.Integration1",
+                    "PortalRequest",
+                    GLib.Variant(
+                        "(sssv)",
+                        (
+                            "org.freedesktop.portal.Secret",
+                            "RetrieveSecret",
+                            app_id,
+                            parameters,
+                        ),
+                    ),
+                    GLib.VariantType.new("(ua{sv})"),
+                    Gio.DBusCallFlags.NONE,
+                    30_000,
+                    descriptors,
+                    None,
+                )
+            )
+            response, _results = reply.unpack()
+            if response != 0:
+                raise RuntimeError(f"Secret returned response {response}")
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            return os.read(descriptor, 4096)
+        finally:
+            os.ftruncate(descriptor, 0)
+            os.close(descriptor)
+            connection.close_sync(None)
+
 
 def options(**values: object) -> dict[str, GLib.Variant]:
     result: dict[str, GLib.Variant] = {}
@@ -257,6 +311,19 @@ def main() -> int:
             return first, second, f"stable={first[3] == second[3]}"
 
         probe.simple("Secret derived FD result", stable_secret)
+
+    if "secret-apps" in selected:
+        def app_scoped_secrets() -> object:
+            first = probe.broker_secret("org.example.First")
+            repeated = probe.broker_secret("org.example.First")
+            second = probe.broker_secret("org.example.Second")
+            return (
+                f"bytes={len(first)},{len(repeated)},{len(second)}",
+                f"stable={first == repeated}",
+                f"separated={first != second}",
+            )
+
+        probe.simple("Secret per-application derivation", app_scoped_secrets)
 
     if "core" in selected or "openfile" in selected:
         def open_path(method: str, directory: bool = False) -> object:

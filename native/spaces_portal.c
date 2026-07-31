@@ -1615,6 +1615,7 @@ static void transformed_request_call(Portal *portal, const char *sender,
         g_variant_n_children(parameters) - 1);
     const char *token = NULL;
     char *fallback = NULL;
+    char *app_id = NULL;
     Request *request;
     TransformedRequestCall *call;
     GUnixFDList *fds;
@@ -1639,14 +1640,17 @@ static void transformed_request_call(Portal *portal, const char *sender,
     call->guest_path = g_strdup(request->guest_path);
     fds = g_dbus_message_get_unix_fd_list(
         g_dbus_method_invocation_get_message(invocation));
+    if (g_str_equal(interface_name, DESKTOP_INTERFACE_PREFIX "Secret"))
+        app_id = flatpak_app_id(portal, sender);
     g_dbus_connection_call_with_unix_fd_list(portal->host, broker, INTEGRATION_PATH,
         INTEGRATION_INTERFACE,
-        "PortalRequest", g_variant_new("(ssv)", interface_name, method_name,
-            parameters), G_VARIANT_TYPE("(ua{sv})"), G_DBUS_CALL_FLAGS_NONE,
+        "PortalRequest", g_variant_new("(sssv)", interface_name, method_name,
+            app_id == NULL ? "" : app_id, parameters),
+        G_VARIANT_TYPE("(ua{sv})"), G_DBUS_CALL_FLAGS_NONE,
         -1, fds, NULL, transformed_request_done, call);
     g_dbus_method_invocation_return_value(invocation,
         g_variant_new("(o)", request->guest_path));
-    g_variant_unref(options); g_free(fallback);
+    g_variant_unref(options); g_free(fallback); g_free(app_id);
 }
 
 typedef struct { GDBusMethodInvocation *invocation; } DynamicCall;
@@ -2998,7 +3002,7 @@ int main(void)
     signal(SIGPIPE, SIG_IGN);
     portal.space_name = g_strdup(g_getenv("SPACES_NAME"));
     if (portal.space_name == NULL || *portal.space_name == '\0') { g_printerr("spaces-portal: SPACES_NAME is unavailable\n"); return 1; }
-    portal.app_id = g_strconcat("org.anatase.Spaces.s", g_compute_checksum_for_string(G_CHECKSUM_SHA256, portal.space_name, -1), NULL);
+    portal.app_id = g_strconcat("org.anatase.Spaces.", portal.space_name, NULL);
     test_address = g_getenv("SPACES_PORTAL_TEST_ADDRESS");
     address = test_address != NULL ? g_strdup(test_address) : g_strdup_printf("unix:path=/run/spaces/desktop/%u/portal/bus", (unsigned)getuid());
     portal.guest = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, &error);

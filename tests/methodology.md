@@ -121,7 +121,7 @@ The following table lists every public interface in the router allowlist.
 | `org.freedesktop.portal.RemoteDesktop` | `sessions`: `CreateSession`, `SelectDevices`, Clipboard calls, and `Close` | All request/session paths are guest paths, host responses arrive once, follow-up methods use the translated host session, and close succeeds. |
 | `org.freedesktop.portal.ScreenCast` | `sessions` for lifecycle; `screencast-fd` for `CreateSession`, `SelectSources`, `Start`, and `OpenPipeWireRemote` | Selecting a source produces at least one stream `(node_id, properties)`. `OpenPipeWireRemote` returns one usable socket FD. `MSG_CTRUNC`, missing FDs, or a disconnected proxy are failures, commonly indicating SELinux FD-use denial. |
 | `org.freedesktop.portal.Screenshot` | `dialogs`: non-interactive `Screenshot` | Accepting returns a guest-visible `file:` URI. The broker stages a bounded host file into the Space and cleans temporary host data afterward. Nested Flatpak callers receive a document-portal URI. |
-| `org.freedesktop.portal.Secret` | `core`: call `RetrieveSecret` twice with separate memfds | Each call writes 64 bytes. Hashes are stable within one Space and differ between Spaces; the raw host secret is never returned. |
+| `org.freedesktop.portal.Secret` | `core`: call `RetrieveSecret` twice with separate memfds; `secret-apps`: ask the integration broker to derive for two synthetic application IDs | Each call writes 64 bytes. Results are stable for one Space/application pair and differ for different application IDs; the raw host secret is never returned. |
 | `org.freedesktop.portal.Settings` | Static: `ReadAll` | Returns host settings and namespaces, including the current button layout. Property-setting signals must be relayed without changing their signatures. |
 | `org.freedesktop.portal.Usb` | Static: `EnumerateDevices`; `sessions`: create/close; `usb-acquire`: `AcquireDevices` and `FinishAcquireDevices` | Host devices are enumerated without consulting the Space device configuration. Acquisition returns the host response and usable device FDs unchanged, including for devices without a guest `/dev` node. |
 | `org.freedesktop.portal.Wallpaper` | `dialogs`: `SetWallpaperFile` with a guest image FD | The broker stages the bounded file and invokes the host portal. Acceptance changes the host wallpaper; cancellation is relayed and staged data is cleaned. |
@@ -246,7 +246,7 @@ For a normal resizable application, expect a real `desktopFileName` and
 `resourceClass`, with `closeable`, `minimizable`, `maximizable`,
 `fullScreenable`, and `resizeable` all true.  During the graphical session, the
 host must also contain one hidden deterministic identity named
-`org.anatase.Spaces.s<hash>.desktop`; it must disappear when the portal proxy is
+`org.anatase.Spaces.<name>.desktop`; it must disappear when the portal proxy is
 closed, unless its inode was replaced by the user.
 
 ### Independent KWin screenshot

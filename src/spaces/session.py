@@ -659,8 +659,7 @@ def _portal_app_id(space_name: str) -> str:
     """Return the stable host identity used for one Space's portal grants."""
 
     core.validate_space_name(space_name)
-    digest = hashlib.sha256(space_name.encode("utf-8")).hexdigest()
-    return f"org.anatase.Spaces.s{digest}"
+    return f"org.anatase.Spaces.{space_name}"
 
 
 def _install_portal_identity(
