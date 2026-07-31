@@ -690,7 +690,7 @@ class PackagingTests(unittest.TestCase):
             "pam_spaces.so",
             "spaces-portal",
             "spaces-open",
-            "spaces-open-broker",
+            "spaces-integration-broker",
             "spaces-secret-helper",
             "spaces-pam-worker",
             "spaces-session-launcher",
@@ -704,7 +704,7 @@ class PackagingTests(unittest.TestCase):
         )
         self.assertIn("/usr/lib/spaces/guest/spaces-portal", spec)
         self.assertIn("/usr/lib/spaces/guest/spaces-open", spec)
-        self.assertIn("/usr/lib/spaces/spaces-open-broker", spec)
+        self.assertIn("/usr/lib/spaces/spaces-integration-broker", spec)
         self.assertIn(
             "/usr/lib/spaces/guest/spaces-secret-helper", spec
         )

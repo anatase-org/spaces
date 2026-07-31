@@ -126,7 +126,7 @@ fi
 %dir %{_sysconfdir}/spaces
 %dir /usr/lib/spaces
 /usr/lib/spaces/spaces-pam-worker
-/usr/lib/spaces/spaces-open-broker
+/usr/lib/spaces/spaces-integration-broker
 %dir /usr/lib/spaces/guest
 /usr/lib/spaces/guest/pam_spaces.so
 /usr/lib/spaces/guest/spaces-portal

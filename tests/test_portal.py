@@ -25,82 +25,65 @@ from spaces import core, session
 ROOT = Path(__file__).resolve().parents[1]
 HOST_INTERFACES = {
     "Account",
+    "Access",
+    "Background",
+    "Camera",
     "Clipboard",
+    "DynamicLauncher",
     "Email",
+    "GameMode",
     "GlobalShortcuts",
     "Inhibit",
     "InputCapture",
+    "Location",
+    "NetworkMonitor",
     "Notification",
+    "OpenURI",
+    "PowerProfileMonitor",
     "Print",
+    "ProxyResolver",
+    "Realtime",
     "RemoteDesktop",
     "ScreenCast",
     "Screenshot",
     "Secret",
     "Settings",
+    "Usb",
     "Wallpaper",
 }
-SPACE_INTERFACES = {
-    "Access",
+TRANSFORMED_INTERFACES = {
     "Background",
     "DynamicLauncher",
-    "FileChooser",
-    "Usb",
+    "GameMode",
+    "OpenURI",
+    "Realtime",
+    "Screenshot",
+    "Secret",
+    "Wallpaper",
 }
 
 
 class PortalConfigurationTests(unittest.TestCase):
-    def test_portal_configuration_has_explicit_host_and_space_split(self) -> None:
-        path = (
-            ROOT
-            / "data"
-            / "portal"
-            / "xdg-desktop-portal"
-            / "spaces-portals.conf"
+    def test_legacy_backend_configuration_is_removed(self) -> None:
+        portal_data = ROOT / "data" / "portal" / "xdg-desktop-portal"
+        self.assertFalse(portal_data.joinpath("spaces-portals.conf").exists())
+        self.assertFalse(portal_data.joinpath("portals", "spaces.portal").exists())
+        self.assertFalse(
+            ROOT.joinpath(
+                "data", "portal", "dbus-1", "services",
+                "org.freedesktop.impl.portal.desktop.spaces.service",
+            ).exists()
         )
-        config = configparser.ConfigParser()
-        config.optionxform = str
-        config.read(path, encoding="utf-8")
-        preferred = config["preferred"]
-
-        for name in HOST_INTERFACES:
-            self.assertEqual(
-                preferred[f"org.freedesktop.impl.portal.{name}"],
-                "spaces",
-            )
-        self.assertEqual(
-            preferred["org.freedesktop.impl.portal.AppChooser"],
-            "spaces",
-        )
-        for name in SPACE_INTERFACES:
-            self.assertEqual(
-                preferred[f"org.freedesktop.impl.portal.{name}"],
-                "kde",
-            )
-        self.assertEqual(
-            preferred["org.freedesktop.impl.portal.Lockdown"], "none"
-        )
-
-        descriptor = configparser.ConfigParser()
-        descriptor.optionxform = str
-        descriptor.read(
-            path.parent / "portals" / "spaces.portal",
-            encoding="utf-8",
-        )
-        advertised = {
-            value.removeprefix("org.freedesktop.impl.portal.")
-            for value in descriptor["portal"]["Interfaces"].split(";")
-            if value
-        }
-        self.assertEqual(advertised, HOST_INTERFACES | {"AppChooser"})
-        self.assertEqual(descriptor["portal"]["UseIn"], "Spaces")
 
     def test_proxy_policy_allows_only_selected_host_portals(self) -> None:
         arguments = session._portal_policy_arguments()
         policy = "\n".join(arguments)
-        for name in HOST_INTERFACES:
+        for name in HOST_INTERFACES - TRANSFORMED_INTERFACES:
             self.assertIn(f"org.freedesktop.portal.{name}.*", policy)
-        for name in (*SPACE_INTERFACES, "Lockdown"):
+        for name in TRANSFORMED_INTERFACES:
             self.assertNotIn(f"org.freedesktop.portal.{name}.*", policy)
+        self.assertNotIn("org.freedesktop.portal.FileChooser.*", policy)
+        self.assertNotIn("org.freedesktop.portal.Lockdown.*", policy)
         self.assertNotIn("org.freedesktop.portal.*=*", policy)
         self.assertNotIn("--talk=", policy)
         for method in (
@@ -161,30 +144,29 @@ class PortalConfigurationTests(unittest.TestCase):
                 for argument in arguments
             )
         )
-        self.assertIn(
-            "org.freedesktop.portal.OpenURI.OpenURI", policy
-        )
-        self.assertIn(
-            "org.freedesktop.portal.OpenURI.SchemeSupported", policy
-        )
-        self.assertNotIn(
-            "org.freedesktop.portal.OpenURI.OpenFile", policy
-        )
-        self.assertNotIn(
-            "org.freedesktop.portal.OpenURI.OpenDirectory", policy
-        )
+        self.assertIn("org.freedesktop.portal.OpenURI.OpenURI", policy)
+        self.assertNotIn("org.freedesktop.portal.OpenURI.OpenFile", policy)
+        self.assertNotIn("org.freedesktop.portal.GameMode.QueryStatusByPIDFd", policy)
+        self.assertIn("org.freedesktop.portal.Usb.*", policy)
+        self.assertIn("--own=org.mpris.MediaPlayer2.spaces.*", arguments)
+        self.assertIn("--own=org.kde.StatusNotifierItem.spaces.*", arguments)
 
         broker_policy = "\n".join(
             session._portal_policy_arguments(
-                "org.anatase.Spaces.Open.stest"
+                "org.anatase.Spaces.Integration.stest"
             )
         )
-        self.assertIn("org.anatase.Spaces.Open1.OpenFile", broker_policy)
+        self.assertIn("org.anatase.Spaces.Integration1.OpenFile", broker_policy)
         self.assertIn(
-            "org.anatase.Spaces.Open1.OpenDirectory", broker_policy
+            "org.anatase.Spaces.Integration1.OpenDirectory", broker_policy
+        )
+        self.assertIn("org.anatase.Spaces.Integration1.MakeGameMode", broker_policy)
+        self.assertIn(
+            "org.anatase.Spaces.Integration1.RemoveStagedFile",
+            broker_policy,
         )
 
-    def test_backend_activation_restarts_after_transient_host_failure(
+    def test_public_portal_activation_restarts_after_transient_host_failure(
         self,
     ) -> None:
         activation = configparser.ConfigParser()
@@ -195,7 +177,7 @@ class PortalConfigurationTests(unittest.TestCase):
             / "portal"
             / "dbus-1"
             / "services"
-            / "org.freedesktop.impl.portal.desktop.spaces.service",
+            / "org.freedesktop.portal.Desktop.service",
             encoding="utf-8",
         )
         self.assertEqual(
@@ -285,30 +267,14 @@ class PortalConfigurationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             rootfs = Path(temporary) / "rootfs"
             assets = Path(temporary) / "assets"
-            frontend = rootfs / session.GUEST_PORTAL_FRONTENDS[0]
-            kde = rootfs / session.GUEST_KDE_PORTAL
-            pipewire = rootfs / session.GUEST_PIPEWIRE_CONFIGS[0]
-            kwallet = rootfs / session.GUEST_KWALLET_PROVIDERS[0]
             services = assets / "dbus-1" / "services"
-            portal_data = assets / "xdg-desktop-portal"
-            for path in (
-                frontend.parent,
-                kde.parent,
-                pipewire.parent,
-                kwallet.parent,
-                services,
-                portal_data,
-            ):
-                path.mkdir(parents=True, exist_ok=True)
+            systemd = assets / "systemd" / "user"
+            services.mkdir(parents=True)
             services.joinpath("service").write_text("", encoding="utf-8")
-            portal_data.joinpath("config").write_text("", encoding="utf-8")
 
             binds = (
                 (services, "/usr/local/share/dbus-1/services"),
-                (
-                    portal_data,
-                    "/usr/local/share/xdg-desktop-portal",
-                ),
+                (systemd, "/usr/local/share/systemd/user"),
             )
             with (
                 mock.patch.object(session, "PORTAL_DATA_BINDS", binds),
@@ -316,18 +282,15 @@ class PortalConfigurationTests(unittest.TestCase):
             ):
                 self.assertEqual(session.portal_bind_arguments(rootfs), ())
 
-            frontend.write_text("", encoding="utf-8")
-            kde.write_text("", encoding="utf-8")
-            pipewire.write_text("", encoding="utf-8")
-            kwallet.write_text("", encoding="utf-8")
+            systemd.mkdir(parents=True)
             with mock.patch.object(session, "PORTAL_DATA_BINDS", binds):
                 self.assertEqual(
                     session.portal_bind_arguments(rootfs),
                     (
                         f"--bind-ro={services}:"
                         "/usr/local/share/dbus-1/services",
-                        f"--bind-ro={portal_data}:"
-                        "/usr/local/share/xdg-desktop-portal",
+                        f"--bind-ro={systemd}:"
+                        "/usr/local/share/systemd/user",
                     ),
                 )
 
@@ -496,7 +459,7 @@ class PortalNativeTests(unittest.TestCase):
                 "-C",
                 str(ROOT / "native"),
                 "spaces-portal",
-                "spaces-open-broker",
+                "spaces-integration-broker",
             ],
             check=True,
             stdout=subprocess.DEVNULL,
@@ -545,7 +508,7 @@ class PortalNativeTests(unittest.TestCase):
             time.sleep(0.01)
         return False
 
-    def test_backend_registers_only_host_interfaces_and_rejects_direct_callers(
+    def test_router_owns_public_name_without_legacy_backend(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -592,7 +555,7 @@ class PortalNativeTests(unittest.TestCase):
                             "--address",
                             guest_address,
                             "--dest",
-                            "org.freedesktop.impl.portal.desktop.spaces",
+                            "org.freedesktop.portal.Desktop",
                             "--object-path",
                             "/org/freedesktop/portal/desktop",
                         ],
@@ -606,19 +569,7 @@ class PortalNativeTests(unittest.TestCase):
                     time.sleep(0.02)
                 self.assertIsNotNone(introspection)
                 assert introspection is not None
-                for name in HOST_INTERFACES:
-                    self.assertIn(
-                        f"org.freedesktop.impl.portal.{name}",
-                        introspection,
-                    )
-                self.assertIn(
-                    "org.freedesktop.impl.portal.AppChooser",
-                    introspection,
-                )
-                self.assertNotIn(
-                    "org.freedesktop.impl.portal.FileChooser",
-                    introspection,
-                )
+                self.assertNotIn("org.freedesktop.impl.portal.", introspection)
                 file_manager = subprocess.run(
                     [
                         "gdbus",
@@ -626,7 +577,7 @@ class PortalNativeTests(unittest.TestCase):
                         "--address",
                         guest_address,
                         "--dest",
-                        "org.freedesktop.impl.portal.desktop.spaces",
+                        "org.freedesktop.FileManager1",
                         "--object-path",
                         "/org/freedesktop/FileManager1",
                     ],
@@ -711,7 +662,7 @@ class PortalNativeTests(unittest.TestCase):
                         "--address",
                         guest_address,
                         "--dest",
-                        "org.freedesktop.impl.portal.desktop.spaces",
+                        "org.freedesktop.portal.Desktop",
                         "--object-path",
                         "/org/freedesktop/portal/desktop",
                         "--method",
@@ -726,7 +677,7 @@ class PortalNativeTests(unittest.TestCase):
                     text=True,
                 )
                 self.assertNotEqual(denied.returncode, 0)
-                self.assertIn("AccessDenied", denied.stderr)
+                self.assertIn("UnknownMethod", denied.stderr)
 
                 host_portal.terminate()
                 host_portal.wait(timeout=2)
@@ -1316,7 +1267,7 @@ class PortalNativeTests(unittest.TestCase):
                 self.assertTrue(
                     self._wait_for_bus_name(
                         guest_address,
-                        "org.freedesktop.impl.portal.desktop.spaces",
+                        "org.freedesktop.portal.Desktop",
                     )
                 )
                 self.assertTrue(
@@ -1394,9 +1345,13 @@ class PortalNativeTests(unittest.TestCase):
             ready_read, ready_write = os.pipe()
             broker = subprocess.Popen(
                 [
-                    ROOT / "native" / "spaces-open-broker",
+                    ROOT / "native" / "spaces-integration-broker",
                     "--name",
-                    "org.anatase.Spaces.Open.stest",
+                    "org.anatase.Spaces.Integration.stest",
+                    "--space",
+                    "work",
+                    "--app-id",
+                    session._portal_app_id("work"),
                     "--ready-fd",
                     str(ready_write),
                     "--map",
@@ -1434,9 +1389,9 @@ class PortalNativeTests(unittest.TestCase):
                     os.close(proof_fd)
                     try:
                         connection.call_with_unix_fd_list_sync(
-                            "org.anatase.Spaces.Open.stest",
-                            "/org/anatase/Spaces/Open",
-                            "org.anatase.Spaces.Open1",
+                            "org.anatase.Spaces.Integration.stest",
+                            "/org/anatase/Spaces/Integration",
+                            "org.anatase.Spaces.Integration1",
                             "OpenFile",
                             GLib.Variant(
                                 "(shbs)", (path, handle, False, "")

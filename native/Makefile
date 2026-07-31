@@ -12,7 +12,7 @@ TARGET_ARCH ?= $(shell uname -m)
 .PHONY: all check-guest-abi clean install
 
 all: pam_spaces.so spaces-pam-worker spaces-session-launcher spaces-portal \
-	spaces-secret-helper spaces-open spaces-open-broker
+	spaces-secret-helper spaces-open spaces-integration-broker
 
 pam_spaces.so: pam_spaces.c protocol.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -shared -o $@ pam_spaces.c \
@@ -26,7 +26,7 @@ spaces-session-launcher: spaces_session_launcher.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ spaces_session_launcher.c \
 		$(LDFLAGS) -Wl,--wrap=__libc_start_main
 
-spaces-portal: spaces_portal.c portal_interfaces.h
+spaces-portal: spaces_portal.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) \
 		$$(pkg-config --cflags gio-unix-2.0) \
 		-o $@ spaces_portal.c $(LDFLAGS) \
@@ -47,10 +47,10 @@ spaces-open: spaces_open.c
 		-Wl,--wrap=__libc_start_main \
 		$$(pkg-config --libs gio-unix-2.0)
 
-spaces-open-broker: spaces_open_broker.c
+spaces-integration-broker: spaces_integration_broker.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) \
 		$$(pkg-config --cflags gio-unix-2.0) \
-		-o $@ spaces_open_broker.c $(LDFLAGS) \
+		-o $@ spaces_integration_broker.c $(LDFLAGS) \
 		$$(pkg-config --libs gio-unix-2.0)
 
 check-guest-abi: all
@@ -58,7 +58,7 @@ check-guest-abi: all
 		--glibc-max 2.17 \
 		--guest pam_spaces.so spaces-session-launcher spaces-portal \
 			spaces-secret-helper spaces-open \
-		--host spaces-pam-worker spaces-open-broker
+		--host spaces-pam-worker spaces-integration-broker
 
 install: check-guest-abi
 	install -Dm755 pam_spaces.so \
@@ -73,9 +73,9 @@ install: check-guest-abi
 		$(DESTDIR)$(GUESTDIR)/spaces-secret-helper
 	install -Dm755 spaces-open \
 		$(DESTDIR)$(GUESTDIR)/spaces-open
-	install -Dm755 spaces-open-broker \
-		$(DESTDIR)$(LIBEXECDIR)/spaces-open-broker
+	install -Dm755 spaces-integration-broker \
+		$(DESTDIR)$(LIBEXECDIR)/spaces-integration-broker
 
 clean:
 	rm -f pam_spaces.so spaces-pam-worker spaces-session-launcher \
-		spaces-portal spaces-secret-helper spaces-open spaces-open-broker
+		spaces-portal spaces-secret-helper spaces-open spaces-integration-broker

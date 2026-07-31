@@ -11,8 +11,8 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
-#define OPEN_PATH "/org/anatase/Spaces/Open"
-#define OPEN_INTERFACE "org.anatase.Spaces.Open1"
+#define INTEGRATION_PATH "/org/anatase/Spaces/Integration"
+#define INTEGRATION_INTERFACE "org.anatase.Spaces.Integration1"
 #define PORTAL_NAME "org.freedesktop.portal.Desktop"
 #define PORTAL_PATH "/org/freedesktop/portal/desktop"
 
@@ -188,7 +188,7 @@ static guint open_path(
     GError **error
 )
 {
-    const char *broker_name = g_getenv("SPACES_OPEN_BROKER");
+    const char *broker_name = g_getenv("SPACES_INTEGRATION_BROKER");
     GUnixFDList *fd_list;
     GVariant *reply;
     struct stat metadata;
@@ -252,7 +252,7 @@ static guint open_path(
     }
     if (g_str_equal(method, "OpenDirectory"))
         reply = g_dbus_connection_call_with_unix_fd_list_sync(
-            connection, broker_name, OPEN_PATH, OPEN_INTERFACE, method,
+            connection, broker_name, INTEGRATION_PATH, INTEGRATION_INTERFACE, method,
             g_variant_new(
                 "(shs)", path, handle,
                 activation_token == NULL ? "" : activation_token
@@ -262,7 +262,7 @@ static guint open_path(
         );
     else
         reply = g_dbus_connection_call_with_unix_fd_list_sync(
-            connection, broker_name, OPEN_PATH, OPEN_INTERFACE, method,
+            connection, broker_name, INTEGRATION_PATH, INTEGRATION_INTERFACE, method,
             g_variant_new(
                 "(shbs)", path, handle, writable,
                 activation_token == NULL ? "" : activation_token

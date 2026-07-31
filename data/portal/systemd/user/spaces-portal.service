@@ -4,7 +4,7 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=dbus
-BusName=org.freedesktop.impl.portal.desktop.spaces
+BusName=org.freedesktop.portal.Desktop
 ExecStart=/run/spaces-host/bin/spaces-portal
 Restart=always
 RestartSec=1

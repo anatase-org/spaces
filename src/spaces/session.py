@@ -32,7 +32,7 @@ MACHINECTL = "/usr/bin/machinectl"
 SYSTEMCTL = "/usr/bin/systemctl"
 SYSTEMD_RUN = "/usr/bin/systemd-run"
 XDG_DBUS_PROXY = "/usr/bin/xdg-dbus-proxy"
-OPEN_BROKER = "/usr/lib/spaces/spaces-open-broker"
+INTEGRATION_BROKER = "/usr/lib/spaces/spaces-integration-broker"
 RUNTIME_ROOT = Path("/run/spaces")
 DESKTOP_ROOT = PurePosixPath("/run/spaces/desktop")
 CREDENTIAL_ROOT = PurePosixPath("/run/spaces/credentials")
@@ -98,7 +98,7 @@ DESKTOP_ENVIRONMENT = frozenset(
         "QT_STYLE_OVERRIDE",
         "QT_WAYLAND_DISABLE_WINDOWDECORATION",
         "SDL_VIDEODRIVER",
-        "SPACES_OPEN_BROKER",
+        "SPACES_INTEGRATION_BROKER",
         "SPACES_NAME",
         "SSH_AUTH_SOCK",
         "WAYLAND_DISPLAY",
@@ -126,19 +126,23 @@ POLKIT_AGENTS = (
 POLKIT_AGENT_GLOB = "usr/lib/*/libexec/polkit-kde-authentication-agent-1"
 HOST_PORTAL_INTERFACES = (
     "Account",
+    "Access",
+    "Camera",
     "Clipboard",
     "Email",
     "GlobalShortcuts",
     "Inhibit",
     "InputCapture",
+    "Location",
+    "NetworkMonitor",
     "Notification",
+    "PowerProfileMonitor",
     "Print",
+    "ProxyResolver",
     "RemoteDesktop",
     "ScreenCast",
-    "Screenshot",
-    "Secret",
     "Settings",
-    "Wallpaper",
+    "Usb",
 )
 OPEN_DESKTOP_ID = "spaces-open.desktop"
 OPEN_SCHEMES = (
@@ -156,10 +160,6 @@ PORTAL_DATA_BINDS = (
         "/usr/local/share/dbus-1/services",
     ),
     (
-        PORTAL_DATA_ROOT / "xdg-desktop-portal",
-        "/usr/local/share/xdg-desktop-portal",
-    ),
-    (
         PORTAL_DATA_ROOT / "systemd" / "user",
         "/usr/local/share/systemd/user",
     ),
@@ -167,10 +167,6 @@ PORTAL_DATA_BINDS = (
         PORTAL_DATA_ROOT / "config",
         "/run/spaces-host/config",
     ),
-)
-GUEST_PORTAL_FRONTENDS = (
-    "usr/libexec/xdg-desktop-portal",
-    "usr/lib/xdg-desktop-portal",
 )
 GUEST_KDE_PORTAL = "usr/share/xdg-desktop-portal/portals/kde.portal"
 GUEST_KWALLET_PROVIDERS = (
@@ -438,44 +434,14 @@ def host_manager_environment(user: DesktopUser) -> dict[str, str]:
 
 
 def portal_bind_arguments(rootfs: Path) -> tuple[str, ...]:
-    """Return immutable portal assets when the guest portal stack is present.
+    """Return immutable router assets.
 
-    This is deliberately a read-only preflight. Existing spaces can install
-    the missing packages and retry without a rootfs migration.
+    The public router does not require a guest xdg-desktop-portal frontend.
+    File chooser, keyring and document services are optional guest features;
+    their absence must not disable unrelated host portal interfaces.
     """
 
-    frontend = any(
-        (rootfs / candidate).is_file()
-        for candidate in GUEST_PORTAL_FRONTENDS
-    )
-    kde = (rootfs / GUEST_KDE_PORTAL).is_file()
-    kwallet = any(
-        (rootfs / candidate).is_file()
-        for candidate in GUEST_KWALLET_PROVIDERS
-    )
-    pipewire = any(
-        (rootfs / candidate).is_file()
-        for candidate in GUEST_PIPEWIRE_CONFIGS
-    )
     assets = all(source.is_dir() for source, _destination in PORTAL_DATA_BINDS)
-    if not frontend or not kde or not kwallet or not pipewire:
-        missing = []
-        if not frontend:
-            missing.append("xdg-desktop-portal")
-        if not kde:
-            missing.append("xdg-desktop-portal-kde")
-        if not kwallet:
-            missing.append("kwallet Secret Service provider")
-        if not pipewire:
-            missing.append("pipewire")
-        logger.warning(
-            _(
-                "Host portal integration is unavailable; install {packages} "
-                "inside the space to retry.",
-                packages=", ".join(missing),
-            )
-        )
-        return ()
     if not assets:
         logger.warning(
             _("Host portal integration assets are missing; continuing without them.")
@@ -492,30 +458,60 @@ def _portal_policy_arguments(broker_name: str | None = None) -> list[str]:
     desktop = "/org/freedesktop/portal/desktop"
     arguments = [
         "--filter",
+        "--own=org.mpris.MediaPlayer2.spaces.*",
+        "--own=org.kde.StatusNotifierItem.spaces.*",
         (
             f"--call={name}=org.freedesktop.DBus.Introspectable."
             f"Introspect@{desktop}"
         ),
         f"--call={name}=org.freedesktop.DBus.Properties.*@{desktop}",
         (
-            f"--call={name}=org.freedesktop.portal.OpenURI."
-            f"OpenURI@{desktop}"
+            f"--broadcast={name}=org.freedesktop.DBus.Properties."
+            f"PropertiesChanged@{desktop}"
         ),
         (
-            f"--call={name}=org.freedesktop.portal.OpenURI."
-            f"SchemeSupported@{desktop}"
+            f"--call={name}=org.freedesktop.host.portal.Registry."
+            f"Register@{desktop}"
         ),
     ]
     if broker_name is not None:
         arguments.extend(
             (
                 (
-                    f"--call={broker_name}=org.anatase.Spaces.Open1."
-                    f"OpenFile@/org/anatase/Spaces/Open"
+                    f"--call={broker_name}=org.anatase.Spaces.Integration1."
+                    f"OpenFile@/org/anatase/Spaces/Integration"
                 ),
                 (
-                    f"--call={broker_name}=org.anatase.Spaces.Open1."
-                    f"OpenDirectory@/org/anatase/Spaces/Open"
+                    f"--call={broker_name}=org.anatase.Spaces.Integration1."
+                    f"OpenDirectory@/org/anatase/Spaces/Integration"
+                ),
+                (
+                    f"--call={broker_name}=org.anatase.Spaces.Integration1."
+                    f"MakeRealtime@/org/anatase/Spaces/Integration"
+                ),
+                (
+                    f"--call={broker_name}=org.anatase.Spaces.Integration1."
+                    f"MakeGameMode@/org/anatase/Spaces/Integration"
+                ),
+                (
+                    f"--call={broker_name}=org.anatase.Spaces.Integration1."
+                    f"Screenshot@/org/anatase/Spaces/Integration"
+                ),
+                (
+                    f"--call={broker_name}=org.anatase.Spaces.Integration1."
+                    f"StageFile@/org/anatase/Spaces/Integration"
+                ),
+                (
+                    f"--call={broker_name}=org.anatase.Spaces.Integration1."
+                    f"RemoveStagedFile@/org/anatase/Spaces/Integration"
+                ),
+                (
+                    f"--call={broker_name}=org.anatase.Spaces.Integration1."
+                    f"PortalRequest@/org/anatase/Spaces/Integration"
+                ),
+                (
+                    f"--call={broker_name}=org.anatase.Spaces.Integration1."
+                    f"DynamicLauncherCall@/org/anatase/Spaces/Integration"
                 ),
             )
         )
@@ -526,6 +522,16 @@ def _portal_policy_arguments(broker_name: str | None = None) -> list[str]:
         arguments.append(
             f"--broadcast={name}=org.freedesktop.portal.{interface}.*@{desktop}"
         )
+    for interface, methods in (
+        ("OpenURI", ("OpenURI", "SchemeSupported")),
+        ("Screenshot", ("PickColor",)),
+        ("Background", ("SetStatus",)),
+    ):
+        for method in methods:
+            arguments.append(
+                f"--call={name}=org.freedesktop.portal.{interface}.{method}"
+                f"@{desktop}"
+            )
     for interface, subtree in (
         ("Request", f"{desktop}/request/*"),
         ("Session", f"{desktop}/session/*"),
@@ -582,13 +588,46 @@ def _portal_policy_arguments(broker_name: str | None = None) -> list[str]:
             f"--broadcast={screen_saver}="
             f"{screen_saver}.ActiveChanged@{path}"
         )
+    power = "org.freedesktop.PowerManagement"
+    power_path = "/org/freedesktop/PowerManagement"
+    for method in (
+        "CanHibernate",
+        "CanHybridSuspend",
+        "CanSuspend",
+        "CanSuspendThenHibernate",
+        "GetPowerSaveStatus",
+    ):
+        arguments.append(f"--call={power}={power}.{method}@{power_path}")
+    for signal_name in (
+        "CanHibernateChanged",
+        "CanHybridSuspendChanged",
+        "CanSuspendChanged",
+        "CanSuspendThenHibernateChanged",
+        "PowerSaveStatusChanged",
+    ):
+        arguments.append(
+            f"--broadcast={power}={power}.{signal_name}@{power_path}"
+        )
+    watcher = "org.kde.StatusNotifierWatcher"
+    arguments.append(
+        f"--call={watcher}={watcher}.RegisterStatusNotifierItem"
+        "@/StatusNotifierWatcher"
+    )
     return arguments
 
 
 def _broker_name(space_name: str, uid: int, session_id: str) -> str:
     identity = f"{space_name}\0{uid}\0{session_id}".encode("utf-8")
     generation = hashlib.sha256(identity).hexdigest()[:24]
-    return f"org.anatase.Spaces.Open.s{generation}"
+    return f"org.anatase.Spaces.Integration.s{generation}"
+
+
+def _portal_app_id(space_name: str) -> str:
+    """Return the stable host identity used for one Space's portal grants."""
+
+    core.validate_space_name(space_name)
+    digest = hashlib.sha256(space_name.encode("utf-8")).hexdigest()
+    return f"org.anatase.Spaces.s{digest}"
 
 
 def _open_mapping_descriptors(
@@ -659,9 +698,13 @@ def _start_open_broker(
     )
     ready_read, ready_write = os.pipe2(os.O_CLOEXEC | os.O_NONBLOCK)
     command = [
-        OPEN_BROKER,
+        INTEGRATION_BROKER,
         "--name",
         name,
+        "--space",
+        space_name,
+        "--app-id",
+        _portal_app_id(space_name),
         "--ready-fd",
         str(ready_write),
         *mapping_arguments,
@@ -1802,7 +1845,7 @@ class DesktopController:
                     open_mappings=open_mappings,
                 )
                 plan.environment["SPACES_NAME"] = self.space_name
-                plan.environment["SPACES_OPEN_BROKER"] = _broker_name(
+                plan.environment["SPACES_INTEGRATION_BROKER"] = _broker_name(
                     self.space_name, user.uid, selected.session_id
                 )
             else:

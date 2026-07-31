@@ -1,5 +1,6 @@
 [Unit]
 Description=Spaces graphical session
 Requires=graphical-session.target
+Wants=spaces-portal.service
 BindsTo=graphical-session.target
 Before=graphical-session.target

@@ -1,4 +1,4 @@
 [D-BUS Service]
-Name=org.freedesktop.impl.portal.desktop.spaces
+Name=org.kde.StatusNotifierWatcher
 Exec=/run/spaces-host/bin/spaces-portal
 SystemdService=spaces-portal.service

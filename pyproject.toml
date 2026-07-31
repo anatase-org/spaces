@@ -59,21 +59,20 @@ spaces = ["overlay/*.png"]
 "share/spaces/portal/dbus-1/services" = [
   "data/portal/dbus-1/services/org.freedesktop.FileManager1.service",
   "data/portal/dbus-1/services/org.freedesktop.Notifications.service",
+  "data/portal/dbus-1/services/org.freedesktop.PowerManagement.service",
   "data/portal/dbus-1/services/org.freedesktop.ScreenSaver.service",
-  "data/portal/dbus-1/services/org.freedesktop.impl.portal.desktop.spaces.service",
+  "data/portal/dbus-1/services/org.freedesktop.portal.Desktop.service",
   "data/portal/dbus-1/services/org.freedesktop.secrets.service",
   "data/portal/dbus-1/services/org.kde.secretservicecompat.service",
   "data/portal/dbus-1/services/org.kde.kwalletd5.service",
-]
-"share/spaces/portal/xdg-desktop-portal" = [
-  "data/portal/xdg-desktop-portal/spaces-portals.conf",
-]
-"share/spaces/portal/xdg-desktop-portal/portals" = [
-  "data/portal/xdg-desktop-portal/portals/spaces.portal",
+  "data/portal/dbus-1/services/org.kde.StatusNotifierWatcher.service",
 ]
 "share/spaces/portal/systemd/user" = [
   "data/portal/systemd/user/spaces-graphical-session.target",
   "data/portal/systemd/user/spaces-portal.service",
+]
+"share/spaces/portal/systemd/user/xdg-desktop-portal.service.d" = [
+  "data/portal/systemd/user/xdg-desktop-portal.service.d/spaces.conf",
 ]
 "share/spaces/portal/config" = [
   "data/portal/config/kwalletrc",
