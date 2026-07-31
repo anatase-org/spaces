@@ -78,6 +78,15 @@ static void secure_clear(void *data, gsize size)
         *cursor++ = 0;
 }
 
+static void truncate_secret_fd(int descriptor)
+{
+    int result;
+
+    do {
+        result = ftruncate(descriptor, 0);
+    } while (result < 0 && errno == EINTR);
+}
+
 static gboolean write_all(int descriptor, const void *data, gsize size)
 {
     const guint8 *cursor = data;
@@ -372,7 +381,7 @@ out:
     if (subscription != 0)
         g_dbus_connection_signal_unsubscribe(bus, subscription);
     if (descriptor >= 0) {
-        (void)ftruncate(descriptor, 0);
+        truncate_secret_fd(descriptor);
         close(descriptor);
     }
     g_clear_error(&error);

@@ -812,6 +812,19 @@ static void execute_agent(
     _exit(127);
 }
 
+static void write_ready_notification(int descriptor)
+{
+    unsigned char ready = 1;
+    ssize_t written;
+
+    do {
+        written = write(descriptor, &ready, sizeof(ready));
+    } while (written < 0 && errno == EINTR);
+    if (written != sizeof(ready))
+        fprintf(stderr,
+                "spaces: warning: could not report polkit agent readiness\n");
+}
+
 static void relay_agent_output(int descriptor, int ready_descriptor)
 {
     static const char ready_message[] =
@@ -835,9 +848,7 @@ static void relay_agent_output(int descriptor, int ready_descriptor)
             if (buffer[index] == ready_message[matched]) {
                 matched++;
                 if (ready_message[matched] == '\0') {
-                    unsigned char ready = 1;
-
-                    (void)write(ready_descriptor, &ready, sizeof(ready));
+                    write_ready_notification(ready_descriptor);
                     close(ready_descriptor);
                     ready_descriptor = -1;
                     reported = true;

@@ -193,12 +193,21 @@ static GDBusMethodInfo *find_method(
     return NULL;
 }
 
+static void truncate_secret_fd(int descriptor)
+{
+    int result;
+
+    do {
+        result = ftruncate(descriptor, 0);
+    } while (result < 0 && errno == EINTR);
+}
+
 static void pending_free(gpointer data)
 {
     Pending *pending = data;
 
     if (pending->secret_host_fd >= 0) {
-        (void)ftruncate(pending->secret_host_fd, 0);
+        truncate_secret_fd(pending->secret_host_fd);
         close(pending->secret_host_fd);
     }
     if (pending->secret_guest_fd >= 0)
@@ -313,7 +322,7 @@ out:
     secure_clear(raw, sizeof(raw));
     secure_clear(derived, sizeof(derived));
     if (pending->secret_host_fd >= 0)
-        (void)ftruncate(pending->secret_host_fd, 0);
+        truncate_secret_fd(pending->secret_host_fd);
     return success;
 }
 
