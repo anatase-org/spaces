@@ -24,9 +24,8 @@ from PIL import Image, UnidentifiedImageError
 from . import _
 
 SHORTCUT_VERSION = 1
-ICON_FILENAME_PREFIX = "spaces-a7f3-"
 APPLICATIONS_ROOT = Path("/usr/local/share/applications")
-EXPORT_ROOT_NAME = "spaces"
+ICON_ROOT_NAME = "spaces-icons"
 SOURCE_DIRECTORIES = (
     ("system", PurePosixPath("/usr/share/applications"), ""),
     ("local", PurePosixPath("/usr/local/share/applications"), "local-"),
@@ -76,7 +75,6 @@ ACTION_KEYS = frozenset({"Name", "Exec", "Icon"})
 KEY_PATTERN = re.compile(r"^[A-Za-z0-9-]+(?:\[[^\]\r\n]+\])?$")
 ACTION_ID_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
 DESKTOP_ID_UNSAFE_PATTERN = re.compile(r"[^A-Za-z0-9._-]")
-VERSION_DIRECTORY_PATTERN = re.compile(r"^(?P<space>.+)-v(?P<version>[0-9]+)$")
 INOTIFY_EVENT = struct.Struct("iIII")
 IN_MODIFY = 0x00000002
 IN_ATTRIB = 0x00000004
@@ -142,6 +140,34 @@ def _output_id(relative: PurePosixPath, prefix: str) -> str:
         stem = stem.encode("utf-8")[:220].decode("utf-8", errors="ignore")
         sanitized = f"{stem}-{digest}.desktop"
     return sanitized
+
+
+def _shortcut_prefix(space_name: str, version: int = SHORTCUT_VERSION) -> str:
+    return f"spaces-{space_name}-v{version}-"
+
+
+def _shortcut_name(space_name: str, source_name: str) -> str:
+    prefix = _shortcut_prefix(space_name)
+    raw = prefix + source_name
+    if len(raw.encode("utf-8")) <= 240:
+        return raw
+
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:10]
+    suffix = f"-{digest}.desktop"
+    budget = 240 - len(prefix.encode("utf-8")) - len(suffix.encode("utf-8"))
+    stem = source_name.removesuffix(".desktop")
+    stem = stem.encode("utf-8")[:budget].decode("utf-8", errors="ignore")
+    return f"{prefix}{stem}{suffix}"
+
+
+def _shortcut_version(name: str, space_name: str, suffix: str) -> int | None:
+    prefix = f"spaces-{space_name}-v"
+    if not name.startswith(prefix) or not name.endswith(suffix):
+        return None
+    version, separator, remainder = name[len(prefix) :].partition("-")
+    if not separator or not version.isdigit() or not remainder:
+        return None
+    return int(version)
 
 
 def _safe_source_directory(rootfs: Path, guest_path: PurePosixPath) -> Path | None:
@@ -495,8 +521,7 @@ def generate(
 ) -> list[GeneratedShortcut]:
     if applications_root is None:
         applications_root = APPLICATIONS_ROOT
-    target = applications_root / EXPORT_ROOT_NAME / f"{space_name}-v{SHORTCUT_VERSION}"
-    icon_directory = target / "icons"
+    icon_directory = applications_root / ICON_ROOT_NAME
     generated: list[GeneratedShortcut] = []
     parsed: list[
         tuple[DesktopSource, list[tuple[str, dict[str, str]]], dict[str, str]]
@@ -521,6 +546,7 @@ def generate(
     )
     overlay = _load_overlay(distribution_id)
     for source, groups, main in parsed:
+        shortcut_name = _shortcut_name(space_name, source.output_name)
         icon_bytes = _render_icon(
             rootfs,
             main.get("Icon", ""),
@@ -528,8 +554,7 @@ def generate(
             icon_index,
         )
         icon_name = (
-            f"{ICON_FILENAME_PREFIX}"
-            f"{source.output_name.removesuffix('.desktop')}.png"
+            f"{shortcut_name.removesuffix('.desktop')}.png"
             if icon_bytes is not None
             else None
         )
@@ -539,7 +564,7 @@ def generate(
             continue
         generated.append(
             GeneratedShortcut(
-                source.output_name,
+                shortcut_name,
                 desktop,
                 icon_name,
                 icon_bytes,
@@ -548,25 +573,21 @@ def generate(
     return generated
 
 
-def _ensure_directory(path: Path) -> bool:
-    existed = path.exists()
+def _ensure_directory(path: Path) -> None:
     path.mkdir(mode=0o755, parents=True, exist_ok=True)
     if path.is_symlink() or not path.is_dir():
         raise OSError(f"Unsafe shortcut directory: {path}")
-    mode_changed = stat.S_IMODE(path.stat().st_mode) != 0o755
-    if mode_changed:
+    if stat.S_IMODE(path.stat().st_mode) != 0o755:
         path.chmod(0o755)
-    return not existed or mode_changed
 
 
-def _atomic_write(path: Path, content: bytes) -> bool:
+def _atomic_write(path: Path, content: bytes) -> None:
     try:
         metadata = path.lstat()
         if stat.S_ISREG(metadata.st_mode) and path.read_bytes() == content:
             if stat.S_IMODE(metadata.st_mode) != 0o644:
                 path.chmod(0o644)
-                return True
-            return False
+            return
     except OSError:
         pass
 
@@ -583,29 +604,15 @@ def _atomic_write(path: Path, content: bytes) -> bool:
     finally:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
-    return True
 
 
-def _remove_path(path: Path) -> bool:
+def _remove_path(path: Path) -> None:
     if not path.exists() and not path.is_symlink():
-        return False
+        return
     if path.is_symlink() or not path.is_dir():
         path.unlink(missing_ok=True)
     else:
         shutil.rmtree(path)
-    return True
-
-
-def _notify_applications_root(applications_root: Path) -> None:
-    """Signal non-recursive desktop-directory watchers after nested changes."""
-    try:
-        os.utime(applications_root, None, follow_symlinks=False)
-    except OSError as error:
-        logger.warning(
-            "Could not notify desktop application watchers for %s: %s",
-            applications_root,
-            error,
-        )
 
 
 def cleanup_versions(
@@ -613,30 +620,29 @@ def cleanup_versions(
     *,
     applications_root: Path | None = None,
     keep_current: bool = True,
-) -> bool:
+) -> None:
     if applications_root is None:
         applications_root = APPLICATIONS_ROOT
-    export_root = applications_root / EXPORT_ROOT_NAME
-    if not export_root.exists():
-        return False
-    if export_root.is_symlink() or not export_root.is_dir():
-        raise OSError(f"Unsafe shortcut export root: {export_root}")
-    current_name = f"{space_name}-v{SHORTCUT_VERSION}"
-    prefix = f"{space_name}-v"
-    changed = False
-    for candidate in export_root.iterdir():
-        if candidate.name.startswith(".spaces-"):
-            changed |= _remove_path(candidate)
-            continue
-        if not candidate.name.startswith(prefix):
-            continue
-        match = VERSION_DIRECTORY_PATTERN.fullmatch(candidate.name)
-        if match is None or match.group("space") != space_name:
-            continue
-        if keep_current and candidate.name == current_name:
-            continue
-        changed |= _remove_path(candidate)
-    return changed
+    if applications_root.exists():
+        for candidate in applications_root.iterdir():
+            version = _shortcut_version(candidate.name, space_name, ".desktop")
+            if version is None:
+                continue
+            if keep_current and version == SHORTCUT_VERSION:
+                continue
+            _remove_path(candidate)
+
+    icons = applications_root / ICON_ROOT_NAME
+    if icons.exists():
+        if icons.is_symlink() or not icons.is_dir():
+            raise OSError(f"Unsafe shortcut icon root: {icons}")
+        for candidate in icons.iterdir():
+            version = _shortcut_version(candidate.name, space_name, ".png")
+            if version is None:
+                continue
+            if keep_current and version == SHORTCUT_VERSION:
+                continue
+            _remove_path(candidate)
 
 
 def remove(
@@ -646,13 +652,17 @@ def remove(
 ) -> None:
     if applications_root is None:
         applications_root = APPLICATIONS_ROOT
-    changed = cleanup_versions(
+    cleanup_versions(
         space_name,
         applications_root=applications_root,
         keep_current=False,
     )
-    if changed:
-        _notify_applications_root(applications_root)
+    icons = applications_root / ICON_ROOT_NAME
+    if icons.exists() and icons.is_dir() and not icons.is_symlink():
+        try:
+            icons.rmdir()
+        except OSError:
+            pass
 
 
 def reconcile(
@@ -664,13 +674,9 @@ def reconcile(
 ) -> None:
     if applications_root is None:
         applications_root = APPLICATIONS_ROOT
-    export_root = applications_root / EXPORT_ROOT_NAME
-    target = export_root / f"{space_name}-v{SHORTCUT_VERSION}"
-    icons = target / "icons"
-    changed = _ensure_directory(export_root)
-    changed |= cleanup_versions(space_name, applications_root=applications_root)
-    changed |= _ensure_directory(target)
-    changed |= _ensure_directory(icons)
+    icons = applications_root / ICON_ROOT_NAME
+    cleanup_versions(space_name, applications_root=applications_root)
+    _ensure_directory(icons)
 
     expected_desktops: set[str] = set()
     expected_icons: set[str] = set()
@@ -680,22 +686,25 @@ def reconcile(
         distribution_id,
         applications_root,
     ):
-        changed |= _atomic_write(target / shortcut.name, shortcut.desktop)
+        _atomic_write(applications_root / shortcut.name, shortcut.desktop)
         expected_desktops.add(shortcut.name)
         if shortcut.icon_name is not None and shortcut.icon is not None:
-            changed |= _atomic_write(icons / shortcut.icon_name, shortcut.icon)
+            _atomic_write(icons / shortcut.icon_name, shortcut.icon)
             expected_icons.add(shortcut.icon_name)
 
-    for candidate in target.iterdir():
-        if candidate.name == "icons":
-            continue
-        if candidate.name not in expected_desktops:
-            changed |= _remove_path(candidate)
+    for candidate in applications_root.iterdir():
+        if (
+            _shortcut_version(candidate.name, space_name, ".desktop")
+            == SHORTCUT_VERSION
+            and candidate.name not in expected_desktops
+        ):
+            _remove_path(candidate)
     for candidate in icons.iterdir():
-        if candidate.name not in expected_icons:
-            changed |= _remove_path(candidate)
-    if changed:
-        _notify_applications_root(applications_root)
+        if (
+            _shortcut_version(candidate.name, space_name, ".png") == SHORTCUT_VERSION
+            and candidate.name not in expected_icons
+        ):
+            _remove_path(candidate)
 
 
 class InotifyMonitor:

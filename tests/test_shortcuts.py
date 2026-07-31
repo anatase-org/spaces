@@ -21,6 +21,7 @@ class ShortcutExportTests(unittest.TestCase):
         self.system.mkdir(parents=True)
         self.local.mkdir(parents=True)
         self.output = self.root / "host-applications"
+        self.output.mkdir()
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -108,7 +109,10 @@ class ShortcutExportTests(unittest.TestCase):
         )
         self.assertEqual(
             [item.name for item in generated],
-            ["editors-editor.desktop", "local-browser.desktop"],
+            [
+                "spaces-work-v1-editors-editor.desktop",
+                "spaces-work-v1-local-browser.desktop",
+            ],
         )
         text = generated[0].desktop.decode("utf-8")
         self.assertIn("Name=Editor (work)\n", text)
@@ -146,7 +150,11 @@ class ShortcutExportTests(unittest.TestCase):
         generated = shortcuts.generate("work", self.rootfs, "custom", self.output)
         self.assertEqual(
             [item.name for item in generated],
-            ["htop.desktop", "keep.desktop", "vim.desktop"],
+            [
+                "spaces-work-v1-htop.desktop",
+                "spaces-work-v1-keep.desktop",
+                "spaces-work-v1-vim.desktop",
+            ],
         )
 
     def test_terminal_applications_are_blacklisted(self) -> None:
@@ -160,7 +168,10 @@ class ShortcutExportTests(unittest.TestCase):
         )
 
         generated = shortcuts.generate("work", self.rootfs, "custom", self.output)
-        self.assertEqual([item.name for item in generated], ["editor.desktop"])
+        self.assertEqual(
+            [item.name for item in generated],
+            ["spaces-work-v1-editor.desktop"],
+        )
 
     def test_non_applications_and_entries_without_exec_are_ignored(self) -> None:
         (self.system / "service.desktop").write_text(
@@ -185,8 +196,11 @@ class ShortcutExportTests(unittest.TestCase):
             item.name
             for item in shortcuts.generate("work", self.rootfs, "custom", self.output)
         ]
-        self.assertEqual(names[0], "local-foo.desktop")
-        self.assertRegex(names[1], r"^local-foo-[0-9a-f]{10}\.desktop$")
+        self.assertEqual(names[0], "spaces-work-v1-local-foo.desktop")
+        self.assertRegex(
+            names[1],
+            r"^spaces-work-v1-local-foo-[0-9a-f]{10}\.desktop$",
+        )
 
     def test_icon_is_copied_at_256_pixels_with_distro_overlay(self) -> None:
         (self.system / "editor.desktop").write_text(self.desktop(), encoding="utf-8")
@@ -198,13 +212,7 @@ class ShortcutExportTests(unittest.TestCase):
             applications_root=self.output,
         )
 
-        icon = (
-            self.output
-            / "spaces"
-            / "work-v1"
-            / "icons"
-            / f"{shortcuts.ICON_FILENAME_PREFIX}editor.png"
-        )
+        icon = self.output / "spaces-icons" / "spaces-work-v1-editor.png"
         with Image.open(icon) as image:
             self.assertEqual(image.size, (256, 256))
             self.assertEqual(image.mode, "RGBA")
@@ -212,7 +220,7 @@ class ShortcutExportTests(unittest.TestCase):
                 image.getpixel((255, 255)),
                 (20, 40, 220, 255),
             )
-        desktop = (self.output / "spaces" / "work-v1" / "editor.desktop").read_text(
+        desktop = (self.output / "spaces-work-v1-editor.desktop").read_text(
             encoding="utf-8"
         )
         self.assertIn(f"Icon={icon}\n", desktop)
@@ -235,7 +243,7 @@ class ShortcutExportTests(unittest.TestCase):
         shortcut = generated[0]
         self.assertEqual(
             shortcut.icon_name,
-            f"{shortcuts.ICON_FILENAME_PREFIX}org.gnome.Software.png",
+            "spaces-ubuntu-v1-org.gnome.Software.png",
         )
         self.assertIsNotNone(shortcut.icon)
         assert shortcut.icon is not None
@@ -244,8 +252,8 @@ class ShortcutExportTests(unittest.TestCase):
             self.assertEqual(icon.getpixel((128, 128)), (20, 60, 220, 255))
         self.assertIn(
             (
-                f"Icon={self.output}/spaces/ubuntu-v1/icons/"
-                f"{shortcuts.ICON_FILENAME_PREFIX}org.gnome.Software.png\n"
+                f"Icon={self.output}/spaces-icons/"
+                "spaces-ubuntu-v1-org.gnome.Software.png\n"
             ),
             shortcut.desktop.decode("utf-8"),
         )
@@ -254,9 +262,14 @@ class ShortcutExportTests(unittest.TestCase):
         source = self.system / "editor.desktop"
         source.write_text(self.desktop(), encoding="utf-8")
         self.add_icon()
-        old = self.output / "spaces" / "work-v0"
-        old.mkdir(parents=True)
-        (old / "old.desktop").write_text("old", encoding="utf-8")
+        old = self.output / "spaces-work-v0-old.desktop"
+        old.write_text("old", encoding="utf-8")
+        icons = self.output / "spaces-icons"
+        icons.mkdir()
+        old_icon = icons / "spaces-work-v0-old.png"
+        old_icon.write_bytes(b"old")
+        other = self.output / "spaces-other-v0-old.desktop"
+        other.write_text("other", encoding="utf-8")
 
         shortcuts.reconcile(
             "work",
@@ -264,9 +277,13 @@ class ShortcutExportTests(unittest.TestCase):
             "custom",
             applications_root=self.output,
         )
-        current = self.output / "spaces" / "work-v1"
         self.assertFalse(old.exists())
-        self.assertTrue((current / "editor.desktop").is_file())
+        self.assertFalse(old_icon.exists())
+        current = self.output / "spaces-work-v1-editor.desktop"
+        current_icon = icons / "spaces-work-v1-editor.png"
+        self.assertTrue(current.is_file())
+        self.assertTrue(current_icon.is_file())
+        self.assertTrue(other.is_file())
 
         source.unlink()
         shortcuts.reconcile(
@@ -275,50 +292,36 @@ class ShortcutExportTests(unittest.TestCase):
             "custom",
             applications_root=self.output,
         )
-        self.assertEqual(list(current.glob("*.desktop")), [])
-        self.assertEqual(list((current / "icons").iterdir()), [])
+        self.assertFalse(current.exists())
+        self.assertFalse(current_icon.exists())
+        self.assertTrue(other.is_file())
 
         shortcuts.remove("work", applications_root=self.output)
-        self.assertFalse(current.exists())
+        self.assertTrue(other.is_file())
 
-    def test_reconcile_notifies_host_only_when_export_changes(self) -> None:
-        source = self.system / "editor.desktop"
-        source.write_text(self.desktop(), encoding="utf-8")
+    def test_remove_deletes_every_flat_version_for_only_one_space(self) -> None:
+        icons = self.output / "spaces-icons"
+        icons.mkdir()
+        managed = [
+            self.output / "spaces-work-v0-old.desktop",
+            self.output / "spaces-work-v1-current.desktop",
+            self.output / "spaces-work-v23-future.desktop",
+            icons / "spaces-work-v0-old.png",
+            icons / "spaces-work-v1-current.png",
+            icons / "spaces-work-v23-future.png",
+        ]
+        retained = [
+            self.output / "spaces-other-v0-old.desktop",
+            self.output / "spaces-work-version-unmanaged.desktop",
+            icons / "spaces-other-v0-old.png",
+        ]
+        for path in (*managed, *retained):
+            path.write_bytes(b"entry")
 
-        with mock.patch.object(shortcuts.os, "utime") as notify:
-            shortcuts.reconcile(
-                "work",
-                self.rootfs,
-                "custom",
-                applications_root=self.output,
-            )
-            notify.assert_called_once_with(
-                self.output,
-                None,
-                follow_symlinks=False,
-            )
+        shortcuts.remove("work", applications_root=self.output)
 
-            notify.reset_mock()
-            shortcuts.reconcile(
-                "work",
-                self.rootfs,
-                "custom",
-                applications_root=self.output,
-            )
-            notify.assert_not_called()
-
-            source.write_text(self.desktop("Changed"), encoding="utf-8")
-            shortcuts.reconcile(
-                "work",
-                self.rootfs,
-                "custom",
-                applications_root=self.output,
-            )
-            notify.assert_called_once_with(
-                self.output,
-                None,
-                follow_symlinks=False,
-            )
+        self.assertFalse(any(path.exists() for path in managed))
+        self.assertTrue(all(path.exists() for path in retained))
 
     def test_source_directory_cannot_escape_rootfs(self) -> None:
         outside = self.root / "outside"

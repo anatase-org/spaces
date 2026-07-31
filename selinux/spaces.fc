@@ -10,4 +10,5 @@ HOME_DIR/\.ssh/config	--	gen_context(system_u:object_r:ssh_home_config_t,s0)
 
 /run/spaces(/.*)?		gen_context(system_u:object_r:spaces_var_run_t,s0)
 
-/usr/local/share/applications/spaces(/.*)?	gen_context(system_u:object_r:spaces_shortcut_t,s0)
+/usr/local/share/applications/spaces-[a-z0-9_-]+-v[0-9]+-.*\.desktop	--	gen_context(system_u:object_r:spaces_shortcut_t,s0)
+/usr/local/share/applications/spaces-icons(/.*)?	gen_context(system_u:object_r:spaces_shortcut_t,s0)

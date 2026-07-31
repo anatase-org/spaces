@@ -196,7 +196,7 @@ class PackagingTests(unittest.TestCase):
             2,
         )
         self.assertIn(
-            "%{_prefix}/local/share/applications/spaces",
+            "%{_prefix}/local/share/applications/spaces-icons",
             spec,
         )
         self.assertIn(
@@ -387,8 +387,17 @@ class PackagingTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn(
-            "/usr/local/share/applications/spaces(/.*)?",
+            "/usr/local/share/applications/"
+            "spaces-[a-z0-9_-]+-v[0-9]+-.*\\.desktop",
             file_contexts,
+        )
+        self.assertIn(
+            "/usr/local/share/applications/spaces-icons(/.*)?",
+            file_contexts,
+        )
+        self.assertIn(
+            "type_transition spaces_t usr_t:file spaces_shortcut_t;",
+            type_enforcement,
         )
         self.assertIn(
             "/usr/lib/spaces/guest(/.*)?",
@@ -441,6 +450,16 @@ class PackagingTests(unittest.TestCase):
         )
         self.assertIn(
             "unconfined_use_fds(spaces_t)",
+            type_enforcement,
+        )
+        self.assertIn(
+            "allow spaces_t unconfined_t:unix_stream_socket "
+            "rw_stream_socket_perms;",
+            type_enforcement,
+        )
+        self.assertIn(
+            "allow spaces_container_t unconfined_t:unix_stream_socket\n"
+            "\t\trw_stream_socket_perms;",
             type_enforcement,
         )
         self.assertIn(

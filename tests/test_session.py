@@ -1676,6 +1676,7 @@ class NativeLauncherTests(unittest.TestCase):
                 "SPACES_AGENT_STARTED": str(started),
                 "SPACES_AGENT_MARKER": str(agent_pid),
                 "SPACES_AGENT_STOPPED": str(stopped),
+                "XDG_SESSION_ID": "shared-agent-session",
             }
         )
         first = subprocess.Popen(
@@ -1729,6 +1730,101 @@ class NativeLauncherTests(unittest.TestCase):
                     )
                 except ProcessLookupError:
                     pass
+
+    def test_overlapping_sessions_use_separate_agents(self) -> None:
+        started = Path(self.temporary.name) / "session-agents-started"
+        first_pid = Path(self.temporary.name) / "first-session-agent-pid"
+        second_pid = Path(self.temporary.name) / "second-session-agent-pid"
+        first_stopped = (
+            Path(self.temporary.name) / "first-session-agent-stopped"
+        )
+        second_stopped = (
+            Path(self.temporary.name) / "second-session-agent-stopped"
+        )
+        agent = Path(self.temporary.name) / "session-agent"
+        agent.write_text(
+            "#!/bin/sh\n"
+            "printf 'started\\n' >> \"$SPACES_AGENT_STARTED\"\n"
+            "printf '%s' \"$$\" > \"$SPACES_AGENT_MARKER\"\n"
+            "printf 'Authentication agent result: true\\n' >&2\n"
+            "trap 'printf stopped > \"$SPACES_AGENT_STOPPED\"; "
+            "exit 0' TERM\n"
+            "while :; do sleep 0.05; done\n",
+            encoding="utf-8",
+        )
+        agent.chmod(0o755)
+        first_environment = os.environ.copy()
+        first_environment.update(
+            {
+                "SPACES_AGENT_STARTED": str(started),
+                "SPACES_AGENT_MARKER": str(first_pid),
+                "SPACES_AGENT_STOPPED": str(first_stopped),
+                "XDG_SESSION_ID": "first-session",
+            }
+        )
+        second_environment = first_environment.copy()
+        second_environment.update(
+            {
+                "SPACES_AGENT_MARKER": str(second_pid),
+                "SPACES_AGENT_STOPPED": str(second_stopped),
+                "XDG_SESSION_ID": "second-session",
+            }
+        )
+        first = subprocess.Popen(
+            [
+                self.launcher,
+                "--agent",
+                agent,
+                "--",
+                "/bin/sh",
+                "-c",
+                "trap 'exit 0' TERM; while :; do sleep 0.05; done",
+            ],
+            env=first_environment,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            self.assertTrue(self.wait_for_path(first_pid))
+            second = subprocess.run(
+                [self.launcher, "--agent", agent, "--", "/bin/true"],
+                check=False,
+                env=second_environment,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertTrue(self.wait_for_path(second_pid))
+            self.assertNotEqual(
+                first_pid.read_text(encoding="utf-8"),
+                second_pid.read_text(encoding="utf-8"),
+            )
+            self.assertEqual(
+                started.read_text(encoding="utf-8"),
+                "started\nstarted\n",
+            )
+            self.assertTrue(self.wait_for_path(second_stopped))
+            self.assertFalse(first_stopped.exists())
+            first.terminate()
+            first.wait(timeout=5)
+            self.assertTrue(self.wait_for_path(first_stopped))
+        finally:
+            if first.poll() is None:
+                first.terminate()
+                first.wait(timeout=5)
+            for marker, stopped in (
+                (first_pid, first_stopped),
+                (second_pid, second_stopped),
+            ):
+                if marker.exists() and not stopped.exists():
+                    try:
+                        os.killpg(
+                            int(marker.read_text(encoding="utf-8")),
+                            signal.SIGTERM,
+                        )
+                    except ProcessLookupError:
+                        pass
 
     @unittest.skipUnless(shutil.which("setsid"), "setsid is unavailable")
     def test_termination_stops_monitor_after_application_exit(self) -> None:
