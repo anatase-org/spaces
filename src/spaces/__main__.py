@@ -489,7 +489,7 @@ def _configure(name: str, *, user: str | None) -> int:
         distribution_description="",
         distribution_options=[],
         distribution_value=None,
-        submit_label=_("Configure"),
+        submit_label=_("Confirm"),
         preset=preset,
     )
     if result is None:

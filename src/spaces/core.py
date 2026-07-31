@@ -54,7 +54,7 @@ PERMISSION_PRESETS: dict[str, dict[str, dict[str, Any]]] = {
         "system": {
             "network": "admin",
             "kernel_capabilities": "development",
-            "devices": "basic",
+            "devices": "admin",
             "host_authentication": True,
             "shortcuts": True,
         },

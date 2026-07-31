@@ -498,6 +498,7 @@ class CliTests(unittest.TestCase):
             ):
                 self.assertEqual(cli.main(["configure", "ubuntu", "--user"]), 0)
         self.assertFalse(wizard.call_args.kwargs["include_system"])
+        self.assertEqual(wizard.call_args.kwargs["submit_label"], "Confirm")
         patch = invoke.call_args.args[1]
         self.assertNotIn("system", patch["permissions"])
         self.assertTrue(

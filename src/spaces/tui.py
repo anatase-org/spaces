@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
+from rich.console import Group
+from rich.padding import Padding
 from rich.segment import Segment
+from rich.style import Style as RichStyle
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.color import Color
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
 from textual.style import Style
 from textual.strip import Strip
@@ -35,6 +39,16 @@ from .core import (
     SpacesError,
     validate_space_name,
 )
+
+
+class PermissionOption(NamedTuple):
+    """A short choice name and its expanded explanation."""
+
+    name: str
+    desc: str
+
+
+DESCRIPTION_COLOR = "#808080"
 
 
 class FolderSelectionList(SelectionList[str]):
@@ -67,6 +81,11 @@ class CleanRadioButton(RadioButton):
 
     BUTTON_LEFT = ""
     BUTTON_RIGHT = " "
+
+    def get_content_height(self, container: Any, viewport: Any, width: int) -> int:
+        button_width = self._button.get_optimal_width(self.styles, 0)
+        label_width = max(1, width - button_width - 2)
+        return self._label.get_height(self.styles, label_width)
 
     def render(self) -> Content:
         content = super().render()
@@ -220,7 +239,7 @@ class PermissionForm(
         display: none;
     }
     .description {
-        color: $text-muted;
+        color: #808080;
         height: auto;
     }
     RadioSet, SelectionList {
@@ -239,7 +258,12 @@ class PermissionForm(
         background: ansi_default;
         text-style: bold not dim;
     }
-    #form RadioSet, #form SelectionList {
+    CleanRadioButton {
+        width: 100%;
+        height: auto;
+        text-wrap: wrap;
+    }
+    #form RadioSet, #form SelectionList, #overview-step {
         scrollbar-color: $accent-muted;
         scrollbar-color-hover: $accent;
         scrollbar-color-active: $accent;
@@ -274,6 +298,19 @@ class PermissionForm(
     #distribution-options > .option-list--option-highlighted {
         color: $foreground;
         background: $accent-muted;
+    }
+    #overview-step {
+        height: auto;
+        max-height: 60vh;
+        overflow-x: hidden;
+        overflow-y: auto;
+        scrollbar-size-vertical: 1;
+    }
+    #overview {
+        width: 100%;
+        height: auto;
+        text-wrap: wrap;
+        text-overflow: fold;
     }
     #buttons {
         height: auto;
@@ -315,41 +352,133 @@ class PermissionForm(
         Binding("enter", "advance", priority=True),
     ]
 
-    NETWORK_LABELS = {
-        "basic": _("Basic — shared networking, host ports above 1024"),
-        "advanced": _("Advanced — shared networking, host any port"),
-        "admin": _(
-            "Admin — full network admin, docker+VMs+nmap (CAP_NET_RAW, CAP_NET_ADMIN)"
+    NETWORK_OPTIONS = {
+        "basic": PermissionOption(
+            _("Basic"),
+            _("Shared networking, host ports above 1024."),
+        ),
+        "advanced": PermissionOption(
+            _("Advanced"),
+            _("Shared networking, host any port."),
+        ),
+        "admin": PermissionOption(
+            _("Admin"),
+            _(
+                "Full network admin, docker+VMs+nmap "
+                "(CAP_NET_RAW, CAP_NET_ADMIN)."
+            ),
         ),
     }
-    KERNEL_CAPABILITY_LABELS = {
-        "basic": _("Basic — Essentials for daily work"),
-        "development": _(
-            "Development — Docker+VMs+performance monitor (CAP_AUDIT_CONTROL, "
-            "CAP_AUDIT_WRITE, CAP_SYS_PTRACE, CAP_PERFMON, CAP_BPF, and "
-            "perf_event_open)"
+    KERNEL_CAPABILITY_OPTIONS = {
+        "basic": PermissionOption(
+            _("Basic"),
+            _("Essentials for daily work."),
         ),
-        "admin": _(
-            "System Administrator — Development plus /sys is writeable"
+        "development": PermissionOption(
+            _("Development"),
+            _(
+                "Docker+VMs+performance monitor (CAP_AUDIT_CONTROL, "
+                "CAP_AUDIT_WRITE, CAP_SYS_PTRACE, CAP_PERFMON, CAP_BPF, "
+                "and perf_event_open)."
+            ),
         ),
-    }
-    DEVICE_LABELS = {
-        "disabled": _("Disabled — no host devices"),
-        "basic": _(
-            "Basic — ordinary uaccess and video devices, excluding capture and input"
-        ),
-        "admin": _(
-            "Admin — all devices except known security devices"
-        ),
-        "full": _(
-            "Full — all devices"
+        "admin": PermissionOption(
+            _("System Administrator"),
+            _("Development plus /sys is writeable."),
         ),
     }
-    PRESET_LABELS = {
-        "basic": _("Basic — Install applications"),
-        "develop": _("Development — Develop with access to VMs, docker"),
-        "custom": _(
-            "Customise — Select permissions settings based on your usage"
+    DEVICE_OPTIONS = {
+        "disabled": PermissionOption(
+            _("Disabled"),
+            _("No host devices."),
+        ),
+        "basic": PermissionOption(
+            _("Basic"),
+            _(
+                "Ordinary uaccess and video devices, excluding capture and input."
+            ),
+        ),
+        "admin": PermissionOption(
+            _("Admin"),
+            _("All devices except known security devices."),
+        ),
+        "full": PermissionOption(
+            _("Full"),
+            _("All devices."),
+        ),
+    }
+    PRESET_OPTIONS = {
+        "basic": PermissionOption(
+            _("Basic"),
+            _("Install applications."),
+        ),
+        "develop": PermissionOption(
+            _("Development"),
+            _("Develop with access to VMs, docker."),
+        ),
+        "custom": PermissionOption(
+            _("Customise"),
+            _("Select permissions settings based on your usage."),
+        ),
+    }
+    HOST_AUTHENTICATION_OPTIONS = {
+        False: PermissionOption(
+            _("Disabled"),
+            _("Use authentication configured inside the space."),
+        ),
+        True: PermissionOption(
+            _("Enabled"),
+            _("Use your host system password for sudo inside the space."),
+        ),
+    }
+    SHORTCUT_OPTIONS = {
+        False: PermissionOption(
+            _("Disabled"),
+            _("Do not add installed applications to the host application menu."),
+        ),
+        True: PermissionOption(
+            _("Enabled"),
+            _("Add installed applications to the host application menu."),
+        ),
+    }
+    DESKTOP_OPTIONS = {
+        False: PermissionOption(
+            _("Disabled"),
+            _("Do not share the host graphical login with this user."),
+        ),
+        True: PermissionOption(
+            _("Enabled"),
+            _("Allow graphical applications to use the host login session."),
+        ),
+    }
+    CREDENTIAL_AGENT_OPTIONS = {
+        False: PermissionOption(
+            _("Disabled"),
+            _("Do not share host credential agents."),
+        ),
+        True: PermissionOption(
+            _("Enabled"),
+            _("Share GPG, SSH, and compatible credential agents."),
+        ),
+    }
+    MOUNTED_DRIVE_OPTIONS = {
+        False: PermissionOption(
+            _("Disabled"),
+            _("Do not share drives mounted for this user."),
+        ),
+        True: PermissionOption(
+            _("Read-write"),
+            _("Share drives mounted for this user with read-write access."),
+        ),
+    }
+    ADMINISTRATOR_OPTIONS = {
+        False: PermissionOption(
+            _("Standard user"),
+            _("Do not grant administrator privileges inside the space."),
+        ),
+        True: PermissionOption(
+            _("Administrator"),
+            _("Grant administrator privileges inside the space."),
         ),
     }
 
@@ -469,6 +598,7 @@ class PermissionForm(
             "preset",
             *detail_steps,
             *distribution_steps,
+            "overview",
         ]
         self.steps = self._steps_for_preset(preset)
         self.step_index = 0
@@ -479,7 +609,21 @@ class PermissionForm(
             "preset",
             *(self.detail_steps if preset == "custom" else []),
             *self.distribution_steps,
+            "overview",
         ]
+
+    def _option_label(self, option: PermissionOption) -> Content:
+        label = _(
+            "{name} — {description}",
+            name=option.name,
+            description=option.desc,
+        )
+        content = Content.from_text(label, markup=False)
+        description_start = label.find(option.desc)
+        return content.stylize(
+            Style(foreground=Color.parse(DESCRIPTION_COLOR)),
+            start=description_start,
+        )
 
     def compose(self) -> ComposeResult:
         with Vertical(id="form"):
@@ -507,7 +651,7 @@ class PermissionForm(
                 with RadioSet(id="preset"):
                     for preset in ("basic", "develop", "custom"):
                         yield CleanRadioButton(
-                            self.PRESET_LABELS[preset],
+                            self._option_label(self.PRESET_OPTIONS[preset]),
                             value=preset == self.initial_preset,
                             id=f"preset-{preset}",
                         )
@@ -523,7 +667,7 @@ class PermissionForm(
                     with RadioSet(id="network"):
                         for level in NETWORK_LEVELS:
                             yield CleanRadioButton(
-                                self.NETWORK_LABELS[level],
+                                self._option_label(self.NETWORK_OPTIONS[level]),
                                 value=level == self.initial_network,
                                 id=f"network-{level}",
                             )
@@ -541,7 +685,9 @@ class PermissionForm(
                     with RadioSet(id="kernel-capabilities"):
                         for level in KERNEL_CAPABILITY_LEVELS:
                             yield CleanRadioButton(
-                                self.KERNEL_CAPABILITY_LABELS[level],
+                                self._option_label(
+                                    self.KERNEL_CAPABILITY_OPTIONS[level]
+                                ),
                                 value=level
                                 == self.initial_kernel_capabilities,
                                 id=f"kernel-capabilities-{level}",
@@ -560,7 +706,7 @@ class PermissionForm(
                     with RadioSet(id="devices"):
                         for level in DEVICE_LEVELS:
                             yield CleanRadioButton(
-                                self.DEVICE_LABELS[level],
+                                self._option_label(self.DEVICE_OPTIONS[level]),
                                 value=level == self.initial_devices,
                                 id=f"devices-{level}",
                             )
@@ -744,6 +890,8 @@ class PermissionForm(
                                     value=value == self.distribution_value,
                                     id=f"option-{value}",
                                 )
+            with VerticalScroll(id="overview-step", classes="step"):
+                yield Static("", id="overview")
             with Horizontal(id="buttons"):
                 yield Button(
                     Content.from_text(_("Cancel") + " [ESC]", markup=False),
@@ -812,6 +960,7 @@ class PermissionForm(
             "desktop": _("Desktop permissions"),
             "administrator": _("Administrator permissions"),
             "distribution": _("Distribution settings"),
+            "overview": _("Permissions overview"),
         }
         self.query_one("#step-title", Label).update(
             _(
@@ -822,11 +971,7 @@ class PermissionForm(
             )
         )
         self.query_one("#back", Button).disabled = self.step_index == 0
-        next_label = (
-            self.submit_label
-            if self.step_index == len(self.steps) - 1
-            else _("Next")
-        )
+        next_label = self.submit_label if current == "overview" else _("Next")
         next_button = self.query_one("#next", Button)
         next_button.label = Content.from_text(
             next_label + " [ENTER]",
@@ -834,7 +979,7 @@ class PermissionForm(
         )
         next_button.refresh(layout=True)
         select_button = self.query_one("#select", Button)
-        select_button.disabled = current in {"override", "missing"}
+        select_button.disabled = current in {"override", "missing", "overview"}
         focus_targets = {
             "preset": "#preset",
             "system": "#network",
@@ -853,7 +998,9 @@ class PermissionForm(
                 else "#distribution-option"
             ),
         }
-        if current in {"override", "missing"}:
+        if current == "overview":
+            self._update_overview()
+        if current in {"override", "missing", "overview"}:
             next_button.focus()
             return
         focus_target = self.query_one(focus_targets[current])
@@ -867,7 +1014,7 @@ class PermissionForm(
         """Select or toggle the highlighted option on the current step."""
 
         current = self.steps[self.step_index]
-        if current in {"override", "missing"}:
+        if current in {"override", "missing", "overview"}:
             return
         if current == "user":
             self.query_one(
@@ -893,6 +1040,145 @@ class PermissionForm(
             }
             target = targets[current]
             self.query_one(target, RadioSet).action_toggle_button()
+
+    def _update_overview(self) -> None:
+        result = self._result()
+        lines: list[Any] = []
+        accent_style = RichStyle(
+            color=Color.parse(
+                self.get_css_variables()["accent"]
+            ).rich_color
+        )
+        muted_style = RichStyle(
+            color=Color.parse(DESCRIPTION_COLOR).rich_color
+        )
+
+        def add_line(
+            line: str | Text = "",
+            *,
+            indent: int = 0,
+            muted: bool = False,
+        ) -> None:
+            text = line if isinstance(line, Text) else Text(line)
+            if muted:
+                text.stylize(muted_style)
+            lines.append(
+                Padding(text, (0, 0, 0, indent)) if indent else text
+            )
+
+        def add_section(title: str) -> None:
+            if lines:
+                add_line()
+            add_line("▸ " + title)
+
+        def add_option(
+            option: PermissionOption,
+            *,
+            label: str | None = None,
+        ) -> None:
+            value = Text()
+            if label is not None:
+                value.append(f"{label}: ")
+            value.append(option.name, style=accent_style)
+            add_line(value, indent=2)
+            add_line("— " + option.desc, indent=2, muted=True)
+
+        add_section(_("Preset"))
+        add_option(self.PRESET_OPTIONS[result["preset"]])
+        if self.include_system:
+            add_section(_("System permissions"))
+            add_option(
+                self.NETWORK_OPTIONS[result["network"]],
+                label=_("Network"),
+            )
+            add_option(
+                self.KERNEL_CAPABILITY_OPTIONS[
+                    result["kernel_capabilities"]
+                ],
+                label=_("Kernel capabilities"),
+            )
+            add_option(
+                self.DEVICE_OPTIONS[result["devices"]],
+                label=_("Devices"),
+            )
+            add_option(
+                self.HOST_AUTHENTICATION_OPTIONS[
+                    result["host_authentication"]
+                ],
+                label=_("Host authentication"),
+            )
+            add_option(
+                self.SHORTCUT_OPTIONS[result["shortcuts"]],
+                label=_("Application shortcuts"),
+            )
+
+        add_section(_("User permissions"))
+        add_option(
+            self.ADMINISTRATOR_OPTIONS[result["administrator"]],
+            label=_("Administrator"),
+        )
+        add_option(
+            self.DESKTOP_OPTIONS[result["desktop"]],
+            label=_("Desktop"),
+        )
+        add_option(
+            self.MOUNTED_DRIVE_OPTIONS[result["mounted_drives"]],
+            label=_("Mounted drives"),
+        )
+        add_option(
+            self.CREDENTIAL_AGENT_OPTIONS[result["credential_agents"]],
+            label=_("Credential agents"),
+        )
+
+        add_section(_("Files and folders"))
+        home = result["home"]
+        if home:
+            for name in home:
+                add_line(f"~/{name}", indent=2, muted=True)
+        else:
+            add_line(_("None"), indent=2, muted=True)
+
+        if self.distribution_options:
+            add_section(_("Distribution settings"))
+            labels = dict(
+                (value, label) for label, value in self.distribution_options
+            )
+            if self.distribution_multiple:
+                selected = set(result["distribution_options"])
+                choices = [
+                    label
+                    for label, value in self.distribution_options
+                    if value in selected
+                ]
+                if choices:
+                    for label in choices:
+                        add_line(
+                            Text(label, style=accent_style),
+                            indent=2,
+                        )
+                else:
+                    add_line(_("None"), indent=2)
+            else:
+                distribution_value = labels[result["distribution_option"]]
+                distribution_summary = _(
+                    "{title}: {value}",
+                    title=self.distribution_title,
+                    value=distribution_value,
+                )
+                distribution = Text(distribution_summary)
+                distribution.stylize(
+                    accent_style,
+                    distribution_summary.find(distribution_value),
+                )
+                add_line(
+                    distribution,
+                    indent=2,
+                )
+
+        self.query_one("#overview", Static).update(Group(*lines))
+        self.query_one("#overview-step", VerticalScroll).scroll_home(
+            animate=False
+        )
 
     def action_advance(self) -> None:
         """Advance to the next step or submit the completed form."""

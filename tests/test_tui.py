@@ -7,7 +7,14 @@ from unittest import mock
 
 from textual.color import Color
 from textual.geometry import Offset
-from textual.widgets import Button, Footer, Header, RadioSet, SelectionList
+from textual.widgets import (
+    Button,
+    Footer,
+    Header,
+    RadioSet,
+    SelectionList,
+    Static,
+)
 
 from spaces import core
 from spaces.tui import (
@@ -20,10 +27,36 @@ from spaces.tui import (
 )
 
 
+def rendered_widget_text(widget: Static) -> str:
+    return "\n".join(
+        "".join(segment.text for segment in widget.render_line(line)).rstrip()
+        for line in range(widget.region.height)
+    )
+
+
 class TuiTests(unittest.IsolatedAsyncioTestCase):
     def test_permission_form_uses_textual_4_theme_variables(self) -> None:
         self.assertNotIn("$ansi-foreground", PermissionForm.CSS)
         self.assertIn("color: $foreground;", PermissionForm.CSS)
+
+    def test_permission_option_descriptions_are_consistent(self) -> None:
+        option_sets = (
+            PermissionForm.PRESET_OPTIONS,
+            PermissionForm.NETWORK_OPTIONS,
+            PermissionForm.KERNEL_CAPABILITY_OPTIONS,
+            PermissionForm.DEVICE_OPTIONS,
+            PermissionForm.HOST_AUTHENTICATION_OPTIONS,
+            PermissionForm.SHORTCUT_OPTIONS,
+            PermissionForm.DESKTOP_OPTIONS,
+            PermissionForm.CREDENTIAL_AGENT_OPTIONS,
+            PermissionForm.MOUNTED_DRIVE_OPTIONS,
+            PermissionForm.ADMINISTRATOR_OPTIONS,
+        )
+        for options in option_sets:
+            for option in options.values():
+                with self.subTest(option=option):
+                    self.assertTrue(option.desc[0].isupper())
+                    self.assertTrue(option.desc.endswith("."))
 
     def test_selected_home_entries_are_listed_first_by_kind(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -70,20 +103,30 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             preset = app.query_one("#preset", RadioSet)
             self.assertEqual(preset.pressed_button.id, "preset-custom")
+            preset_buttons = list(preset.query(CleanRadioButton))
             self.assertEqual(
                 [
                     button.label.plain
-                    for button in preset.query(CleanRadioButton)
+                    for button in preset_buttons
                 ],
                 [
-                    "Basic — Install applications",
-                    "Development — Develop with access to VMs, docker",
-                    "Customise — Select permissions settings based on your usage",
+                    "Basic — Install applications.",
+                    "Development — Develop with access to VMs, docker.",
+                    "Customise — Select permissions settings based on your usage.",
                 ],
+            )
+            selected_description = next(
+                segment
+                for segment in preset.pressed_button.render_line(0)
+                if "Select permissions settings" in segment.text
+            )
+            self.assertEqual(
+                selected_description.style.color,
+                Color.parse("#808080").rich_color,
             )
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
-                "Select permissions based on intended use (1/12)",
+                "Select permissions based on intended use (1/13)",
             )
             await pilot.press("enter")
             await pilot.pause()
@@ -107,10 +150,10 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                     for button in network.query(CleanRadioButton)
                 ],
                 [
-                    "Basic — shared networking, host ports above 1024",
-                    "Advanced — shared networking, host any port",
-                    "Admin — full network admin, docker+VMs+nmap "
-                    "(CAP_NET_RAW, CAP_NET_ADMIN)",
+                    "Basic — Shared networking, host ports above 1024.",
+                    "Advanced — Shared networking, host any port.",
+                    "Admin — Full network admin, docker+VMs+nmap "
+                    "(CAP_NET_RAW, CAP_NET_ADMIN).",
                 ],
             )
             self.assertEqual(
@@ -132,6 +175,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                     "desktop",
                     "administrator",
                     "distribution",
+                    "overview",
                 ],
             )
             self.assertEqual(
@@ -175,7 +219,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
-                "System permissions (2/12)",
+                "System permissions (2/13)",
             )
             self.assertEqual(
                 sum(not step.has_class("hidden") for step in app.query(".step")),
@@ -185,7 +229,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
-                "Kernel capabilities (3/12)",
+                "Kernel capabilities (3/13)",
             )
             kernel_capabilities = app.query_one(
                 "#kernel-capabilities",
@@ -207,19 +251,29 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                     )
                 ],
                 [
-                    "Basic — Essentials for daily work",
+                    "Basic — Essentials for daily work.",
                     "Development — Docker+VMs+performance monitor "
                     "(CAP_AUDIT_CONTROL, CAP_AUDIT_WRITE, CAP_SYS_PTRACE, "
-                    "CAP_PERFMON, CAP_BPF, and perf_event_open)",
-                    "System Administrator — Development plus /sys is "
-                    "writeable",
+                    "CAP_PERFMON, CAP_BPF, and perf_event_open).",
+                    "System Administrator — Development plus /sys is writeable.",
                 ],
             )
+            development_button = kernel_capabilities.query_one(
+                "#kernel-capabilities-development",
+                CleanRadioButton,
+            )
+            self.assertGreater(development_button.region.height, 1)
+            rendered_development = "".join(
+                segment.text
+                for line in range(development_button.region.height)
+                for segment in development_button.render_line(line)
+            )
+            self.assertIn("perf_event_open", rendered_development)
             await pilot.press("enter")
             await pilot.pause()
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
-                "Device permissions (4/12)",
+                "Device permissions (4/13)",
             )
             devices = app.query_one("#devices", RadioSet)
             self.assertEqual(devices.pressed_button.id, "devices-admin")
@@ -230,24 +284,24 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                     for button in devices.query(CleanRadioButton)
                 ],
                 [
-                    "Disabled — no host devices",
-                    "Basic — ordinary uaccess and video devices, excluding "
-                    "capture and input",
-                    "Admin — all devices except known security devices",
-                    "Full — all devices",
+                    "Disabled — No host devices.",
+                    "Basic — Ordinary uaccess and video devices, excluding "
+                    "capture and input.",
+                    "Admin — All devices except known security devices.",
+                    "Full — All devices.",
                 ],
             )
             await pilot.press("enter")
             await pilot.pause()
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
-                "Host authentication permissions (5/12)",
+                "Host authentication permissions (5/13)",
             )
             await pilot.press("enter")
             await pilot.pause()
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
-                "Application shortcuts permissions (6/12)",
+                "Application shortcuts permissions (6/13)",
             )
             shortcuts = app.query_one("#shortcuts", RadioSet)
             self.assertEqual(shortcuts.pressed_button.id, "shortcuts-true")
@@ -266,7 +320,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
-                "User permissions (7/12)",
+                "User permissions (7/13)",
             )
             folders = app.query_one("#home-folders", FolderSelectionList)
             self.assertEqual(
@@ -303,7 +357,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
-                "Mounted drives permissions (8/12)",
+                "Mounted drives permissions (8/13)",
             )
             mounted_drives = app.query_one("#mounted-drives", RadioSet)
             self.assertEqual(
@@ -315,7 +369,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
-                "Forward Credentials Agents (9/12)",
+                "Forward Credentials Agents (9/13)",
             )
             credential_agents = app.query_one(
                 "#credential-agents", RadioSet
@@ -339,7 +393,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
-                "Desktop permissions (10/12)",
+                "Desktop permissions (10/13)",
             )
             desktop = app.query_one("#desktop", RadioSet)
             self.assertEqual(desktop.pressed_button.id, "desktop-true")
@@ -357,7 +411,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
-                "Administrator permissions (11/12)",
+                "Administrator permissions (11/13)",
             )
             administrator = app.query_one("#administrator", RadioSet)
             self.assertEqual(
@@ -369,7 +423,10 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                     button.label.plain
                     for button in administrator.query(CleanRadioButton)
                 ],
-                ["User user is not administrator", "User user is administrator"],
+                [
+                    "User user is not administrator",
+                    "User user is administrator",
+                ],
             )
             self.assertEqual(
                 str(app.query_one("#administrator-step Static").render()),
@@ -381,13 +438,13 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
-                "Distribution settings (12/12)",
+                "Distribution settings (12/13)",
             )
             distribution = app.query_one("#distribution-option", RadioSet)
             self.assertEqual(distribution._selected, distribution.pressed_index)
             self.assertEqual(
                 app.query_one("#next", Button).label.plain,
-                "Create [ENTER]",
+                "Next [ENTER]",
             )
             self.assertIn(
                 "[ENTER]",
@@ -396,11 +453,86 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                     for segment in app.query_one("#next", Button).render_line(0)
                 ),
             )
-            await pilot.press("backspace")
+            await pilot.press("enter")
             await pilot.pause()
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
-                "Administrator permissions (11/12)",
+                "Permissions overview (13/13)",
+            )
+            self.assertEqual(
+                app.query_one("#next", Button).label.plain,
+                "Create [ENTER]",
+            )
+            overview_widget = app.query_one("#overview", Static)
+            overview = rendered_widget_text(overview_widget)
+            self.assertIn(
+                "  Network: Advanced\n"
+                "  — Shared networking, host any port.",
+                overview,
+            )
+            for expected in (
+                "▸ Preset",
+                "  Customise",
+                "Network: Advanced",
+                "Kernel capabilities: Development",
+                "Devices: Admin",
+                "Host authentication: Enabled",
+                "Application shortcuts: Enabled",
+                "Administrator: Administrator",
+                "Desktop: Enabled",
+                "Mounted drives: Read-write",
+                "Credential agents: Enabled",
+                "  ~/Projects",
+                "  ~/Downloads",
+                "Ubuntu version: Resolute (26.04)",
+            ):
+                self.assertIn(expected, overview)
+            self.assertNotIn("•", overview)
+            self.assertNotIn("Makes this host path available", overview)
+            description = "— Shared networking, host any port."
+            description_segment = next(
+                segment
+                for line in range(overview_widget.region.height)
+                for segment in overview_widget.render_line(line)
+                if description in segment.text
+            )
+            self.assertEqual(
+                description_segment.style.color,
+                Color.parse("#808080").rich_color,
+            )
+            accent = Color.parse(
+                app.get_css_variables()["accent"]
+            ).rich_color
+            option_segment = next(
+                segment
+                for line in range(overview_widget.region.height)
+                for segment in overview_widget.render_line(line)
+                if segment.text == "Advanced"
+            )
+            self.assertEqual(option_segment.style.color, accent)
+            distribution_segment = next(
+                segment
+                for line in range(overview_widget.region.height)
+                for segment in overview_widget.render_line(line)
+                if segment.text == "Resolute (26.04)"
+            )
+            self.assertEqual(distribution_segment.style.color, accent)
+            folder_segment = next(
+                segment
+                for line in range(overview_widget.region.height)
+                for segment in overview_widget.render_line(line)
+                if segment.text == "~/Projects"
+            )
+            self.assertEqual(
+                folder_segment.style.color,
+                Color.parse("#808080").rich_color,
+            )
+            self.assertIn("CAP_SYS_PTRACE", overview)
+            await pilot.press("backspace", "backspace")
+            await pilot.pause()
+            self.assertEqual(
+                str(app.query_one("#step-title").render()),
+                "Administrator permissions (11/13)",
             )
             self.assertEqual(len(app.query(Header)), 0)
             self.assertEqual(len(app.query(Footer)), 0)
@@ -513,6 +645,18 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(options.selected, [])
             self.assertEqual(app._result()["distribution_options"], [])
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertEqual(
+                str(app.query_one("#step-title").render()),
+                "Permissions overview (8/8)",
+            )
+            overview = rendered_widget_text(app.query_one("#overview", Static))
+            self.assertEqual(overview.count("None"), 2)
+            self.assertEqual(
+                app.query_one("#next", Button).label.plain,
+                "Create [ENTER]",
+            )
 
     async def test_user_only_omits_system_controls(self) -> None:
         app = PermissionForm(
@@ -526,7 +670,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             distribution_description="",
             distribution_options=[],
             distribution_value=None,
-            submit_label="Configure",
+            submit_label="Confirm",
         )
         async with app.run_test() as pilot:
             await pilot.pause()
@@ -543,10 +687,10 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             )
             await pilot.click("#preset-basic")
             await pilot.pause()
-            self.assertEqual(app.steps, ["preset"])
+            self.assertEqual(app.steps, ["preset", "overview"])
             self.assertEqual(
                 app.query_one("#next", Button).label.plain,
-                "Configure [ENTER]",
+                "Next [ENTER]",
             )
             await pilot.click("#preset-custom")
             await pilot.pause()
@@ -554,13 +698,13 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
-                "User permissions (2/6)",
+                "User permissions (2/7)",
             )
             await pilot.press("enter")
             await pilot.pause()
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
-                "Mounted drives permissions (3/6)",
+                "Mounted drives permissions (3/7)",
             )
             await pilot.click("#mounted-drives-false")
             await pilot.pause()
@@ -569,7 +713,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
-                "Forward Credentials Agents (4/6)",
+                "Forward Credentials Agents (4/7)",
             )
             await pilot.click("#credential-agents-false")
             await pilot.pause()
@@ -578,7 +722,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
-                "Desktop permissions (5/6)",
+                "Desktop permissions (5/7)",
             )
             await pilot.press("enter")
             await pilot.pause()
@@ -589,16 +733,29 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(app.query("#kernel-capabilities")), 0)
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
-                "Administrator permissions (6/6)",
+                "Administrator permissions (6/7)",
             )
             self.assertEqual(
                 app.query_one("#next", Button).label.plain,
-                "Configure [ENTER]",
+                "Next [ENTER]",
             )
             self.assertLess(
                 app.query_one("#next", Button).region.right,
                 app.screen.region.right,
             )
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertEqual(
+                str(app.query_one("#step-title").render()),
+                "Permissions overview (7/7)",
+            )
+            self.assertEqual(
+                app.query_one("#next", Button).label.plain,
+                "Confirm [ENTER]",
+            )
+            overview = rendered_widget_text(app.query_one("#overview", Static))
+            self.assertIn("~/Projects", overview)
+            self.assertNotIn("System permissions", overview)
 
     async def test_develop_preset_skips_details_and_uses_defaults(self) -> None:
         app = PermissionForm(
@@ -615,7 +772,9 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
         )
         async with app.run_test() as pilot:
             await pilot.pause()
-            self.assertEqual(app.steps, ["preset", "distribution"])
+            self.assertEqual(
+                app.steps, ["preset", "distribution", "overview"]
+            )
             self.assertEqual(
                 app._result(),
                 {
@@ -629,13 +788,34 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
-                "Distribution settings (2/2)",
+                "Distribution settings (2/3)",
             )
-            await pilot.press("backspace")
+            self.assertEqual(
+                app.query_one("#next", Button).label.plain,
+                "Next [ENTER]",
+            )
+            await pilot.press("enter")
             await pilot.pause()
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
-                "Select permissions based on intended use (1/2)",
+                "Permissions overview (3/3)",
+            )
+            overview = rendered_widget_text(app.query_one("#overview", Static))
+            for home in core.PERMISSION_PRESETS["develop"]["user"]["home"]:
+                self.assertIn(f"~/{home}", overview)
+            self.assertIn("Devices: Admin", overview)
+            self.assertIn("Credential agents: Enabled", overview)
+            overview_step = app.query_one("#overview-step")
+            self.assertGreater(overview_step.max_scroll_y, 0)
+            self.assertLessEqual(
+                app.query_one("#next", Button).region.bottom,
+                app.screen.region.bottom,
+            )
+            await pilot.press("backspace", "backspace")
+            await pilot.pause()
+            self.assertEqual(
+                str(app.query_one("#step-title").render()),
+                "Select permissions based on intended use (1/3)",
             )
 
     async def test_ctrl_c_cancels(self) -> None:
@@ -698,6 +878,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                     "credential-agents",
                     "desktop",
                     "administrator",
+                    "overview",
                 ],
             )
             self.assertEqual(
@@ -707,7 +888,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
-                "Space already exists (1/12)",
+                "Space already exists (1/13)",
             )
             self.assertTrue(app.query_one("#select", Button).disabled)
             self.assertTrue(app.query_one("#next", Button).has_focus)
@@ -715,14 +896,14 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
-                "Select permissions based on intended use (2/12)",
+                "Select permissions based on intended use (2/13)",
             )
             self.assertFalse(app.query_one("#select", Button).disabled)
             await pilot.press("enter")
             await pilot.pause()
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
-                "System permissions (3/12)",
+                "System permissions (3/13)",
             )
 
     async def test_missing_step_is_prepended(self) -> None:
@@ -757,6 +938,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                     "credential-agents",
                     "desktop",
                     "administrator",
+                    "overview",
                 ],
             )
             self.assertEqual(
@@ -766,7 +948,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
-                "Space does not exist (1/12)",
+                "Space does not exist (1/13)",
             )
             self.assertTrue(app.query_one("#select", Button).disabled)
             self.assertTrue(app.query_one("#next", Button).has_focus)
@@ -776,14 +958,14 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
-                "Select permissions based on intended use (2/12)",
+                "Select permissions based on intended use (2/13)",
             )
             self.assertFalse(app.query_one("#select", Button).disabled)
             await pilot.press("enter")
             await pilot.pause()
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
-                "System permissions (3/12)",
+                "System permissions (3/13)",
             )
 
     async def test_override_warning_takes_precedence_over_missing(self) -> None:

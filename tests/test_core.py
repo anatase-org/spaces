@@ -278,7 +278,7 @@ class CoreTests(unittest.TestCase):
                     "system": {
                         "network": "admin",
                         "kernel_capabilities": "development",
-                        "devices": "basic",
+                        "devices": "admin",
                         "host_authentication": True,
                         "shortcuts": True,
                     },
