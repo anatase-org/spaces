@@ -630,9 +630,22 @@ def _normalize_enter_options(arguments: list[str]) -> list[str]:
     return arguments
 
 
+def _normalize_configure_options(arguments: list[str]) -> list[str]:
+    """Disambiguate ``configure --user SPACE`` as the current user."""
+
+    if (
+        len(arguments) == 3
+        and arguments[:2] == ["configure", "--user"]
+        and not arguments[2].startswith("-")
+    ):
+        return ["configure", arguments[2], "--user"]
+    return arguments
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         raw_arguments = list(sys.argv[1:] if argv is None else argv)
+        raw_arguments = _normalize_configure_options(raw_arguments)
         raw_arguments = _normalize_enter_options(raw_arguments)
         if raw_arguments[:1] == ["cp"]:
             if raw_arguments[1:] in (["-h"], ["--help"]):

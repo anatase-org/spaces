@@ -505,6 +505,15 @@ class CliTests(unittest.TestCase):
             patch["permissions"]["user"]["permissions"]["administrator"]
         )
 
+    def test_configure_user_before_space_targets_current_user(self) -> None:
+        with mock.patch.object(cli, "_configure", return_value=0) as configure:
+            self.assertEqual(
+                cli.main(["configure", "--user", "fedora"]),
+                0,
+            )
+
+        configure.assert_called_once_with("fedora", user="")
+
     def test_full_configure_includes_host_authentication(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary) / "state"
