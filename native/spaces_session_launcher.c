@@ -308,14 +308,41 @@ static void terminate_adopted_groups(int signum)
 static int lock_agent_state(void)
 {
     char path[256];
+    char fallback_session[32];
+    const char *session = getenv("XDG_SESSION_ID");
+    const char *cursor;
+    size_t session_length;
     int descriptor;
 
+    if (session == NULL)
+        session = "";
+    session_length = strlen(session);
+    for (cursor = session; *cursor != '\0'; cursor++) {
+        if (!((*cursor >= 'a' && *cursor <= 'z')
+              || (*cursor >= 'A' && *cursor <= 'Z')
+              || (*cursor >= '0' && *cursor <= '9')
+              || *cursor == '_' || *cursor == '-')) {
+            session_length = 0;
+            break;
+        }
+    }
+    if (session_length == 0 || session_length > 64) {
+        if (snprintf(
+                fallback_session,
+                sizeof(fallback_session),
+                "p%ld",
+                (long)getsid(0)
+            ) >= (int)sizeof(fallback_session))
+            return -1;
+        session = fallback_session;
+    }
     if (snprintf(
             path,
             sizeof(path),
-            "%s/%lu/spaces-polkit-agent.state",
+            "%s/%lu/spaces-polkit-agent.%s.state",
             AGENT_STATE_ROOT,
-            (unsigned long)getuid()
+            (unsigned long)getuid(),
+            session
         ) >= (int)sizeof(path))
         return -1;
     descriptor = open(
