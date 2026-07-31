@@ -36,9 +36,8 @@ logger = logging.getLogger(__name__)
 
 NSPAWN = "/usr/bin/systemd-nspawn"
 MACHINECTL = "/usr/bin/machinectl"
-SYSTEMCTL = "/usr/bin/systemctl"
-SYSTEMD_ESCAPE = "/usr/bin/systemd-escape"
-SYSTEMD_UMOUNT = "/usr/bin/systemd-umount"
+SYSTEMD_RUN = "/usr/bin/systemd-run"
+UMOUNT = "/usr/bin/umount"
 BUSCTL = "/usr/bin/busctl"
 API_VFS_WRITABLE = "SYSTEMD_NSPAWN_API_VFS_WRITABLE"
 SELINUXFS = Path("/sys/fs/selinux")
@@ -1864,39 +1863,24 @@ class _MountWorker:
 def _unmount_in_machine(space_name: str, destination: str) -> None:
     """Lazily revoke one runtime bind from a running space."""
 
-    escaped = subprocess.run(
-        [
-            SYSTEMD_ESCAPE,
-            "--path",
-            "--suffix=mount",
-            destination,
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    if not escaped:
-        raise core.SpacesError(
-            _("Could not derive a mount unit for {path}.", path=destination)
-        )
+    # LazyUnmount= is a mount-unit setting, but systemd does not expose it
+    # through systemctl set-property. Run the stable umount(8) interface in
+    # the guest manager instead; every supported systemd has these
+    # systemd-run options (the newest, --pipe, was added in systemd 235).
     subprocess.run(
         [
-            SYSTEMCTL,
-            f"--machine={space_name}",
-            "--no-ask-password",
-            "set-property",
-            "--runtime",
-            escaped,
-            "LazyUnmount=yes",
-        ],
-        check=True,
-    )
-    subprocess.run(
-        [
-            SYSTEMD_UMOUNT,
+            SYSTEMD_RUN,
             f"--machine={space_name}",
             "--no-ask-password",
             "--quiet",
+            "--wait",
+            "--pipe",
+            "--collect",
+            "--service-type=exec",
+            "--",
+            UMOUNT,
+            "--lazy",
+            "--",
             destination,
         ],
         check=True,

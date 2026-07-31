@@ -2144,7 +2144,7 @@ class LoginAndMountWorkerTests(unittest.TestCase):
         )
         self.assertEqual(worker._mounted, {mounted})
 
-    def test_remove_uses_systemd_lazy_unmount(self) -> None:
+    def test_remove_runs_lazy_umount_in_machine(self) -> None:
         monitor = mock.Mock()
         worker = launch_module._MountWorker(
             "work",
@@ -2159,51 +2159,26 @@ class LoginAndMountWorkerTests(unittest.TestCase):
             source=Path("/host/Projects"),
             uid=1000,
         )
-        completed = SimpleNamespace(stdout="home-alice-Projects.mount\n")
-        with mock.patch.object(
-            launch_module.subprocess,
-            "run",
-            side_effect=[completed, mock.DEFAULT, mock.DEFAULT],
-        ) as run:
+        with mock.patch.object(launch_module.subprocess, "run") as run:
             worker._remove(mount)
 
-        self.assertEqual(
-            run.call_args_list,
+        run.assert_called_once_with(
             [
-                mock.call(
-                    [
-                        launch_module.SYSTEMD_ESCAPE,
-                        "--path",
-                        "--suffix=mount",
-                        "/home/alice/Projects",
-                    ],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                ),
-                mock.call(
-                    [
-                        launch_module.SYSTEMCTL,
-                        "--machine=work",
-                        "--no-ask-password",
-                        "set-property",
-                        "--runtime",
-                        "home-alice-Projects.mount",
-                        "LazyUnmount=yes",
-                    ],
-                    check=True,
-                ),
-                mock.call(
-                    [
-                        launch_module.SYSTEMD_UMOUNT,
-                        "--machine=work",
-                        "--no-ask-password",
-                        "--quiet",
-                        "/home/alice/Projects",
-                    ],
-                    check=True,
-                ),
+                launch_module.SYSTEMD_RUN,
+                "--machine=work",
+                "--no-ask-password",
+                "--quiet",
+                "--wait",
+                "--pipe",
+                "--collect",
+                "--service-type=exec",
+                "--",
+                launch_module.UMOUNT,
+                "--lazy",
+                "--",
+                "/home/alice/Projects",
             ],
+            check=True,
         )
 
     def test_add_uses_machinectl_bind(self) -> None:
