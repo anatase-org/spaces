@@ -835,6 +835,80 @@ class DesktopControllerTests(unittest.TestCase):
             )
         deactivate.assert_called_once_with(credential_user)
 
+    def test_replacing_same_session_keeps_shared_generated_files(self) -> None:
+        generated = self.root / "generated" / "session"
+        generated.mkdir(parents=True)
+        font_config = generated / "fonts.conf"
+        font_config.write_text("current", encoding="utf-8")
+        previous_plan = session.DesktopPlan(
+            "2",
+            (),
+            {"DISPLAY": ":0"},
+            generated_root=generated,
+        )
+        updated_plan = session.DesktopPlan(
+            "2",
+            (),
+            {"DISPLAY": ":1"},
+            generated_root=generated,
+        )
+        previous = session._ActiveDesktop(previous_plan)
+        updated = session._ActiveDesktop(updated_plan)
+        self.controller.active[self.desktop_user.uid] = previous
+
+        with (
+            mock.patch.object(
+                session,
+                "host_manager_environment",
+                return_value={"XDG_SESSION_ID": "2"},
+            ),
+            mock.patch.object(session, "_plan", return_value=updated_plan),
+            mock.patch.object(self.controller, "_deactivate") as deactivate,
+            mock.patch.object(
+                self.controller, "_activate", return_value=updated
+            ) as activate,
+        ):
+            self.controller.reconcile(self.desktop_user, (graphical(),))
+
+        deactivate.assert_called_once_with(
+            self.desktop_user, previous, remove_generated=False
+        )
+        activate.assert_called_once_with(self.desktop_user, updated_plan)
+        self.assertIs(self.controller.active[self.desktop_user.uid], updated)
+        self.assertEqual(font_config.read_text(encoding="utf-8"), "current")
+
+    def test_failed_update_and_rollback_remain_nonfatal(self) -> None:
+        previous_plan = session.DesktopPlan("2", (), {"DISPLAY": ":0"})
+        updated_plan = session.DesktopPlan("2", (), {"DISPLAY": ":1"})
+        previous = session._ActiveDesktop(previous_plan)
+        self.controller.active[self.desktop_user.uid] = previous
+
+        with (
+            mock.patch.object(
+                session,
+                "host_manager_environment",
+                return_value={"XDG_SESSION_ID": "2"},
+            ),
+            mock.patch.object(session, "_plan", return_value=updated_plan),
+            mock.patch.object(self.controller, "_deactivate"),
+            mock.patch.object(
+                self.controller,
+                "_activate",
+                side_effect=[
+                    OSError("new bind failed"),
+                    OSError("old bind failed"),
+                ],
+            ),
+            self.assertRaises(session.DesktopSetupError) as raised,
+        ):
+            self.controller.reconcile(self.desktop_user, (graphical(),))
+
+        self.assertIn("new bind failed", str(raised.exception))
+        self.assertIn("old bind failed", str(raised.exception))
+        self.assertEqual(
+            session._read_status("work", self.desktop_user.uid), "inactive"
+        )
+
     def test_mount_pins_identity_and_is_read_only(self) -> None:
         source = self.root / "socket"
         source.write_text("", encoding="utf-8")

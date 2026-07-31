@@ -2142,18 +2142,40 @@ class DesktopController:
             set_status(self.space_name, user.uid, "inactive")
             raise
         except Exception as error:
-            self._remove_generated(plan)
+            shared_generated_root = (
+                previous is not None
+                and plan.generated_root is not None
+                and plan.generated_root == previous.plan.generated_root
+            )
+            if not shared_generated_root:
+                self._remove_generated(plan)
             if previous is not None:
                 try:
                     self.active[user.uid] = self._activate(user, previous.plan)
-                except Exception:
+                except DesktopRevocationError:
                     set_status(self.space_name, user.uid, "inactive")
                     raise
+                except Exception as rollback_error:
+                    if shared_generated_root:
+                        self._remove_generated(plan)
+                    set_status(self.space_name, user.uid, "inactive")
+                    raise DesktopSetupError(
+                        _(
+                            "Could not enable the updated host session "
+                            "forwarding ({setup_error}) or restore the "
+                            "previous generation ({rollback_error}).",
+                            setup_error=error,
+                            rollback_error=rollback_error,
+                        )
+                    ) from rollback_error
             else:
                 set_status(self.space_name, user.uid, "inactive")
             raise DesktopSetupError(str(error)) from error
         self.active[user.uid] = activated
-        if previous is not None:
+        if (
+            previous is not None
+            and previous.plan.generated_root != plan.generated_root
+        ):
             self._remove_generated(previous.plan)
 
     def deactivate(self, user: DesktopUser) -> None:

@@ -468,6 +468,11 @@ create_files_pattern(
 )
 allow systemd_machined_t spaces_apifs_file_t:{ file dir } mounton;
 allow systemd_machined_t spaces_file_t:{ file dir } mounton;
+# machinectl bind creates the destination of a forwarded credential socket
+# inside the guest's /run tmpfs before asking systemd-machined to mount on it.
+# Limit this to socket mountpoints; the source socket is still selected and
+# inode-pinned by Spaces before the request reaches machined.
+allow systemd_machined_t tmpfs_t:sock_file mounton;
 allow systemd_machined_t user_home_type:file getattr;
 allow systemd_machined_t ssh_home_t:dir search_dir_perms;
 allow systemd_machined_t ssh_home_config_t:file getattr;

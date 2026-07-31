@@ -513,6 +513,10 @@ class PackagingTests(unittest.TestCase):
             type_enforcement,
         )
         self.assertIn(
+            "allow systemd_machined_t tmpfs_t:sock_file mounton;",
+            type_enforcement,
+        )
+        self.assertIn(
             "dbus_write_session_tmp_sock_files(spaces_t)",
             type_enforcement,
         )
