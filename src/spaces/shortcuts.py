@@ -258,6 +258,7 @@ def _render_groups(
     groups: list[tuple[str, dict[str, str]]],
     space_name: str,
     icon_path: str | None,
+    startup_wm_class: str,
 ) -> bytes | None:
     main = next((values for name, values in groups if name == "Desktop Entry"), None)
     if (
@@ -298,6 +299,8 @@ def _render_groups(
             if icon_path is None:
                 continue
             value = icon_path
+        elif key == "StartupWMClass":
+            value = startup_wm_class
         elif key == "Actions":
             value = "".join(
                 f"{action};"
@@ -309,6 +312,8 @@ def _render_groups(
         output.append(f"{key}={value}")
     if "Icon" not in main and icon_path is not None:
         output.append(f"Icon={icon_path}")
+    if "StartupWMClass" not in main:
+        output.append(f"StartupWMClass={startup_wm_class}")
     output.append("DBusActivatable=false")
 
     for group_name, values in valid_actions:
@@ -559,7 +564,15 @@ def generate(
             else None
         )
         icon_path = str(icon_directory / icon_name) if icon_name else None
-        desktop = _render_groups(groups, space_name, icon_path)
+        startup_wm_class = main.get("StartupWMClass", "").strip()
+        if not startup_wm_class:
+            startup_wm_class = source.relative.stem
+        desktop = _render_groups(
+            groups,
+            space_name,
+            icon_path,
+            startup_wm_class,
+        )
         if desktop is None:
             continue
         generated.append(

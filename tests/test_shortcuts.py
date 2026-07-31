@@ -127,11 +127,46 @@ class ShortcutExportTests(unittest.TestCase):
             text,
         )
         self.assertIn("NoDisplay=true\n", text)
+        self.assertIn("StartupWMClass=editor\n", text)
         self.assertIn("DBusActivatable=false\n", text)
         self.assertNotIn("TryExec=", text)
         self.assertNotIn("Path=", text)
         self.assertNotIn("X-KDE-SubstituteUID", text)
         self.assertNotIn("/usr/bin/env", text)
+
+    def test_existing_startup_wm_class_is_preserved(self) -> None:
+        (self.system / "editor.desktop").write_text(
+            self.desktop(extra="StartupWMClass=EditorClass\n"),
+            encoding="utf-8",
+        )
+
+        generated = shortcuts.generate(
+            "work",
+            self.rootfs,
+            "custom",
+            self.output,
+        )
+
+        text = generated[0].desktop.decode("utf-8")
+        self.assertEqual(text.count("StartupWMClass="), 1)
+        self.assertIn("StartupWMClass=EditorClass\n", text)
+
+    def test_empty_startup_wm_class_uses_desktop_basename(self) -> None:
+        (self.system / "com.example.Editor.desktop").write_text(
+            self.desktop(extra="StartupWMClass=   \n"),
+            encoding="utf-8",
+        )
+
+        generated = shortcuts.generate(
+            "work",
+            self.rootfs,
+            "custom",
+            self.output,
+        )
+
+        text = generated[0].desktop.decode("utf-8")
+        self.assertEqual(text.count("StartupWMClass="), 1)
+        self.assertIn("StartupWMClass=com.example.Editor\n", text)
 
     def test_blacklist_filters_known_variants_before_export(self) -> None:
         for name in (
