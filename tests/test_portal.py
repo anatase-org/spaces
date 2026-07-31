@@ -12,6 +12,7 @@ import stat
 import subprocess
 import tempfile
 import time
+import tomllib
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -156,6 +157,34 @@ class PortalConfigurationTests(unittest.TestCase):
         )
         self.assertEqual(unit["Service"]["Restart"], "always")
         self.assertEqual(unit["Unit"]["StartLimitIntervalSec"], "0")
+
+    def test_graphical_session_target_pulls_in_systemd_session(self) -> None:
+        target = configparser.ConfigParser()
+        target.optionxform = str
+        target.read(
+            ROOT
+            / "data"
+            / "portal"
+            / "systemd"
+            / "user"
+            / "spaces-graphical-session.target",
+            encoding="utf-8",
+        )
+
+        unit = target["Unit"]
+        self.assertEqual(unit["Requires"], "graphical-session.target")
+        self.assertEqual(unit["BindsTo"], "graphical-session.target")
+        self.assertEqual(unit["Before"], "graphical-session.target")
+        self.assertNotIn("RefuseManualStart", unit)
+        self.assertNotIn("StopWhenUnneeded", unit)
+
+        data_files = tomllib.loads(
+            (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        )["tool"]["setuptools"]["data-files"]
+        self.assertIn(
+            "data/portal/systemd/user/spaces-graphical-session.target",
+            data_files["share/spaces/portal/systemd/user"],
+        )
 
     def test_preflight_is_read_only_and_transient(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

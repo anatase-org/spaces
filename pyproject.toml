@@ -70,6 +70,7 @@ spaces = ["overlay/*.png"]
   "data/portal/xdg-desktop-portal/portals/spaces.portal",
 ]
 "share/spaces/portal/systemd/user" = [
+  "data/portal/systemd/user/spaces-graphical-session.target",
   "data/portal/systemd/user/spaces-portal.service",
 ]
 "share/spaces/portal/config" = [

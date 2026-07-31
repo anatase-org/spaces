@@ -181,6 +181,9 @@ GUEST_PIPEWIRE_CONFIGS = (
     "usr/share/pipewire/client.conf",
     "etc/pipewire/client.conf",
 )
+GRAPHICAL_SESSION_TARGET = "spaces-graphical-session.target"
+DBUS_UPDATE_ACTIVATION_ENVIRONMENT = \
+    "/usr/bin/dbus-update-activation-environment"
 
 
 logger = logging.getLogger(__name__)
@@ -251,6 +254,7 @@ class _ActiveDesktop:
     plan: DesktopPlan
     portal: PortalProxy | None = None
     portal_binding: DesktopBind | None = None
+    graphical_session: bool = False
 
 
 @dataclass
@@ -1879,6 +1883,7 @@ class DesktopController:
         mounted: list[DesktopBind] = []
         portal: PortalProxy | None = None
         portal_binding: DesktopBind | None = None
+        graphical_session = False
         try:
             for binding in plan.binds:
                 self._mount(user.uid, binding)
@@ -1895,6 +1900,19 @@ class DesktopController:
                     )
                     self._mount(user.uid, portal_binding)
                     mounted.append(portal_binding)
+                    try:
+                        self._start_graphical_session(user, plan)
+                        graphical_session = True
+                    except Exception as error:
+                        logger.warning(
+                            _(
+                                "Could not activate the guest graphical "
+                                "session for {user}; portal reconciliation "
+                                "will retry: {error}",
+                                user=user.name,
+                                error=error,
+                            )
+                        )
                 except Exception as error:
                     if portal is not None:
                         portal.close()
@@ -1940,6 +1958,7 @@ class DesktopController:
             plan=plan,
             portal=portal,
             portal_binding=portal_binding,
+            graphical_session=graphical_session,
         )
 
     def _repair_portal(
@@ -1972,6 +1991,19 @@ class DesktopController:
                     current.portal_binding.inode,
                 )
             ):
+                if not current.graphical_session:
+                    try:
+                        self._start_graphical_session(user, current.plan)
+                        current.graphical_session = True
+                    except Exception as error:
+                        logger.warning(
+                            _(
+                                "Could not activate the guest graphical "
+                                "session for {user}; retrying later: {error}",
+                                user=user.name,
+                                error=error,
+                            )
+                        )
                 return
 
         if current.portal_binding is not None:
@@ -2018,8 +2050,22 @@ class DesktopController:
                 )
             )
             return
+        graphical_session = False
+        try:
+            self._start_graphical_session(user, current.plan)
+            graphical_session = True
+        except Exception as error:
+            logger.warning(
+                _(
+                    "Could not activate the guest graphical session for "
+                    "{user}; retrying later: {error}",
+                    user=user.name,
+                    error=error,
+                )
+            )
         current.portal = portal
         current.portal_binding = binding
+        current.graphical_session = graphical_session
 
     def _deactivate(
         self,
@@ -2028,6 +2074,27 @@ class DesktopController:
         *,
         remove_generated: bool = True,
     ) -> None:
+        if self.portals_enabled and current.plan.desktop:
+            try:
+                self._machine_user(
+                    user,
+                    [
+                        "/usr/bin/systemctl",
+                        "--user",
+                        "--no-block",
+                        "stop",
+                        GRAPHICAL_SESSION_TARGET,
+                    ],
+                )
+            except Exception as error:
+                logger.warning(
+                    _(
+                        "Could not stop the guest graphical session for "
+                        "{user}; revoking desktop forwarding anyway: {error}",
+                        user=user.name,
+                        error=error,
+                    )
+                )
         try:
             if current.portal_binding is not None:
                 self._unmount(user.uid, current.portal_binding)
@@ -2051,6 +2118,28 @@ class DesktopController:
         self.active.pop(user.uid, None)
         if remove_generated:
             self._remove_generated(current.plan)
+
+    def _start_graphical_session(
+        self, user: DesktopUser, plan: DesktopPlan
+    ) -> None:
+        self._machine_user(
+            user,
+            [
+                DBUS_UPDATE_ACTIVATION_ENVIRONMENT,
+                "--systemd",
+                *sorted(plan.environment),
+            ],
+            environment=plan.environment,
+        )
+        self._machine_user(
+            user,
+            [
+                "/usr/bin/systemctl",
+                "--user",
+                "start",
+                GRAPHICAL_SESSION_TARGET,
+            ],
+        )
 
     @staticmethod
     def _remove_generated(plan: DesktopPlan) -> None:
@@ -2159,4 +2248,30 @@ class DesktopController:
             ],
             check=True,
             stdout=subprocess.DEVNULL,
+        )
+
+    def _machine_user(
+        self,
+        user: DesktopUser,
+        command: list[str],
+        *,
+        environment: dict[str, str] | None = None,
+    ) -> None:
+        subprocess.run(
+            [
+                MACHINECTL,
+                "--quiet",
+                f"--uid={user.name}",
+                *(
+                    f"--setenv={name}={value}"
+                    for name, value in sorted((environment or {}).items())
+                ),
+                "--",
+                "shell",
+                self.space_name,
+                *command,
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )

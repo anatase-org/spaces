@@ -862,6 +862,9 @@ class DesktopControllerTests(unittest.TestCase):
                 ],
             ) as start,
             mock.patch.object(self.controller, "_mount") as mount,
+            mock.patch.object(
+                self.controller, "_start_graphical_session"
+            ) as start_session,
             self.assertLogs(session.logger, "WARNING"),
         ):
             self.controller.reconcile_portals()
@@ -872,8 +875,90 @@ class DesktopControllerTests(unittest.TestCase):
 
         self.assertEqual(start.call_count, 2)
         mount.assert_called_once_with(self.desktop_user.uid, binding)
+        start_session.assert_called_once_with(self.desktop_user, plan)
         self.assertIs(current.portal, proxy)
         self.assertEqual(current.portal_binding, binding)
+        self.assertTrue(current.graphical_session)
+
+    def test_portal_activation_starts_graphical_session(self) -> None:
+        self.controller.portals_enabled = True
+        plan = session.DesktopPlan(
+            "2",
+            (),
+            {
+                "DISPLAY": ":0",
+                "XDG_DATA_DIRS": "/run/spaces/data:/usr/share",
+            },
+        )
+        proxy = mock.Mock()
+        binding = session.DesktopBind(
+            "/run/spaces/desktop/1000/portal/bus",
+            self.root / "portal-bus",
+            1,
+            2,
+        )
+        events: list[str] = []
+
+        def machine_user(
+            _user: object,
+            command: list[str],
+            **_keywords: object,
+        ) -> None:
+            events.append(
+                "environment"
+                if command[0]
+                == session.DBUS_UPDATE_ACTIVATION_ENVIRONMENT
+                else "start"
+            )
+
+        with (
+            mock.patch.object(self.controller, "_prepare_guest_root"),
+            mock.patch.object(
+                session,
+                "start_portal_proxy",
+                return_value=(proxy, binding),
+            ),
+            mock.patch.object(
+                self.controller,
+                "_mount",
+                side_effect=lambda *_arguments: events.append("mount"),
+            ),
+            mock.patch.object(
+                self.controller,
+                "_machine_user",
+                side_effect=machine_user,
+            ) as run_user,
+        ):
+            active = self.controller._activate(self.desktop_user, plan)
+
+        self.assertEqual(
+            run_user.call_args_list,
+            [
+                mock.call(
+                    self.desktop_user,
+                    [
+                        session.DBUS_UPDATE_ACTIVATION_ENVIRONMENT,
+                        "--systemd",
+                        "DISPLAY",
+                        "XDG_DATA_DIRS",
+                    ],
+                    environment=plan.environment,
+                ),
+                mock.call(
+                    self.desktop_user,
+                    [
+                        "/usr/bin/systemctl",
+                        "--user",
+                        "start",
+                        session.GRAPHICAL_SESSION_TARGET,
+                    ],
+                ),
+            ],
+        )
+        self.assertEqual(events, ["mount", "environment", "start"])
+        self.assertIs(active.portal, proxy)
+        self.assertEqual(active.portal_binding, binding)
+        self.assertTrue(active.graphical_session)
 
     def test_forwarding_publishes_and_clears_combined_record(self) -> None:
         plan = session.DesktopPlan("2", (), {"DISPLAY": ":0"})
@@ -912,7 +997,8 @@ class DesktopControllerTests(unittest.TestCase):
             session._read_status("work", self.desktop_user.uid), "inactive"
         )
 
-    def test_logout_revokes_portal_before_stopping_proxy(self) -> None:
+    def test_logout_stops_session_then_revokes_portal_and_proxy(self) -> None:
+        self.controller.portals_enabled = True
         portal_binding = session.DesktopBind(
             "/run/spaces/desktop/1000/portal/bus",
             self.root / "portal-bus",
@@ -920,6 +1006,8 @@ class DesktopControllerTests(unittest.TestCase):
             2,
         )
         proxy = mock.Mock()
+        events: list[str] = []
+        proxy.close.side_effect = lambda: events.append("close")
         proxy.socket_path = self.root / "proxy-bus"
         proxy.socket_path.write_text("", encoding="utf-8")
         active = session._ActiveDesktop(
@@ -928,13 +1016,35 @@ class DesktopControllerTests(unittest.TestCase):
             portal_binding=portal_binding,
         )
 
-        with mock.patch.object(self.controller, "_unmount") as unmount:
+        with (
+            mock.patch.object(
+                self.controller,
+                "_machine_user",
+                side_effect=lambda *_arguments: events.append("stop"),
+            ) as machine_user,
+            mock.patch.object(
+                self.controller,
+                "_unmount",
+                side_effect=lambda *_arguments: events.append("unmount"),
+            ) as unmount,
+        ):
             self.controller._deactivate(self.desktop_user, active)
 
+        machine_user.assert_called_once_with(
+            self.desktop_user,
+            [
+                "/usr/bin/systemctl",
+                "--user",
+                "--no-block",
+                "stop",
+                session.GRAPHICAL_SESSION_TARGET,
+            ],
+        )
         unmount.assert_called_once_with(
             self.desktop_user.uid, portal_binding
         )
         proxy.close.assert_called_once_with()
+        self.assertEqual(events, ["stop", "unmount", "close"])
         self.assertIsNone(active.portal)
         self.assertIsNone(active.portal_binding)
         self.assertFalse(proxy.socket_path.exists())
