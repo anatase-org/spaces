@@ -1050,6 +1050,8 @@ def _credential_plan(
         return True
 
     ssh_value = source_environment.get("SSH_AUTH_SOCK")
+    if not ssh_value:
+        ssh_value = str(runtime / "ssh-agent.socket")
     if ssh_value and _safe_value(ssh_value):
         ssh_source = Path(ssh_value)
         if not ssh_source.is_absolute():

@@ -161,6 +161,57 @@ class GraphicalSessionTests(unittest.TestCase):
 
 
 class DesktopPathTests(unittest.TestCase):
+    def test_credential_plan_falls_back_to_systemd_ssh_agent_socket(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            credential_user = user(
+                root,
+                desktop=False,
+                credential_agents=True,
+            )
+            fallback = Path(
+                f"/run/user/{credential_user.uid}/ssh-agent.socket"
+            )
+            metadata = SimpleNamespace(st_dev=1, st_ino=2)
+
+            def validate(path: Path, **kwargs: object) -> object:
+                if path == fallback:
+                    return path, metadata
+                return None
+
+            for source_environment in ({}, {"SSH_AUTH_SOCK": ""}):
+                with (
+                    self.subTest(source_environment=source_environment),
+                    mock.patch.object(
+                        session,
+                        "_validated_source",
+                        side_effect=validate,
+                    ),
+                ):
+                    plan = session._credential_plan(
+                        credential_user,
+                        source_environment,
+                    )
+
+                credential_root = (
+                    f"/run/spaces/credentials/{credential_user.uid}"
+                )
+                self.assertEqual(
+                    plan.environment,
+                    {"SSH_AUTH_SOCK": f"{credential_root}/ssh-agent"},
+                )
+                self.assertEqual(
+                    plan.binds,
+                    (
+                        session.DesktopBind(
+                            f"{credential_root}/ssh-agent",
+                            fallback,
+                            1,
+                            2,
+                        ),
+                    ),
+                )
+
     def test_credential_plan_forwards_ssh_and_only_restricted_gpg_extra_socket(
         self,
     ) -> None:
