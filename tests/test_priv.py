@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import io
 import json
 import os
 import stat
@@ -828,6 +829,74 @@ class PrivilegedTests(unittest.TestCase):
             stderr=subprocess.DEVNULL,
         )
 
+    def test_enter_status_is_only_shown_while_starting_space(self) -> None:
+        class TerminalOutput(io.StringIO):
+            def isatty(self) -> bool:
+                return True
+
+        for active, expected in (
+            (True, ""),
+            (
+                False,
+                "Starting space work and entering it...\n"
+                "\033[F\033[2K",
+            ),
+        ):
+            output = TerminalOutput()
+            completed = [subprocess.CompletedProcess([], 0)]
+            if not active:
+                completed = [
+                    subprocess.CompletedProcess([], 1),
+                    subprocess.CompletedProcess([], 0),
+                ]
+            with (
+                self.subTest(active=active),
+                mock.patch.object(priv.sys, "stdout", output),
+                mock.patch.object(
+                    priv.subprocess,
+                    "run",
+                    side_effect=completed,
+                ) as run,
+            ):
+                returncode = priv._ensure_space_started(
+                    "work", entering=True
+                )
+                self.assertEqual(returncode, 0)
+                self.assertEqual(output.getvalue(), expected)
+            if active:
+                self.assertEqual(run.call_count, 1)
+            else:
+                self.assertEqual(run.call_count, 2)
+                self.assertEqual(
+                    run.call_args_list[-1],
+                    mock.call(
+                        [
+                            "/usr/bin/systemctl",
+                            "start",
+                            "spaces@work.service",
+                        ],
+                        check=False,
+                    ),
+                )
+
+    def test_enter_status_is_hidden_when_output_is_not_a_terminal(self) -> None:
+        output = io.StringIO()
+        with (
+            mock.patch.object(priv.sys, "stdout", output),
+            mock.patch.object(
+                priv.subprocess,
+                "run",
+                side_effect=[
+                    subprocess.CompletedProcess([], 1),
+                    subprocess.CompletedProcess([], 0),
+                ],
+            ),
+        ):
+            returncode = priv._ensure_space_started("work", entering=True)
+
+        self.assertEqual(returncode, 0)
+        self.assertEqual(output.getvalue(), "")
+
     def test_start_propagates_system_service_failure(self) -> None:
         info = core.create_info(
             "work",
@@ -1108,7 +1177,11 @@ class PrivilegedTests(unittest.TestCase):
             mock.patch.object(priv, "_caller_uid", return_value=1000),
             mock.patch.object(priv.pwd, "getpwnam", return_value=account),
             mock.patch.object(priv, "_space_info", return_value=info),
-            mock.patch.object(priv, "_ensure_space_started", return_value=0),
+            mock.patch.object(
+                priv,
+                "_ensure_space_started",
+                return_value=0,
+            ),
             mock.patch.object(
                 session,
                 "desktop_environment",
@@ -1152,9 +1225,17 @@ class PrivilegedTests(unittest.TestCase):
             mock.patch.object(priv, "_caller_uid", return_value=1000),
             mock.patch.object(priv.pwd, "getpwnam", return_value=account),
             mock.patch.object(priv, "_space_info", return_value=info),
-            mock.patch.object(priv, "_ensure_space_started", return_value=0),
+            mock.patch.object(
+                priv,
+                "_ensure_space_started",
+                return_value=0,
+            ),
             mock.patch.object(session, "desktop_environment") as environment,
-            mock.patch.object(priv, "_machine_shell", return_value=0) as shell,
+            mock.patch.object(
+                priv,
+                "_machine_shell",
+                return_value=0,
+            ) as shell,
         ):
             self.assertEqual(priv.enter("alice@work", []), 0)
         environment.assert_not_called()
@@ -1180,7 +1261,11 @@ class PrivilegedTests(unittest.TestCase):
             mock.patch.object(priv, "_caller_uid", return_value=1000),
             mock.patch.object(priv.pwd, "getpwnam", return_value=account),
             mock.patch.object(priv, "_space_info", return_value=info),
-            mock.patch.object(priv, "_ensure_space_started", return_value=0),
+            mock.patch.object(
+                priv,
+                "_ensure_space_started",
+                return_value=0,
+            ),
             mock.patch.object(
                 session,
                 "desktop_environment",

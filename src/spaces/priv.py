@@ -16,9 +16,10 @@ import stat
 import subprocess
 import sys
 import tempfile
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from . import _
 from . import core
@@ -249,7 +250,7 @@ def _space_info(name: str) -> dict[str, Any]:
     return info
 
 
-def _ensure_space_started(name: str) -> int:
+def _ensure_space_started(name: str, *, entering: bool = False) -> int:
     available = subprocess.run(
         [MACHINECTL, "--quiet", "show", name],
         check=False,
@@ -258,10 +259,27 @@ def _ensure_space_started(name: str) -> int:
     ).returncode == 0
     if available:
         return 0
-    return subprocess.run(
-        [SYSTEMCTL, "start", f"spaces@{name}.service"],
-        check=False,
-    ).returncode
+
+    visible = entering and bool(
+        getattr(sys.stdout, "isatty", lambda: False)()
+    )
+    if visible:
+        message = _(
+            "Starting space {space} and entering it...",
+            space=name,
+        )
+        sys.stdout.write(message + "\n")
+        sys.stdout.flush()
+
+    try:
+        return subprocess.run(
+            [SYSTEMCTL, "start", f"spaces@{name}.service"],
+            check=False,
+        ).returncode
+    finally:
+        if visible:
+            sys.stdout.write("\033[F\033[2K")
+            sys.stdout.flush()
 
 
 def start(name: str) -> int:
@@ -358,7 +376,7 @@ def enter(
         )
 
     user_permissions = core.effective_user_permissions(record)
-    returncode = _ensure_space_started(space_name)
+    returncode = _ensure_space_started(space_name, entering=True)
     if returncode != 0:
         return returncode
     if caller_uid == 0:
@@ -439,7 +457,7 @@ def enter_as_user(
                     space=space_name,
                 )
             )
-    returncode = _ensure_space_started(space_name)
+    returncode = _ensure_space_started(space_name, entering=True)
     if returncode != 0:
         return returncode
     return _machine_shell(user_name, space_name, command)
