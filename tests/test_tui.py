@@ -87,10 +87,10 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                     for button in network.query(CleanRadioButton)
                 ],
                 [
-                    "Basic — shared networking and unprivileged ports",
-                    "Advanced — shared networking and privileged ports",
-                    "Admin — required for Docker; full network admin with "
-                    "CAP_NET_RAW and CAP_NET_ADMIN",
+                    "Basic — shared networking, host ports above 1024",
+                    "Advanced — shared networking, host any port",
+                    "Admin — full network admin, docker+VMs+nmap "
+                    "(CAP_NET_RAW, CAP_NET_ADMIN)",
                 ],
             )
             self.assertEqual(
@@ -186,9 +186,9 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                 ],
                 [
                     "Basic — Essentials for daily work",
-                    "Development — required for Docker; adds "
-                    "CAP_AUDIT_CONTROL, CAP_AUDIT_WRITE, CAP_SYS_PTRACE, "
-                    "CAP_PERFMON, CAP_BPF, and perf_event_open",
+                    "Development — Docker+VMs+performance monitor "
+                    "(CAP_AUDIT_CONTROL, CAP_AUDIT_WRITE, CAP_SYS_PTRACE, "
+                    "CAP_PERFMON, CAP_BPF, and perf_event_open)",
                     "System Administrator — Development plus /sys is "
                     "writeable",
                 ],
@@ -210,11 +210,9 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                 [
                     "Disabled — no host devices",
                     "Basic — ordinary uaccess and video devices, excluding "
-                    "capture inputs and security devices",
-                    "Admin — all device nodes except positively identified "
-                    "security devices",
-                    "Full — bind the host /dev directly, including input "
-                    "and security devices",
+                    "capture and input",
+                    "Admin — all devices except known security devices",
+                    "Full — all devices",
                 ],
             )
             await pilot.press("enter")

@@ -315,19 +315,18 @@ class PermissionForm(
     ]
 
     NETWORK_LABELS = {
-        "basic": _("Basic — shared networking and unprivileged ports"),
-        "advanced": _("Advanced — shared networking and privileged ports"),
+        "basic": _("Basic — shared networking, host ports above 1024"),
+        "advanced": _("Advanced — shared networking, host any port"),
         "admin": _(
-            "Admin — required for Docker; full network admin with "
-            "CAP_NET_RAW and CAP_NET_ADMIN"
+            "Admin — full network admin, docker+VMs+nmap (CAP_NET_RAW, CAP_NET_ADMIN)"
         ),
     }
     KERNEL_CAPABILITY_LABELS = {
         "basic": _("Basic — Essentials for daily work"),
         "development": _(
-            "Development — required for Docker; adds CAP_AUDIT_CONTROL, "
+            "Development — Docker+VMs+performance monitor (CAP_AUDIT_CONTROL, "
             "CAP_AUDIT_WRITE, CAP_SYS_PTRACE, CAP_PERFMON, CAP_BPF, and "
-            "perf_event_open"
+            "perf_event_open)"
         ),
         "admin": _(
             "System Administrator — Development plus /sys is writeable"
@@ -336,16 +335,13 @@ class PermissionForm(
     DEVICE_LABELS = {
         "disabled": _("Disabled — no host devices"),
         "basic": _(
-            "Basic — ordinary uaccess and video devices, excluding capture "
-            "inputs and security devices"
+            "Basic — ordinary uaccess and video devices, excluding capture and input"
         ),
         "admin": _(
-            "Admin — all device nodes except positively identified "
-            "security devices"
+            "Admin — all devices except known security devices"
         ),
         "full": _(
-            "Full — bind the host /dev directly, including input and "
-            "security devices"
+            "Full — all devices"
         ),
     }
 
