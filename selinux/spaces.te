@@ -143,8 +143,12 @@ allow spaces_t userdomain:system start;
 optional_policy(`
 	# Public portals such as Camera, ScreenCast and USB return descriptors
 	# created by unconfined host desktop services.  The filtered proxy
-	# must receive those descriptors before it can relay them into the Space.
+	# must receive those descriptors before it can relay them into the Space,
+	# and the guest portal client must be able to use the relayed socket.
 	unconfined_use_fds(spaces_t)
+	allow spaces_t unconfined_t:unix_stream_socket rw_stream_socket_perms;
+	allow spaces_container_t unconfined_t:unix_stream_socket
+		rw_stream_socket_perms;
 	rtkit_daemon_dbus_chat(spaces_t)
 ')
 
