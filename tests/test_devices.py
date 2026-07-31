@@ -274,6 +274,31 @@ class DeviceDiscoveryTests(unittest.TestCase):
 
         self.assertEqual(found, {"/dev/unclassifiable"})
 
+    def test_all_levels_exclude_host_terminal_devices(self) -> None:
+        definitions = {
+            "tty1": ("c", 4, 1, 0, metadata(tags=("uaccess",))),
+            "ttyS0": ("c", 4, 64, 0, metadata(tags=("uaccess",))),
+            "ttyprintk": ("c", 5, 3, 0, metadata(tags=("uaccess",))),
+            "vcs1": ("c", 7, 1, 0, metadata(tags=("uaccess",))),
+            "safe": ("c", 240, 0, 100, metadata(tags=("uaccess",))),
+        }
+
+        for level in ("basic", "admin", "full"):
+            with self.subTest(level=level):
+                found = {
+                    str(item.destination)
+                    for item in self._discover(
+                        level,
+                        definitions,
+                        aliases=(
+                            {"host-console": "tty1"}
+                            if level == "full"
+                            else None
+                        ),
+                    )
+                }
+                self.assertEqual(found, {"/dev/safe"})
+
     def test_full_includes_security_and_storage_but_leaves_api_dev_managed(
         self,
     ) -> None:

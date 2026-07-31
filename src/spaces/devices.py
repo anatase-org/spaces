@@ -32,6 +32,10 @@ NSPAWN_MANAGED_DEVICES = frozenset(
         PurePosixPath("/dev/zero"),
     }
 )
+# Never give a guest the host's terminal or virtual-console devices. nspawn
+# supplies its own console and PTYs; exposing these character majors lets a
+# guest getty operate the host VT that owns a graphical login session.
+HOST_TERMINAL_CHARACTER_MAJORS = frozenset({4, 5, 7})
 VIDEO_SUBSYSTEMS = frozenset(
     {"cec", "drm", "dvb", "graphics", "media", "video4linux"}
 )
@@ -364,6 +368,13 @@ def discover(
                     kind = "b"
                 else:
                     continue
+                major = os.major(metadata_stat.st_rdev)
+                minor = os.minor(metadata_stat.st_rdev)
+                if (
+                    kind == "c"
+                    and major in HOST_TERMINAL_CHARACTER_MAJORS
+                ):
+                    continue
                 try:
                     relative = source.relative_to(device_root)
                 except ValueError:
@@ -393,8 +404,8 @@ def discover(
                         destination=destination,
                         source=bind_source,
                         kind=kind,
-                        major=os.major(metadata_stat.st_rdev),
-                        minor=os.minor(metadata_stat.st_rdev),
+                        major=major,
+                        minor=minor,
                     )
                 )
         return tuple(sorted(nodes))
