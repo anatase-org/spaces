@@ -224,7 +224,10 @@ class CliTests(unittest.TestCase):
                 mock.patch.object(cli, "log", calls.log),
                 mock.patch.object(cli, "_invoke_helper", calls.invoke) as invoke,
             ):
-                self.assertEqual(cli.main(["create", "ubuntu"]), 0)
+                self.assertEqual(
+                    cli.main(["create", "ubuntu", "--purge"]),
+                    0,
+                )
         calls.assert_has_calls(
             [
                 mock.call.configure(rich=True),
@@ -236,6 +239,7 @@ class CliTests(unittest.TestCase):
         )
         operation, payload = invoke.call_args.args
         self.assertEqual(operation, "create")
+        self.assertTrue(payload["purge"])
         self.assertEqual(payload["distribution"]["version"], "resolute")
         self.assertEqual(set(payload["permissions"]["users"]), {"1000"})
         self.assertEqual(
@@ -243,6 +247,7 @@ class CliTests(unittest.TestCase):
             "sudo",
         )
         self.assertEqual(wizard.call_args.kwargs["preset"], "basic")
+        self.assertTrue(wizard.call_args.kwargs["purge"])
         self.assertFalse(wizard.call_args.kwargs["missing"])
         self.assertTrue(
             payload["permissions"]["users"]["1000"]["permissions"][
@@ -704,7 +709,10 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(cli.main(["delete", "work"]), 0)
 
         self.assertIn("Press Enter", prompt.call_args.args[0])
-        invoke.assert_called_once_with("delete", {"name": "work"})
+        self.assertIn("preserving its home data", prompt.call_args.args[0])
+        invoke.assert_called_once_with(
+            "delete", {"name": "work", "purge": False}
+        )
 
     def test_delete_is_cancelled_by_nonempty_response(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -734,7 +742,32 @@ class CliTests(unittest.TestCase):
                 )
 
         prompt.assert_not_called()
-        invoke.assert_called_once_with("delete", {"name": "work"})
+        invoke.assert_called_once_with(
+            "delete", {"name": "work", "purge": False}
+        )
+
+    def test_delete_purge_deletes_home_without_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            (state / "work").mkdir(parents=True)
+            with (
+                mock.patch.object(core, "STATE_ROOT", state),
+                mock.patch("builtins.input") as prompt,
+                mock.patch.object(
+                    cli, "_invoke_helper", return_value=0
+                ) as invoke,
+            ):
+                self.assertEqual(
+                    cli.main(
+                        ["delete", "work", "--purge", "--noconfirm"]
+                    ),
+                    0,
+                )
+
+        prompt.assert_not_called()
+        invoke.assert_called_once_with(
+            "delete", {"name": "work", "purge": True}
+        )
 
     def test_delete_rejects_missing_space_without_prompting(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

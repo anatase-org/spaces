@@ -376,6 +376,16 @@ def validate_creation_info(value: object) -> dict[str, Any]:
     return info
 
 
+def validate_create_request(value: object) -> tuple[dict[str, Any], bool]:
+    """Validate creation metadata and its non-persistent purge option."""
+
+    request = dict(_require_mapping(value, "create payload"))
+    purge = request.pop("purge", False)
+    if not isinstance(purge, bool):
+        raise SpacesError(_("Create purge option must be a boolean."))
+    return validate_creation_info(request), purge
+
+
 def validate_configure_patch(value: object) -> dict[str, Any]:
     patch = _require_mapping(value, "configure payload")
     schema_version = patch.get("schema_version")
@@ -406,9 +416,14 @@ def validate_configure_patch(value: object) -> dict[str, Any]:
 
 def validate_delete_request(value: object) -> dict[str, Any]:
     request = _require_mapping(value, "delete payload")
-    if set(request) != {"name"}:
-        raise SpacesError(_("Delete payload must contain only a space name."))
+    if "name" not in request or not set(request).issubset({"name", "purge"}):
+        raise SpacesError(
+            _("Delete payload contains unknown settings.")
+        )
     validate_space_name(request["name"])
+    purge = request.get("purge", False)
+    if not isinstance(purge, bool):
+        raise SpacesError(_("Delete purge option must be a boolean."))
     return request
 
 

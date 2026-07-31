@@ -507,6 +507,7 @@ class PermissionForm(
         administrator_group: str = "wheel",
         submit_label: str = _("Create"),
         override: bool = False,
+        purge: bool = False,
         missing: bool = False,
         space_name: str = "",
         preset: str = "custom",
@@ -564,6 +565,7 @@ class PermissionForm(
         self.distribution_values = set(distribution_values or [])
         self.submit_label = submit_label
         self.space_name = space_name
+        self.purge = purge
         notice_steps: list[str] = []
         if override:
             notice_steps.append("override")
@@ -631,9 +633,16 @@ class PermissionForm(
             if "override" in self.steps:
                 with Vertical(id="override-step", classes="step"):
                     yield Static(
-                        _(
-                            "The existing space will be overwritten. "
-                            "Its home data will be preserved."
+                        (
+                            _(
+                                "The existing space will be overwritten. "
+                                "Its home data will be deleted."
+                            )
+                            if self.purge
+                            else _(
+                                "The existing space will be overwritten. "
+                                "Its home data will be preserved."
+                            )
                         ),
                         classes="description",
                     )

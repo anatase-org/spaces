@@ -906,6 +906,28 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                 "System permissions (3/13)",
             )
 
+    async def test_purge_override_warns_that_home_will_be_deleted(self) -> None:
+        app = PermissionForm(
+            home=Path("/home/user"),
+            folders=[],
+            network="basic",
+            selected_home=[],
+            include_system=False,
+            distribution_title="",
+            distribution_description="",
+            distribution_options=[],
+            distribution_value=None,
+            override=True,
+            purge=True,
+        )
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            self.assertEqual(
+                str(app.query_one("#override-step Static").render()),
+                "The existing space will be overwritten. "
+                "Its home data will be deleted.",
+            )
+
     async def test_missing_step_is_prepended(self) -> None:
         app = PermissionForm(
             home=Path("/home/user"),

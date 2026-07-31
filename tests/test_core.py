@@ -694,6 +694,42 @@ class CoreTests(unittest.TestCase):
         with self.assertRaises(core.SpacesError):
             core.validate_creation_info(info)
 
+    def test_create_request_extracts_boolean_purge_option(self) -> None:
+        info = core.create_info(
+            "work",
+            {"id": "custom"},
+            core.Identity(1000, 1000, Path("/home/user")),
+            "basic",
+            [],
+        )
+        validated, purge = core.validate_create_request(
+            {**info, "purge": True}
+        )
+        self.assertTrue(purge)
+        self.assertNotIn("purge", validated)
+
+        with self.assertRaises(core.SpacesError):
+            core.validate_create_request({**info, "purge": "yes"})
+
+    def test_delete_request_validates_optional_purge_option(self) -> None:
+        self.assertEqual(
+            core.validate_delete_request({"name": "work"}),
+            {"name": "work"},
+        )
+        self.assertEqual(
+            core.validate_delete_request({"name": "work", "purge": True}),
+            {"name": "work", "purge": True},
+        )
+        for request in (
+            {"name": "work", "purge": "yes"},
+            {"name": "work", "unknown": False},
+            {},
+        ):
+            with self.subTest(request=request), self.assertRaises(
+                core.SpacesError
+            ):
+                core.validate_delete_request(request)
+
     def test_distribution_name_does_not_constrain_space_name(self) -> None:
         info = core.create_info(
             "work",

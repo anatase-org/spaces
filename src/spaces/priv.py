@@ -435,12 +435,12 @@ def enter_as_user(
     return _machine_shell(user_name, space_name, command)
 
 
-def create(info: dict[str, Any]) -> None:
+def create(request: dict[str, Any]) -> None:
     from . import host_config
     from . import shortcuts
     from .distro import DistributionError
 
-    core.validate_creation_info(info)
+    info, purge = core.validate_create_request(request)
     _assert_initiating_user(info)
     name = info["name"]
     distribution = info["distribution"]
@@ -453,8 +453,12 @@ def create(info: dict[str, Any]) -> None:
         )
         shortcuts.remove(name)
         home = space / "home"
-        if home.is_symlink() or (home.exists() and not home.is_dir()):
-            raise core.SpacesError(_("Unsafe home path: {home}.", home=home))
+        if purge:
+            _remove_rootfs(home)
+        elif home.is_symlink() or (home.exists() and not home.is_dir()):
+            raise core.SpacesError(
+                _("Unsafe home path: {home}.", home=home)
+            )
         _root_owned_directory(home)
 
         rootfs = space / "rootfs"
@@ -562,6 +566,7 @@ def delete(request: dict[str, Any]) -> None:
 
     core.validate_delete_request(request)
     name = request["name"]
+    purge = request.get("purge", False)
     space = core.STATE_ROOT / name
 
     with _space_lock(space):
@@ -571,7 +576,19 @@ def delete(request: dict[str, Any]) -> None:
         )
         _assert_no_mounts(space)
         shortcuts.remove(name)
-        shutil.rmtree(space)
+        if purge:
+            shutil.rmtree(space)
+            return
+
+        home = space / "home"
+        if home.is_symlink() or (home.exists() and not home.is_dir()):
+            raise core.SpacesError(_("Unsafe home path: {home}.", home=home))
+        for entry in space.iterdir():
+            if entry == home:
+                continue
+            _remove_rootfs(entry)
+        if not home.exists():
+            space.rmdir()
 
 
 def copy(request: dict[str, Any]) -> int:

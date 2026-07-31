@@ -392,6 +392,23 @@ class PrivilegedTests(unittest.TestCase):
             (space / "home" / "keep").read_text(encoding="utf-8"), "preserve"
         )
 
+    def test_rebuild_with_purge_removes_home_contents(self) -> None:
+        with mock.patch.object(ubuntu.subprocess, "run"):
+            priv.create(self.info)
+        space = self.state_root / "ubuntu"
+        (space / "home" / "remove").write_text("remove", encoding="utf-8")
+        request = {**self.info, "purge": True}
+
+        with mock.patch.object(ubuntu.subprocess, "run"):
+            priv.create(request)
+
+        self.assertTrue((space / "home").is_dir())
+        self.assertFalse((space / "home" / "remove").exists())
+        stored = json.loads(
+            (space / "info.json").read_text(encoding="utf-8")
+        )
+        self.assertNotIn("purge", stored)
+
     def test_bootstrap_failure_moves_rootfs_to_failed_path(self) -> None:
         space = self.state_root / "ubuntu"
         (space / "rootfs.fail").mkdir(parents=True)
@@ -639,16 +656,23 @@ class PrivilegedTests(unittest.TestCase):
             },
         )
 
-    def test_delete_removes_entire_space(self) -> None:
+    def test_delete_preserves_home_and_removes_space_contents(self) -> None:
         space = self.state_root / "work"
         (space / "rootfs").mkdir(parents=True)
         (space / "home").mkdir()
-        (space / "home" / "file").write_text("delete", encoding="utf-8")
+        (space / "home" / "file").write_text("preserve", encoding="utf-8")
+        (space / "info.json").write_text("{}", encoding="utf-8")
 
         with mock.patch.object(priv.subprocess, "run") as run:
             priv.delete({"name": "work"})
 
-        self.assertFalse(space.exists())
+        self.assertTrue(space.is_dir())
+        self.assertFalse((space / "rootfs").exists())
+        self.assertFalse((space / "info.json").exists())
+        self.assertEqual(
+            (space / "home" / "file").read_text(encoding="utf-8"),
+            "preserve",
+        )
         run.assert_called_once_with(
             [
                 "/usr/bin/systemctl",
@@ -657,6 +681,17 @@ class PrivilegedTests(unittest.TestCase):
             ],
             check=True,
         )
+
+    def test_delete_with_purge_removes_entire_space(self) -> None:
+        space = self.state_root / "work"
+        (space / "rootfs").mkdir(parents=True)
+        (space / "home").mkdir()
+        (space / "home" / "file").write_text("delete", encoding="utf-8")
+
+        with mock.patch.object(priv.subprocess, "run"):
+            priv.delete({"name": "work", "purge": True})
+
+        self.assertFalse(space.exists())
 
     def test_delete_removes_shortcut_versions(self) -> None:
         space = self.state_root / "work"

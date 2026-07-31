@@ -70,6 +70,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     create_parser = subparsers.add_parser("create", help=_("create a space"))
     create_parser.add_argument("type", choices=core.KNOWN_DISTRIBUTIONS)
+    create_parser.add_argument(
+        "--purge",
+        action="store_true",
+        help=_("delete existing space home data before creating"),
+    )
 
     configure_parser = subparsers.add_parser(
         "configure", help=_("configure permissions for a space")
@@ -94,6 +99,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--noconfirm",
         action="store_true",
         help=_("delete without prompting for confirmation"),
+    )
+    delete_parser.add_argument(
+        "--purge",
+        action="store_true",
+        help=_("delete the space home data as well"),
     )
 
     cp_parser = subparsers.add_parser(
@@ -285,7 +295,12 @@ def _invoke_raw_helper(operation: str, arguments: list[str]) -> int:
     return completed.returncode
 
 
-def _create(distro_id: str, *, missing: bool = False) -> int:
+def _create(
+    distro_id: str,
+    *,
+    missing: bool = False,
+    purge: bool = False,
+) -> int:
     from .distro import DistributionError
 
     driver = get_driver(distro_id)
@@ -370,6 +385,7 @@ def _create(distro_id: str, *, missing: bool = False) -> int:
         distribution_values=distribution_values,
         submit_label=_("Create"),
         override=override,
+        purge=purge,
         missing=missing and not override,
         space_name=name,
         preset=preset,
@@ -402,6 +418,7 @@ def _create(distro_id: str, *, missing: bool = False) -> int:
         mounted_drives=result.get("mounted_drives", True),
         preset=result.get("preset", "custom"),
     )
+    info["purge"] = purge
     configure_logging(rich=True)
     log(
         _(
@@ -529,7 +546,7 @@ def _configure(name: str, *, user: str | None) -> int:
     return _invoke_helper("configure", patch)
 
 
-def _delete(name: str, *, noconfirm: bool) -> int:
+def _delete(name: str, *, noconfirm: bool, purge: bool = False) -> int:
     core.validate_space_name(name)
     target = core.STATE_ROOT / name
     if target.is_symlink() or not target.is_dir():
@@ -538,18 +555,24 @@ def _delete(name: str, *, noconfirm: bool) -> int:
         )
 
     if not noconfirm:
+        deletion = (
+            _("including its home data")
+            if purge
+            else _("while preserving its home data")
+        )
         response = input(
             _(
-                "Press Enter to permanently delete space {name!r} at {target}, "
-                "or type anything to cancel: ",
+                "Press Enter to permanently delete space {name!r} at {target} "
+                "{deletion}, or type anything to cancel: ",
                 name=name,
                 target=target,
+                deletion=deletion,
             )
         )
         if response:
             print(_("Deletion cancelled."))
             return 130
-    return _invoke_helper("delete", {"name": name})
+    return _invoke_helper("delete", {"name": name, "purge": purge})
 
 
 def _cp(arguments: list[str]) -> int:
@@ -654,11 +677,15 @@ def main(argv: list[str] | None = None) -> int:
 
         arguments = build_parser().parse_args(raw_arguments)
         if arguments.command == "create":
-            return _create(arguments.type)
+            return _create(arguments.type, purge=arguments.purge)
         elif arguments.command == "configure":
             return _configure(arguments.name, user=arguments.user)
         elif arguments.command == "delete":
-            return _delete(arguments.name, noconfirm=arguments.noconfirm)
+            return _delete(
+                arguments.name,
+                noconfirm=arguments.noconfirm,
+                purge=arguments.purge,
+            )
         elif arguments.command == "enter":
             return _enter(
                 arguments.space,
