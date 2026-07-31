@@ -367,13 +367,19 @@ optional_policy(`
 ')
 optional_policy(`
 	gen_require(`
+		type gpg_agent_t;
 		type gpg_agent_tmp_t;
 		type gpg_runtime_t;
 		type gpg_secret_t;
 	')
 	allow spaces_t { gpg_runtime_t gpg_secret_t }:dir search_dir_perms;
 	allow spaces_t gpg_agent_tmp_t:sock_file { getattr open };
-	gpg_stream_connect_agent(spaces_container_t)
+	stream_connect_pattern(
+		spaces_container_t,
+		gpg_agent_tmp_t,
+		gpg_agent_tmp_t,
+		gpg_agent_t
+	)
 ')
 
 # Electron and other Wayland clients use the explicitly exposed udmabuf
