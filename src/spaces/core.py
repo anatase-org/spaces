@@ -28,8 +28,6 @@ DEVICE_LEVELS = ("disabled", "basic", "admin", "full")
 DEFAULT_HOME_FOLDERS = ("Projects", "Downloads")
 DEFAULT_HOME_FILES = (
     ".ssh/config",
-    ".bashrc",
-    ".zshrc",
     ".zhistory",
     ".bash_history",
 )

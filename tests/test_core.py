@@ -218,11 +218,9 @@ class CoreTests(unittest.TestCase):
                     "Downloads",
                     "Projects",
                     ".bash_history",
-                    ".bashrc",
                     ".hidden",
                     ".ssh/config",
                     ".zhistory",
-                    ".zshrc",
                     "file.txt",
                 ],
             )
@@ -248,6 +246,8 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(host_authentication)
         self.assertTrue(shortcuts)
         self.assertEqual(selected_home, list(core.DEFAULT_HOME_MOUNTS))
+        self.assertNotIn(".bashrc", selected_home)
+        self.assertNotIn(".zshrc", selected_home)
         self.assertTrue(administrator)
         self.assertTrue(desktop)
         self.assertTrue(credential_agents)

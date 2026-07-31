@@ -24,10 +24,11 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("$ansi-foreground", PermissionForm.CSS)
         self.assertIn("color: $foreground;", PermissionForm.CSS)
 
-    def test_home_files_are_listed_below_folders(self) -> None:
+    def test_selected_home_entries_are_listed_first_by_kind(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)
             (home / "notes.txt").touch()
+            (home / ".bashrc").touch()
             app = PermissionForm(
                 home=home,
                 folders=["notes.txt", ".bashrc", "Documents", "Projects"],
@@ -41,7 +42,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(
                 app.folders,
-                ["Projects", "Documents", ".bashrc", "notes.txt"],
+                ["Projects", ".bashrc", "Documents", "notes.txt"],
             )
 
     async def test_initial_values_and_step_progress(self) -> None:

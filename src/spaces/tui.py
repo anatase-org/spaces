@@ -398,23 +398,25 @@ class PermissionForm(
             )
         }
 
-        def ordered(entries: list[str], defaults: tuple[str, ...]) -> list[str]:
-            selected = [
+        def selected(entries: list[str], defaults: tuple[str, ...]) -> list[str]:
+            result = [
                 entry
                 for entry in (*defaults, *selected_home)
                 if entry in self.initial_home and entry in entries
             ]
-            selected = list(dict.fromkeys(selected))
-            return [
-                *selected,
-                *[entry for entry in entries if entry not in self.initial_home],
-            ]
+            return list(dict.fromkeys(result))
 
         directories = [name for name in folders if name not in file_names]
         files = [name for name in folders if name in file_names]
         self.folders = [
-            *ordered(directories, DEFAULT_HOME_FOLDERS),
-            *ordered(files, DEFAULT_HOME_FILES),
+            *selected(directories, DEFAULT_HOME_FOLDERS),
+            *selected(files, DEFAULT_HOME_FILES),
+            *[
+                entry
+                for entry in directories
+                if entry not in self.initial_home
+            ],
+            *[entry for entry in files if entry not in self.initial_home],
         ]
         self.include_system = include_system
         self.distribution_title = distribution_title
