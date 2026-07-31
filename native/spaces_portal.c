@@ -124,6 +124,47 @@ static const char status_watcher_xml[] =
     " <signal name='StatusNotifierHostRegistered'/><signal name='StatusNotifierHostUnregistered'/>"
     "</interface></node>";
 
+/* Some MPRIS players implement the standard root and player APIs while
+ * returning an empty Introspect response.  Use the standardized ABI only as
+ * a publication schema; calls and properties still go to the guest player. */
+static const char mpris_fallback_xml[] =
+    "<node>"
+    " <interface name='org.mpris.MediaPlayer2'>"
+    "  <method name='Raise'/><method name='Quit'/>"
+    "  <property name='CanQuit' type='b' access='read'/>"
+    "  <property name='CanRaise' type='b' access='read'/>"
+    "  <property name='HasTrackList' type='b' access='read'/>"
+    "  <property name='Identity' type='s' access='read'/>"
+    "  <property name='DesktopEntry' type='s' access='read'/>"
+    "  <property name='SupportedUriSchemes' type='as' access='read'/>"
+    "  <property name='SupportedMimeTypes' type='as' access='read'/>"
+    " </interface>"
+    " <interface name='org.mpris.MediaPlayer2.Player'>"
+    "  <method name='Next'/><method name='Previous'/><method name='Pause'/>"
+    "  <method name='PlayPause'/><method name='Stop'/><method name='Play'/>"
+    "  <method name='Seek'><arg type='x' direction='in'/></method>"
+    "  <method name='SetPosition'><arg type='o' direction='in'/>"
+    "   <arg type='x' direction='in'/></method>"
+    "  <method name='OpenUri'><arg type='s' direction='in'/></method>"
+    "  <property name='PlaybackStatus' type='s' access='read'/>"
+    "  <property name='LoopStatus' type='s' access='readwrite'/>"
+    "  <property name='Rate' type='d' access='readwrite'/>"
+    "  <property name='Shuffle' type='b' access='readwrite'/>"
+    "  <property name='Metadata' type='a{sv}' access='read'/>"
+    "  <property name='Volume' type='d' access='readwrite'/>"
+    "  <property name='Position' type='x' access='read'/>"
+    "  <property name='MinimumRate' type='d' access='read'/>"
+    "  <property name='MaximumRate' type='d' access='read'/>"
+    "  <property name='CanGoNext' type='b' access='read'/>"
+    "  <property name='CanGoPrevious' type='b' access='read'/>"
+    "  <property name='CanPlay' type='b' access='read'/>"
+    "  <property name='CanPause' type='b' access='read'/>"
+    "  <property name='CanSeek' type='b' access='read'/>"
+    "  <property name='CanControl' type='b' access='read'/>"
+    "  <signal name='Seeked'><arg type='x'/></signal>"
+    " </interface>"
+    "</node>";
+
 #if defined(__x86_64__) || defined(__aarch64__)
 typedef int (*main_function)(int, char **, char **);
 extern int spaces_old_libc_start_main(main_function, int, char **,
@@ -1769,13 +1810,14 @@ static GVariant *stage_artwork(Mirror *mirror, GVariant *value)
         if (descriptor >= 0) {
             GUnixFDList *fds = g_unix_fd_list_new();
             gint handle = g_unix_fd_list_append(fds, descriptor, NULL);
+            GError *error = NULL;
             GVariant *staged = handle < 0 ? NULL
                 : g_dbus_connection_call_with_unix_fd_list_sync(
                     mirror->portal->host, broker, INTEGRATION_PATH,
                     INTEGRATION_INTERFACE,
                     "StageFile", g_variant_new("(sh)", filename, handle),
                     G_VARIANT_TYPE("(s)"), G_DBUS_CALL_FLAGS_NONE,
-                    5000, fds, NULL, NULL, NULL);
+                    5000, fds, NULL, NULL, &error);
             if (staged != NULL) {
                 const char *host_uri;
                 GVariantDict dictionary;
@@ -1790,7 +1832,11 @@ static GVariant *stage_artwork(Mirror *mirror, GVariant *value)
                 updated = g_variant_ref_sink(g_variant_dict_end(&dictionary));
                 g_variant_unref(value); value = updated;
                 g_variant_unref(staged);
+            } else if (error != NULL) {
+                g_warning("Could not stage MPRIS artwork: %s",
+                    error->message);
             }
+            g_clear_error(&error);
             g_object_unref(fds); close(descriptor);
         }
         g_free(filename);
@@ -2295,6 +2341,21 @@ static gboolean mirror_add_path(Mirror *mirror, const char *path, GError **error
     node = g_dbus_node_info_new_for_xml(xml, error);
     g_variant_unref(reply);
     if (node == NULL) return FALSE;
+    if (!mirror->status_item && g_str_equal(path, MPRIS_PATH)) {
+        gboolean mirrorable = FALSE;
+        for (index = 0; node->interfaces[index] != NULL; index++) {
+            if (!g_str_has_prefix(node->interfaces[index]->name,
+                    "org.freedesktop.DBus.")) {
+                mirrorable = TRUE;
+                break;
+            }
+        }
+        if (!mirrorable) {
+            g_dbus_node_info_unref(node);
+            node = g_dbus_node_info_new_for_xml(mpris_fallback_xml, error);
+            if (node == NULL) return FALSE;
+        }
+    }
     g_ptr_array_add(mirror->nodes, node);
     g_ptr_array_add(mirror->paths, g_strdup(path));
     for (index = 0; node->interfaces[index] != NULL; index++) {
@@ -2906,13 +2967,27 @@ static void optional_acquired(GDBusConnection *connection, const char *name, gpo
 static void optional_lost(GDBusConnection *connection, const char *name, gpointer user_data)
 { Portal *portal = user_data; (void)connection; if (g_str_equal(name, NOTIFICATIONS_NAME)) portal->notifications_owned = FALSE; else if (g_str_equal(name, SCREEN_SAVER_NAME)) portal->screen_saver_owned = FALSE; else if (g_str_equal(name, POWER_NAME)) portal->power_owned = FALSE; g_warning("Optional integration name %s is already owned", name); }
 static void host_closed(GDBusConnection *connection, gboolean vanished, GError *error, gpointer user_data)
-{ Portal *portal = user_data; (void)connection; (void)vanished; (void)error; portal->exit_status = 1; g_main_loop_quit(portal->loop); }
+{
+    Portal *portal = user_data;
+    (void)connection;
+    g_warning("Host portal bus connection closed (remote=%s): %s",
+        vanished ? "yes" : "no",
+        error == NULL ? "no error reported" : error->message);
+    portal->exit_status = 1;
+    g_main_loop_quit(portal->loop);
+}
 static void host_portal_appeared(GDBusConnection *connection, const char *name,
     const char *owner, gpointer user_data)
 { (void)connection; (void)name; (void)owner; (void)user_data; }
 static void host_portal_vanished(GDBusConnection *connection, const char *name,
     gpointer user_data)
-{ Portal *portal = user_data; (void)connection; (void)name; portal->exit_status = 1; g_main_loop_quit(portal->loop); }
+{
+    Portal *portal = user_data;
+    (void)connection;
+    g_warning("Host portal bus name %s vanished", name);
+    portal->exit_status = 1;
+    g_main_loop_quit(portal->loop);
+}
 
 int main(void)
 {

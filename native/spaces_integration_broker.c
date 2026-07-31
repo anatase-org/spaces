@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -1001,6 +1002,9 @@ static void realtime_method(
     guint64 thread;
     char task_path[96];
     struct stat metadata;
+    struct rlimit realtime_limit;
+    GVariant *limit_reply = NULL;
+    GVariant *limit_value = NULL;
     GVariant *reply;
     GError *error = NULL;
 
@@ -1022,6 +1026,29 @@ static void realtime_method(
             "The thread does not belong to the supplied process");
         goto failed;
     }
+    limit_reply = g_dbus_connection_call_sync(
+        broker->system_bus, RTKIT_NAME, RTKIT_PATH,
+        "org.freedesktop.DBus.Properties", "Get",
+        g_variant_new("(ss)", RTKIT_NAME, "RTTimeUSecMax"),
+        G_VARIANT_TYPE("(v)"), G_DBUS_CALL_FLAGS_NONE, 5000, NULL, &error
+    );
+    if (limit_reply == NULL)
+        goto failed;
+    g_variant_get(limit_reply, "(v)", &limit_value);
+    if (!g_variant_is_of_type(limit_value, G_VARIANT_TYPE_INT64)
+        || g_variant_get_int64(limit_value) <= 0) {
+        g_set_error(&error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+            "RealtimeKit returned an invalid realtime timeout limit");
+        goto failed;
+    }
+    realtime_limit.rlim_cur = (rlim_t)g_variant_get_int64(limit_value);
+    realtime_limit.rlim_max = realtime_limit.rlim_cur;
+    if (prlimit((pid_t)process, RLIMIT_RTTIME, &realtime_limit, NULL) < 0) {
+        g_set_error(&error, G_IO_ERROR, g_io_error_from_errno(errno),
+            "Could not constrain the target realtime timeout: %s",
+            g_strerror(errno));
+        goto failed;
+    }
     /* The public Realtime portal maps IDs through the D-Bus sender's PID
      * namespace. A host broker cannot submit a process in an nspawn child
      * namespace through that API after resolving its pidfds. Invoke the same
@@ -1040,11 +1067,15 @@ static void realtime_method(
         goto failed;
     g_dbus_method_invocation_return_value(invocation, reply);
     g_variant_unref(reply);
+    g_variant_unref(limit_value);
+    g_variant_unref(limit_reply);
     close(thread_fd);
     close(process_fd);
     return;
 
 failed:
+    g_clear_pointer(&limit_value, g_variant_unref);
+    g_clear_pointer(&limit_reply, g_variant_unref);
     if (thread_fd >= 0)
         close(thread_fd);
     if (process_fd >= 0)

@@ -335,6 +335,13 @@ class PortalProxyTests(unittest.TestCase):
                 uid=os.getuid(),
                 gid=os.getgid(),
                 name="desktop",
+                host_home=root / "home",
+            )
+            desktop_user.host_home.mkdir()
+            identity = (
+                desktop_user.host_home
+                / ".local/share/applications"
+                / f"{session._portal_app_id('work')}.desktop"
             )
             listeners: list[socket.socket] = []
 
@@ -396,8 +403,10 @@ class PortalProxyTests(unittest.TestCase):
                     self.assertNotIn(
                         "org.freedesktop.portal.FileChooser.*", policy
                     )
+                    self.assertTrue(identity.is_file())
                 finally:
                     proxy.close()
+                    self.assertFalse(identity.exists())
                     for listener in listeners:
                         listener.close()
                     proxy.socket_path.unlink(missing_ok=True)
@@ -409,7 +418,9 @@ class PortalProxyTests(unittest.TestCase):
                 uid=os.getuid(),
                 gid=os.getgid(),
                 name="desktop",
+                host_home=root / "home",
             )
+            desktop_user.host_home.mkdir()
 
             class Process:
                 returncode = None

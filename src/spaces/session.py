@@ -226,6 +226,15 @@ class OpenPathMapping:
 
 
 @dataclass(frozen=True)
+class PortalIdentity:
+    """A hidden host desktop identity pinned against replacement."""
+
+    path: Path
+    device: int
+    inode: int
+
+
+@dataclass(frozen=True)
 class DesktopPlan:
     session_id: str
     binds: tuple[DesktopBind, ...]
@@ -262,6 +271,7 @@ class PortalProxy:
     socket_path: Path
     broker_process: subprocess.Popen[bytes] | None = None
     broker_name: str | None = None
+    identity: PortalIdentity | None = None
 
     def close(self) -> None:
         if self.control_fd >= 0:
@@ -285,6 +295,18 @@ class PortalProxy:
                     self.broker_process.kill()
                     self.broker_process.wait()
             self.broker_process = None
+        if self.identity is not None:
+            try:
+                metadata = self.identity.path.lstat()
+                if (
+                    stat.S_ISREG(metadata.st_mode)
+                    and (metadata.st_dev, metadata.st_ino)
+                    == (self.identity.device, self.identity.inode)
+                ):
+                    self.identity.path.unlink()
+            except FileNotFoundError:
+                pass
+            self.identity = None
 
 
 def prepare_user_paths(
@@ -630,6 +652,90 @@ def _portal_app_id(space_name: str) -> str:
     return f"org.anatase.Spaces.s{digest}"
 
 
+def _install_portal_identity(
+    space_name: str,
+    user: DesktopUser,
+) -> PortalIdentity:
+    """Install the desktop file required by the host portal Registry.
+
+    The Registry deliberately rejects invented application IDs.  Keep the
+    synthetic Space identity in the host user's application directory for the
+    lifetime of the filtered connection, and pin its inode so cleanup never
+    removes a file replaced by the user.
+    """
+
+    app_id = _portal_app_id(space_name)
+    directory = user.host_home
+    for component in (".local", "share", "applications"):
+        directory /= component
+        try:
+            directory.mkdir(mode=0o700)
+            os.chown(directory, user.uid, user.gid)
+        except FileExistsError:
+            pass
+        metadata = directory.lstat()
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != user.uid
+        ):
+            raise core.SpacesError(
+                _("Unsafe host application directory: {path}.", path=directory)
+            )
+    content = (
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        f"Name=Space {space_name}\n"
+        "NoDisplay=true\n"
+        f"Exec=/usr/bin/spaces enter --graphical {space_name} -- /usr/bin/true\n"
+        "DBusActivatable=false\n"
+    ).encode("utf-8")
+    path = directory / f"{app_id}.desktop"
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != user.uid
+            or path.read_bytes() != content
+        ):
+            raise core.SpacesError(
+                _("Refusing to replace host application identity: {path}.", path=path)
+            )
+        return PortalIdentity(path, metadata.st_dev, metadata.st_ino)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{app_id}.", dir=directory
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(content)
+            output.flush()
+            os.fchmod(output.fileno(), 0o600)
+            os.fchown(output.fileno(), user.uid, user.gid)
+            os.fsync(output.fileno())
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            metadata = path.lstat()
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != user.uid
+                or path.read_bytes() != content
+            ):
+                raise core.SpacesError(
+                    _(
+                        "Refusing to replace host application identity: {path}.",
+                        path=path,
+                    )
+                )
+        metadata = path.lstat()
+        return PortalIdentity(path, metadata.st_dev, metadata.st_ino)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _open_mapping_descriptors(
     plan: DesktopPlan,
     rootfs: Path,
@@ -798,17 +904,30 @@ def start_portal_proxy(
     address = f"unix:path=/run/user/{user.uid}/bus"
     broker_process: subprocess.Popen[bytes] | None = None
     broker_name: str | None = None
-    if plan is not None:
-        if rootfs is None or space_home is None:
-            raise ValueError("rootfs and space_home are required with a plan")
-        broker_process, broker_name = _start_open_broker(
-            space_name,
-            user,
-            session_id,
-            plan,
-            rootfs,
-            space_home,
-        )
+    identity = _install_portal_identity(space_name, user)
+    try:
+        if plan is not None:
+            if rootfs is None or space_home is None:
+                raise ValueError("rootfs and space_home are required with a plan")
+            broker_process, broker_name = _start_open_broker(
+                space_name,
+                user,
+                session_id,
+                plan,
+                rootfs,
+                space_home,
+            )
+    except Exception:
+        try:
+            metadata = identity.path.lstat()
+            if (metadata.st_dev, metadata.st_ino) == (
+                identity.device,
+                identity.inode,
+            ):
+                identity.path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
     command = [
         SYSTEMD_RUN,
         "--user",
@@ -847,6 +966,15 @@ def start_portal_proxy(
             except subprocess.TimeoutExpired:
                 broker_process.kill()
                 broker_process.wait()
+        try:
+            metadata = identity.path.lstat()
+            if (metadata.st_dev, metadata.st_ino) == (
+                identity.device,
+                identity.inode,
+            ):
+                identity.path.unlink()
+        except FileNotFoundError:
+            pass
         raise
     os.close(control_write)
     proxy = PortalProxy(
@@ -855,6 +983,7 @@ def start_portal_proxy(
         socket_path,
         broker_process,
         broker_name,
+        identity,
     )
     poller = select.poll()
     poller.register(control_read, select.POLLIN | select.POLLHUP | select.POLLERR)

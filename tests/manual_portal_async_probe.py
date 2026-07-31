@@ -176,6 +176,20 @@ def options(**values: object) -> dict[str, GLib.Variant]:
     return result
 
 
+def sample_image() -> str:
+    for path in (
+        "/usr/share/pixmaps/fedora-logo.png",
+        "/usr/share/pixmaps/archlinux-logo.png",
+        "/usr/share/pixmaps/debian-logo.png",
+    ):
+        if os.path.isfile(path):
+            return path
+    for entry in os.scandir("/usr/share/pixmaps"):
+        if entry.is_file() and entry.name.lower().endswith(".png"):
+            return entry.path
+    raise FileNotFoundError("no PNG test image is installed")
+
+
 def main() -> int:
     probe = Probe()
     selected = set(sys.argv[1:]) or {"core"}
@@ -301,7 +315,7 @@ def main() -> int:
         )
 
     if "dialogs" in selected or "wallpaper" in selected:
-        descriptor = os.open("/usr/share/pixmaps/fedora-logo.png", os.O_RDONLY)
+        descriptor = os.open(sample_image(), os.O_RDONLY)
         try:
             token = probe.token("wallpaper")
             wallpaper_options = options(
@@ -346,7 +360,7 @@ def main() -> int:
         )
 
     if "dialogs" in selected or "dynamiclauncher" in selected:
-        with open("/usr/share/pixmaps/fedora-logo.png", "rb") as stream:
+        with open(sample_image(), "rb") as stream:
             icon = Gio.BytesIcon.new(GLib.Bytes.new(stream.read())).serialize()
         token = probe.token("launcher")
         probe.simple(
@@ -395,11 +409,6 @@ def main() -> int:
                             "(oa{sv})",
                             (session, options(handle_token=follow_token)),
                         ),
-                        "Location": (
-                            "Start",
-                            "(osa{sv})",
-                            (session, "", options(handle_token=follow_token)),
-                        ),
                         "RemoteDesktop": (
                             "SelectDevices",
                             "(oa{sv})",
@@ -446,7 +455,6 @@ def main() -> int:
 
         for interface in (
             "GlobalShortcuts",
-            "Location",
             "RemoteDesktop",
             "ScreenCast",
         ):
@@ -475,6 +483,31 @@ def main() -> int:
             ),
         )
 
+        def location() -> object:
+            session_token = probe.token("location_session")
+            reply, _ = probe.call(
+                "org.freedesktop.portal.Location",
+                "CreateSession",
+                "(a{sv})",
+                (options(session_handle_token=session_token),),
+            )
+            session = reply.unpack()[0]
+            start_token = probe.token("location_start")
+            try:
+                started = probe.request(
+                    "org.freedesktop.portal.Location",
+                    "Start",
+                    "(osa{sv})",
+                    (session, "", options(handle_token=start_token)),
+                    start_token,
+                    wait_seconds=5,
+                )
+                return session, started
+            finally:
+                probe.close(session, SESSION)
+
+        probe.simple("Location direct session and Start", location)
+
         def input_capture() -> object:
             session_token = probe.token("input_session")
             reply, _ = probe.call(
@@ -488,14 +521,17 @@ def main() -> int:
             zones = None
             if session:
                 token = probe.token("zones")
-                zones = probe.request(
-                    "org.freedesktop.portal.InputCapture",
-                    "GetZones",
-                    "(oa{sv})",
-                    (session, options(handle_token=token)),
-                    token,
-                    wait_seconds=3,
-                )
+                try:
+                    zones = probe.request(
+                        "org.freedesktop.portal.InputCapture",
+                        "GetZones",
+                        "(oa{sv})",
+                        (session, options(handle_token=token)),
+                        token,
+                        wait_seconds=3,
+                    )
+                except GLib.Error as error:
+                    zones = f"GetZones error: {error.message}"
             return (
                 results,
                 zones,
@@ -659,6 +695,96 @@ def main() -> int:
             return reply.unpack(), f"fds={count}", metadata
 
         probe.simple("Camera PipeWire remote FD", camera_fd)
+
+    if "screencast-fd" in selected:
+        def screencast_fd() -> object:
+            session_token = probe.token("screencast_session")
+            create_token = probe.token("screencast_create")
+            create_info, create_response = probe.request(
+                "org.freedesktop.portal.ScreenCast",
+                "CreateSession",
+                "(a{sv})",
+                (
+                    options(
+                        handle_token=create_token,
+                        session_handle_token=session_token,
+                    ),
+                ),
+                create_token,
+                wait_seconds=15,
+            )
+            if create_response is None or create_response[0] != 0:
+                raise RuntimeError(
+                    f"CreateSession failed: {create_info}, {create_response}"
+                )
+            session = create_response[1]["session_handle"]
+            try:
+                select_token = probe.token("screencast_select")
+                select_info, select_response = probe.request(
+                    "org.freedesktop.portal.ScreenCast",
+                    "SelectSources",
+                    "(oa{sv})",
+                    (
+                        session,
+                        options(
+                            handle_token=select_token,
+                            types=2,
+                            multiple=False,
+                        ),
+                    ),
+                    select_token,
+                    wait_seconds=15,
+                )
+                if select_response is None or select_response[0] != 0:
+                    raise RuntimeError(
+                        "SelectSources failed: "
+                        f"{select_info}, {select_response}"
+                    )
+                start_token = probe.token("screencast_start")
+                start_info, start_response = probe.request(
+                    "org.freedesktop.portal.ScreenCast",
+                    "Start",
+                    "(osa{sv})",
+                    (
+                        session,
+                        "",
+                        options(handle_token=start_token),
+                    ),
+                    start_token,
+                    wait_seconds=45,
+                )
+                if start_response is None or start_response[0] != 0:
+                    raise RuntimeError(
+                        f"Start failed: {start_info}, {start_response}"
+                    )
+                reply, returned_fds = probe.call(
+                    "org.freedesktop.portal.ScreenCast",
+                    "OpenPipeWireRemote",
+                    "(oa{sv})",
+                    (session, {}),
+                    fds=[],
+                )
+                handle = reply.unpack()[0]
+                count = (
+                    0 if returned_fds is None else returned_fds.get_length()
+                )
+                metadata = None
+                if returned_fds is not None and count:
+                    descriptor = returned_fds.get(handle)
+                    metadata = os.fstat(descriptor)
+                    os.close(descriptor)
+                return (
+                    create_response,
+                    select_response,
+                    start_response,
+                    reply.unpack(),
+                    f"fds={count}",
+                    metadata,
+                )
+            finally:
+                probe.close(session, SESSION)
+
+        probe.simple("ScreenCast stream and PipeWire remote FD", screencast_fd)
 
     return 0
 

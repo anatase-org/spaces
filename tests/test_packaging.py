@@ -436,6 +436,22 @@ class PackagingTests(unittest.TestCase):
             type_enforcement,
         )
         self.assertIn(
+            "unconfined_use_fds(spaces_t)",
+            type_enforcement,
+        )
+        self.assertIn(
+            "allow spaces_t spaces_container_t:fd use;",
+            type_enforcement,
+        )
+        self.assertIn(
+            "rtkit_daemon_dbus_chat(spaces_t)",
+            type_enforcement,
+        )
+        self.assertIn(
+            "rtkit_scheduled(spaces_container_t)",
+            type_enforcement,
+        )
+        self.assertIn(
             "allow spaces_container_t user_tmp_t:file write;",
             type_enforcement,
         )

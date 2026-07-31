@@ -132,6 +132,24 @@ dbus_write_session_tmp_sock_files(spaces_t)
 dbus_session_bus_client(spaces_t)
 dbus_connect_session_bus(spaces_t)
 allow spaces_t userdomain:system start;
+optional_policy(`
+	# Public portals such as Camera, ScreenCast and USB return descriptors
+	# created by unconfined host desktop services.  The filtered proxy
+	# must receive those descriptors before it can relay them into the Space.
+	unconfined_use_fds(spaces_t)
+	rtkit_daemon_dbus_chat(spaces_t)
+')
+
+# File-based portal operations, pidfd translation, and MPRIS artwork pass
+# descriptors in the other direction.  Those descriptors originate in the
+# Space portal process and must pass through the same filtered proxy.
+allow spaces_t spaces_container_t:fd use;
+
+optional_policy(`
+	# The integration broker validates process and thread pidfds before it
+	# asks RealtimeKit to adjust a thread owned by the Space payload.
+	rtkit_scheduled(spaces_container_t)
+')
 
 ########################################
 #

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import os
 import signal
 
 import gi
@@ -17,6 +18,20 @@ ITEM_PATH = "/StatusNotifierItem"
 MENU_PATH = "/MenuBar"
 PLAYER_NAME = "org.mpris.MediaPlayer2.SpacesProbe"
 PLAYER_PATH = "/org/mpris/MediaPlayer2"
+
+
+def sample_image() -> str:
+    for path in (
+        "/usr/share/pixmaps/fedora-logo.png",
+        "/usr/share/pixmaps/archlinux-logo.png",
+        "/usr/share/pixmaps/debian-logo.png",
+    ):
+        if os.path.isfile(path):
+            return path
+    for entry in os.scandir("/usr/share/pixmaps"):
+        if entry.is_file() and entry.name.lower().endswith(".png"):
+            return entry.path
+    raise FileNotFoundError("no PNG test image is installed")
 
 ITEM_XML = """
 <node><interface name="org.kde.StatusNotifierItem">
@@ -188,7 +203,9 @@ def main() -> int:
                 "Metadata": GLib.Variant("a{sv}", {
                     "mpris:trackid": GLib.Variant("o", "/org/mpris/MediaPlayer2/track/1"),
                     "xesam:title": GLib.Variant("s", "Spaces probe track"),
-                    "mpris:artUrl": GLib.Variant("s", "file:///usr/share/pixmaps/fedora-logo.png"),
+                    "mpris:artUrl": GLib.Variant(
+                        "s", Gio.File.new_for_path(sample_image()).get_uri()
+                    ),
                 }),
                 "Position": GLib.Variant("x", 123456), "MinimumRate": GLib.Variant("d", 1.0),
                 "MaximumRate": GLib.Variant("d", 1.0), "CanGoNext": GLib.Variant("b", True),
