@@ -945,6 +945,7 @@ def start_portal_proxy(
         "--scope",
         "--quiet",
         f"--unit={unit}",
+        "--description=Spaces desktop portal proxy",
         "--",
         XDG_DBUS_PROXY,
         address,
@@ -1196,6 +1197,18 @@ def _replace_text(path: Path, contents: str, mode: int = 0o644) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _replace_text_if_changed(
+    path: Path, contents: str, mode: int = 0o644
+) -> bool:
+    try:
+        if path.read_text(encoding="utf-8") == contents:
+            return False
+    except (FileNotFoundError, OSError, UnicodeError):
+        pass
+    _replace_text(path, contents, mode)
+    return True
+
+
 def _gtk_decoration_layout(
     config: Path,
     home: Path,
@@ -1247,32 +1260,33 @@ def _write_desktop_settings(
 
     dconf_root = generated_root / "dconf"
     keyfiles = dconf_root / "spaces-host.d"
-    _replace_text(
+    keyfiles_changed = _replace_text_if_changed(
         keyfiles / "00-window-buttons",
         "[org/gnome/desktop/wm/preferences]\n"
         f"button-layout='{layout}'\n",
     )
     database = dconf_root / "spaces-host"
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=".spaces-host.", dir=dconf_root
-    )
-    os.close(descriptor)
-    temporary = Path(temporary_name)
-    try:
-        temporary.unlink()
-        subprocess.run(
-            [DCONF, "compile", str(temporary), str(keyfiles)],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            timeout=5,
+    if keyfiles_changed or not database.is_file():
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=".spaces-host.", dir=dconf_root
         )
-        os.chmod(temporary, 0o644)
-        os.replace(temporary, database)
-    finally:
-        temporary.unlink(missing_ok=True)
+        os.close(descriptor)
+        temporary = Path(temporary_name)
+        try:
+            temporary.unlink()
+            subprocess.run(
+                [DCONF, "compile", str(temporary), str(keyfiles)],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                timeout=5,
+            )
+            os.chmod(temporary, 0o644)
+            os.replace(temporary, database)
+        finally:
+            temporary.unlink(missing_ok=True)
     profile = dconf_root / "profile"
-    _replace_text(
+    _replace_text_if_changed(
         profile,
         "user-db:user\n"
         f"file-db:{guest_root}/dconf/spaces-host\n",
@@ -2070,7 +2084,6 @@ class DesktopController:
             self.deactivate(user)
             return
 
-        set_status(self.space_name, user.uid, "pending")
         generation_id = (
             selected.session_id if selected is not None else "credentials"
         )
@@ -2130,14 +2143,9 @@ class DesktopController:
             )
             raise DesktopSetupError(str(error)) from error
         if current is not None and current.plan == plan:
-            set_status(
-                self.space_name,
-                user.uid,
-                "active",
-                session_id=current.plan.session_id,
-            )
             self._repair_portal(user, current)
             return
+        set_status(self.space_name, user.uid, "pending")
         if previous is not None:
             self._deactivate(user, previous, remove_generated=False)
         try:

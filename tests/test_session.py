@@ -433,6 +433,15 @@ class DesktopPathTests(unittest.TestCase):
             profile, database = session._write_desktop_settings(
                 generated, PurePosixPath(str(generated)), layout
             )
+            profile_inode = profile.stat().st_ino
+            database_inode = database.stat().st_ino
+            repeated_profile, repeated_database = (
+                session._write_desktop_settings(
+                    generated, PurePosixPath(str(generated)), layout
+                )
+            )
+            self.assertEqual(repeated_profile.stat().st_ino, profile_inode)
+            self.assertEqual(repeated_database.stat().st_ino, database_inode)
             self.assertTrue(database.is_file())
             self.assertGreater(database.stat().st_size, 0)
             self.assertEqual(

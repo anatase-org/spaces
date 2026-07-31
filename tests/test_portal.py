@@ -387,6 +387,10 @@ class PortalProxyTests(unittest.TestCase):
                         f"work-{generation}.scope",
                         command,
                     )
+                    self.assertIn(
+                        "--description=Spaces desktop portal proxy",
+                        command,
+                    )
                     self.assertEqual(
                         command[command.index(session.XDG_DBUS_PROXY) + 1],
                         f"unix:path=/run/user/{os.getuid()}/bus",
