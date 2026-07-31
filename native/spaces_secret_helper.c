@@ -27,6 +27,9 @@
 #define KWALLET_KEY_SIZE 56
 #define PORTAL_TIMEOUT_SECONDS 30
 #define PROVIDER_TIMEOUT_SECONDS 15
+#ifndef RENAME_NOREPLACE
+#define RENAME_NOREPLACE 1
+#endif
 
 extern char **environ;
 
@@ -69,6 +72,13 @@ typedef struct {
     guint response;
     char *token;
 } PortalResponse;
+
+typedef enum {
+    WALLET_OPEN,
+    WALLET_CLOSED,
+    WALLET_TIMEOUT,
+    WALLET_ERROR,
+} WalletState;
 
 static void secure_clear(void *data, gsize size)
 {
@@ -436,7 +446,7 @@ static gboolean wait_for_owner(
     return FALSE;
 }
 
-static gboolean wallet_is_open(
+static WalletState wallet_open_state(
     GDBusConnection *bus,
     gboolean kf6
 )
@@ -446,19 +456,198 @@ static gboolean wallet_is_open(
     const char *path = kf6
         ? "/ksecretd" : "/modules/kwalletd5";
     GVariant *reply;
+    GError *error = NULL;
     gboolean open = FALSE;
 
     reply = g_dbus_connection_call_sync(
         bus, name, path, "org.kde.KWallet", "isOpen",
         g_variant_new("(s)", "spaces-managed-v1"),
         G_VARIANT_TYPE("(b)"), G_DBUS_CALL_FLAGS_NONE,
-        3000, NULL, NULL
+        3000, NULL, &error
     );
+    if (reply == NULL) {
+        gboolean timeout = g_error_matches(
+            error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT
+        ) || g_error_matches(error, G_DBUS_ERROR, G_DBUS_ERROR_NO_REPLY)
+            || g_error_matches(error, G_DBUS_ERROR, G_DBUS_ERROR_TIMEOUT)
+            || g_error_matches(
+                error, G_DBUS_ERROR, G_DBUS_ERROR_TIMED_OUT
+            );
+
+        g_clear_error(&error);
+        return timeout ? WALLET_TIMEOUT : WALLET_ERROR;
+    }
+    g_variant_get(reply, "(b)", &open);
+    g_variant_unref(reply);
+    return open ? WALLET_OPEN : WALLET_CLOSED;
+}
+
+static pid_t connection_pid(GDBusConnection *bus, const char *name)
+{
+    GVariant *reply = g_dbus_connection_call_sync(
+        bus, DBUS_NAME, DBUS_PATH, DBUS_NAME,
+        "GetConnectionUnixProcessID", g_variant_new("(s)", name),
+        G_VARIANT_TYPE("(u)"), G_DBUS_CALL_FLAGS_NONE, 3000, NULL, NULL
+    );
+    guint pid = 0;
+
     if (reply != NULL) {
-        g_variant_get(reply, "(b)", &open);
+        g_variant_get(reply, "(u)", &pid);
         g_variant_unref(reply);
     }
-    return open;
+    return pid > 1 && pid <= INT32_MAX ? (pid_t)pid : -1;
+}
+
+static void kill_provider(
+    GDBusConnection *bus,
+    const char *name,
+    pid_t child
+)
+{
+    pid_t owner = connection_pid(bus, name);
+    gint64 deadline;
+
+    if (child > 1) {
+        int status;
+        pid_t waited = waitpid(child, &status, WNOHANG);
+
+        if (waited == child || (waited < 0 && errno == ECHILD))
+            child = -1;
+    }
+    if (owner > 1 && owner != getpid())
+        (void)kill(owner, SIGKILL);
+    if (child > 1 && child != owner && child != getpid())
+        (void)kill(child, SIGKILL);
+    if (child > 1) {
+        int status;
+
+        while (waitpid(child, &status, 0) < 0 && errno == EINTR)
+            ;
+    }
+    deadline = g_get_monotonic_time() + 3 * G_TIME_SPAN_SECOND;
+    while (name_has_owner(bus, name)
+        && g_get_monotonic_time() < deadline)
+        g_usleep(50000);
+}
+
+static int rename_noreplace(const char *source, const char *destination)
+{
+#ifdef SYS_renameat2
+    int result = (int)syscall(
+            SYS_renameat2, AT_FDCWD, source, AT_FDCWD, destination,
+            RENAME_NOREPLACE
+        );
+
+    if (result == 0)
+        return 0;
+    if (errno != ENOSYS)
+        return -1;
+#endif
+    if (link(source, destination) < 0)
+        return -1;
+    if (unlink(source) == 0)
+        return 0;
+    {
+        int saved_errno = errno;
+
+        (void)unlink(destination);
+        errno = saved_errno;
+    }
+    return -1;
+}
+
+static int nofollow_stat(const char *path, struct stat *metadata)
+{
+#ifdef SYS_newfstatat
+    return (int)syscall(
+        SYS_newfstatat, AT_FDCWD, path, metadata, AT_SYMLINK_NOFOLLOW
+    );
+#else
+    errno = ENOSYS;
+    return -1;
+#endif
+}
+
+gboolean spaces_backup_failed_wallet(
+    const char *data_directory,
+    guint *backup_number
+)
+{
+    static const char *names[] = {
+        "spaces-managed-v1.kwl",
+        "spaces-managed-v1.salt",
+        "spaces-managed-v1_attributes.json",
+    };
+    char *directory = NULL;
+    char *sources[G_N_ELEMENTS(names)] = {NULL};
+    char *destinations[G_N_ELEMENTS(names)] = {NULL};
+    gboolean present[G_N_ELEMENTS(names)] = {FALSE};
+    guint number;
+    guint moved = 0;
+    gboolean success = FALSE;
+
+    if (data_directory == NULL || *data_directory == '\0')
+        return FALSE;
+    directory = g_build_filename(data_directory, "kwalletd", NULL);
+    for (guint index = 0; index < G_N_ELEMENTS(names); index++) {
+        struct stat metadata;
+
+        sources[index] = g_build_filename(directory, names[index], NULL);
+        if (nofollow_stat(sources[index], &metadata) == 0) {
+            if (!S_ISREG(metadata.st_mode) || metadata.st_uid != getuid())
+                goto out;
+            present[index] = TRUE;
+        } else if (errno != ENOENT) {
+            goto out;
+        }
+    }
+    if (!present[0])
+        goto out;
+    for (number = 1; number < G_MAXUINT; number++) {
+        gboolean available = TRUE;
+
+        for (guint index = 0; index < G_N_ELEMENTS(names); index++) {
+            struct stat metadata;
+
+            g_clear_pointer(&destinations[index], g_free);
+            destinations[index] = g_strdup_printf(
+                "%s.%u", sources[index], number
+            );
+            if (nofollow_stat(destinations[index], &metadata) == 0
+                || errno != ENOENT) {
+                available = FALSE;
+                break;
+            }
+        }
+        if (available)
+            break;
+    }
+    if (number == G_MAXUINT)
+        goto out;
+    for (guint index = 0; index < G_N_ELEMENTS(names); index++) {
+        if (!present[index])
+            continue;
+        if (rename_noreplace(sources[index], destinations[index]) < 0)
+            goto rollback;
+        moved |= 1U << index;
+    }
+    if (backup_number != NULL)
+        *backup_number = number;
+    success = TRUE;
+    goto out;
+
+rollback:
+    for (guint index = G_N_ELEMENTS(names); index-- > 0;) {
+        if (moved & (1U << index))
+            (void)rename(destinations[index], sources[index]);
+    }
+out:
+    for (guint index = 0; index < G_N_ELEMENTS(names); index++) {
+        g_free(destinations[index]);
+        g_free(sources[index]);
+    }
+    g_free(directory);
+    return success;
 }
 
 static gboolean send_environment(const char *path)
@@ -634,6 +823,8 @@ static int activate_provider(
     gboolean storage_owned = name_has_owner(bus, storage_name);
     guint8 portal_secret[SECRET_SIZE];
     guint8 key[KWALLET_KEY_SIZE];
+    WalletState state;
+    gboolean wallet_backed_up = FALSE;
     pid_t child = -1;
     int result = 1;
 
@@ -649,11 +840,43 @@ static int activate_provider(
         );
         goto out;
     }
-    if (storage_owned && !wallet_is_open(bus, kf6)) {
-        g_printerr(
-            "spaces-secret-helper: managed wallet is not open\n"
-        );
-        goto out;
+    if (storage_owned) {
+        state = wallet_open_state(bus, kf6);
+        if (state == WALLET_TIMEOUT) {
+            kill_provider(bus, storage_name, -1);
+            (void)unlink(marker);
+            g_printerr(
+                "spaces-secret-helper: KWallet timed out and was killed\n"
+            );
+            goto out;
+        }
+        if (state == WALLET_ERROR) {
+            g_printerr(
+                "spaces-secret-helper: could not query the managed wallet\n"
+            );
+            goto out;
+        }
+        if (state == WALLET_CLOSED) {
+            guint backup;
+
+            kill_provider(bus, storage_name, -1);
+            (void)unlink(marker);
+            if (!spaces_backup_failed_wallet(
+                    g_get_user_data_dir(), &backup
+                )) {
+                g_printerr(
+                    "spaces-secret-helper: could not back up the locked wallet\n"
+                );
+                goto out;
+            }
+            wallet_backed_up = TRUE;
+            storage_owned = FALSE;
+            g_printerr(
+                "spaces-secret-helper: backed up the locked wallet as "
+                "spaces-managed-v1.kwl.%u\n",
+                backup
+            );
+        }
     }
     if (!storage_owned) {
         if (!retrieve_portal_secret(bus, portal_secret)
@@ -663,20 +886,66 @@ static int activate_provider(
             );
             goto out;
         }
-        child = spawn_storage_provider(storage_program, key);
-        secure_clear(key, sizeof(key));
         secure_clear(portal_secret, sizeof(portal_secret));
-        if (child <= 0
-            || !wait_for_owner(bus, storage_name, child)
-            || !wallet_is_open(bus, kf6)
-            || !create_marker(marker)) {
-            if (child > 0)
-                kill(child, SIGTERM);
+        for (;;) {
+            child = spawn_storage_provider(storage_program, key);
+            if (child <= 0
+                || !wait_for_owner(bus, storage_name, child)) {
+                if (child > 0)
+                    kill_provider(bus, storage_name, child);
+                child = -1;
+                (void)unlink(marker);
+                g_printerr(
+                    "spaces-secret-helper: KWallet startup timed out and "
+                    "was killed\n"
+                );
+                goto out;
+            }
+            state = wallet_open_state(bus, kf6);
+            if (state == WALLET_OPEN)
+                break;
+            kill_provider(bus, storage_name, child);
+            child = -1;
+            (void)unlink(marker);
+            if (state == WALLET_TIMEOUT) {
+                g_printerr(
+                    "spaces-secret-helper: KWallet timed out and was killed\n"
+                );
+                goto out;
+            }
+            if (state == WALLET_CLOSED && !wallet_backed_up) {
+                guint backup;
+
+                if (!spaces_backup_failed_wallet(
+                        g_get_user_data_dir(), &backup
+                    )) {
+                    g_printerr(
+                        "spaces-secret-helper: could not back up the locked "
+                        "wallet\n"
+                    );
+                    goto out;
+                }
+                wallet_backed_up = TRUE;
+                g_printerr(
+                    "spaces-secret-helper: backed up the locked wallet as "
+                    "spaces-managed-v1.kwl.%u\n",
+                    backup
+                );
+                continue;
+            }
             g_printerr(
-                "spaces-secret-helper: KWallet did not become ready\n"
+                state == WALLET_CLOSED
+                    ? "spaces-secret-helper: recreated KWallet did not open\n"
+                    : "spaces-secret-helper: could not query KWallet\n"
             );
             goto out;
         }
+        if (!create_marker(marker)) {
+            kill_provider(bus, storage_name, child);
+            child = -1;
+            goto out;
+        }
+        secure_clear(key, sizeof(key));
     }
     if (g_str_equal(activation_name, "org.kde.kwalletd5")
         && kf6

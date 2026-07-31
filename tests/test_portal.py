@@ -1611,6 +1611,11 @@ class PortalNativeTests(unittest.TestCase):
             helper.spaces_derive_kwallet_key.restype = ctypes.c_int
             helper.spaces_prepare_headless_qt.argtypes = []
             helper.spaces_prepare_headless_qt.restype = None
+            helper.spaces_backup_failed_wallet.argtypes = [
+                ctypes.c_char_p,
+                ctypes.POINTER(ctypes.c_uint),
+            ]
+            helper.spaces_backup_failed_wallet.restype = ctypes.c_int
 
             host = bytes(range(32))
             host_buffer = (ctypes.c_ubyte * len(host)).from_buffer_copy(host)
@@ -1652,6 +1657,33 @@ class PortalNativeTests(unittest.TestCase):
                     "sha512",
                 )[:56],
             )
+
+            wallet_directory = root / "wallet-data" / "kwalletd"
+            wallet_directory.mkdir(parents=True)
+            files = {
+                "spaces-managed-v1.kwl": b"wallet",
+                "spaces-managed-v1.salt": b"salt",
+                "spaces-managed-v1_attributes.json": b"attributes",
+            }
+            for name, contents in files.items():
+                (wallet_directory / name).write_bytes(contents)
+            (wallet_directory / "spaces-managed-v1.kwl.1").write_bytes(
+                b"earlier backup"
+            )
+            backup_number = ctypes.c_uint()
+            self.assertTrue(
+                helper.spaces_backup_failed_wallet(
+                    os.fsencode(root / "wallet-data"),
+                    ctypes.byref(backup_number),
+                )
+            )
+            self.assertEqual(backup_number.value, 2)
+            for name, contents in files.items():
+                self.assertFalse((wallet_directory / name).exists())
+                self.assertEqual(
+                    (wallet_directory / f"{name}.2").read_bytes(),
+                    contents,
+                )
 
             libc = ctypes.CDLL(None)
             libc.getenv.argtypes = [ctypes.c_char_p]

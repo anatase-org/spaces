@@ -218,7 +218,14 @@ spaces enter "$space" -- secret-tool lookup spaces-methodology key
 
 Expect the lookup to return `spaces-value`, no host wallet file to be mounted
 inside the Space, and a different Space not to unlock or read this Space's
-wallet.  If the image has no KWallet/Secret Service implementation, activation
+wallet.  An explicit KWallet `isOpen=false` backs up the managed `.kwl`,
+`.salt`, and `_attributes.json` files with the first free shared numeric suffix
+before recreating the wallet.  A D-Bus timeout kills the provider and leaves
+the wallet files untouched.  Test the timeout branch with a managed
+`dbus-test-tool echo --sleep-ms=100000` owner and compare the wallet checksum
+before and after the helper call; the helper must fail, remove the owner, and
+preserve the checksum.  If the image has no KWallet/Secret Service
+implementation, activation
 is optional and this test is recorded as unavailable rather than a portal
 router failure.  SSH/GPG credential-agent forwarding and desktop shortcut
 export are likewise outside the D-Bus interface matrix; retain their automated
