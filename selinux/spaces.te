@@ -46,6 +46,11 @@ allow spaces_container_t spaces_file_t:file entrypoint;
 
 virt_sandbox_net_domain(spaces_container_t)
 
+# Network-admin spaces are capability-gated at launch.  Permit the SELinux
+# socket classes required to configure packet filters and TUN interfaces.
+allow spaces_container_t self:netlink_netfilter_socket create_socket_perms;
+allow spaces_container_t self:tun_socket create_socket_perms;
+
 ########################################
 #
 # Spaces host supervisor
