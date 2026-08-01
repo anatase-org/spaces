@@ -209,6 +209,8 @@ class CoreTests(unittest.TestCase):
             (home / ".ssh").mkdir()
             (home / "file.txt").write_text("not a folder")
             (home / ".hidden").write_text("hidden file")
+            (home / ".bash_history").write_text("bash history")
+            (home / ".zhistory").write_text("zsh history")
             (home / "linked").symlink_to(home / "Documents", target_is_directory=True)
             (home / "linked-file").symlink_to(home / "file.txt")
             self.assertEqual(
@@ -217,10 +219,8 @@ class CoreTests(unittest.TestCase):
                     "Documents",
                     "Downloads",
                     "Projects",
-                    ".bash_history",
                     ".hidden",
                     ".ssh/config",
-                    ".zhistory",
                     "file.txt",
                 ],
             )
@@ -288,8 +288,6 @@ class CoreTests(unittest.TestCase):
                             "Projects",
                             ".bashrc",
                             ".zshrc",
-                            ".bash_history",
-                            ".zhistory",
                             ".ssh/config",
                         ],
                         "administrator": True,

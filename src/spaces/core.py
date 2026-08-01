@@ -31,9 +31,8 @@ DEVICE_LEVELS = ("disabled", "basic", "admin", "full")
 DEFAULT_HOME_FOLDERS = ("Projects", "Downloads")
 DEFAULT_HOME_FILES = (
     ".ssh/config",
-    ".zhistory",
-    ".bash_history",
 )
+EXCLUDED_HOME_FILES = frozenset({".bash_history", ".zhistory"})
 DEFAULT_HOME_MOUNTS = (*DEFAULT_HOME_FOLDERS, *DEFAULT_HOME_FILES)
 PRESET_NAMES = ("basic", "develop", "custom")
 PERMISSION_PRESETS: dict[str, dict[str, dict[str, Any]]] = {
@@ -67,8 +66,6 @@ PERMISSION_PRESETS: dict[str, dict[str, dict[str, Any]]] = {
                 "Projects",
                 ".bashrc",
                 ".zshrc",
-                ".bash_history",
-                ".zhistory",
                 ".ssh/config",
             ],
             "administrator": True,
@@ -162,6 +159,8 @@ def discover_home_folders(home: Path) -> list[str]:
     try:
         for entry in home.iterdir():
             if entry.is_symlink():
+                continue
+            if entry.name in EXCLUDED_HOME_FILES:
                 continue
             if not entry.name.startswith(".") and entry.is_dir():
                 directories.add(entry.name)
