@@ -442,7 +442,8 @@ userdom_exec_user_home_content_files(spaces_container_t)
 # A user's selected /run/media directory is bind-mounted read-write. Native
 # Linux filesystems without host labels appear as unlabeled_t, while removable
 # media commonly uses removable_t and the user mount directory itself uses
-# mnt_t.
+# mnt_t. The launcher creates /run/media/<user> when the desktop automounter
+# has not created it yet.
 gen_require(`
 	type mnt_t;
 	type removable_t;
@@ -451,6 +452,7 @@ gen_require(`
 allow spaces_t { mnt_t removable_t unlabeled_t }:dir {
 	getattr open read search
 };
+allow spaces_t mnt_t:dir { add_name create setattr write };
 allow spaces_container_t { mnt_t removable_t unlabeled_t }:dir manage_dir_perms;
 allow spaces_container_t { mnt_t removable_t unlabeled_t }:file manage_file_perms;
 allow spaces_container_t { mnt_t removable_t unlabeled_t }:file { execute execute_no_trans map };

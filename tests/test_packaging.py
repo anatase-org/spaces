@@ -523,6 +523,10 @@ class PackagingTests(unittest.TestCase):
             type_enforcement,
         )
         self.assertIn(
+            "allow spaces_t mnt_t:dir { add_name create setattr write };",
+            type_enforcement,
+        )
+        self.assertIn(
             "allow spaces_container_t { mnt_t removable_t unlabeled_t }:dir "
             "manage_dir_perms;",
             type_enforcement,
