@@ -2422,13 +2422,71 @@ static void mirror_free(gpointer data)
     g_free(mirror);
 }
 
-static char *mirror_host_name(Portal *portal, const char *prefix)
+static char *mirror_app_component(const char *value)
 {
-    char *digest = g_compute_checksum_for_string(G_CHECKSUM_SHA256,
-        portal->space_name, -1);
-    char *name = g_strdup_printf("%s.spaces.s%.16s.i%u", prefix, digest,
-        ++portal->mirror_serial);
-    g_free(digest);
+    GString *component = g_string_sized_new(32);
+    const unsigned char *cursor;
+    gboolean separator = FALSE;
+    for (cursor = (const unsigned char *)value;
+         *cursor != '\0' && component->len < 63; cursor++) {
+        if (g_ascii_isalnum(*cursor) || *cursor == '_' || *cursor == '-') {
+            g_string_append_c(component, g_ascii_tolower(*cursor));
+            separator = FALSE;
+        } else if (!separator && component->len != 0) {
+            g_string_append_c(component, '-');
+            separator = TRUE;
+        }
+    }
+    while (component->len != 0
+        && component->str[component->len - 1] == '-')
+        g_string_truncate(component, component->len - 1);
+    if (component->len == 0) g_string_append(component, "app");
+    return g_string_free(component, FALSE);
+}
+
+static char *status_item_app(Mirror *mirror)
+{
+    GVariant *reply = g_dbus_connection_call_sync(mirror->portal->guest,
+        mirror->guest_name, mirror->guest_path,
+        "org.freedesktop.DBus.Properties", "Get",
+        g_variant_new("(ss)", STATUS_ITEM_INTERFACE, "Id"),
+        G_VARIANT_TYPE("(v)"), G_DBUS_CALL_FLAGS_NONE, 3000, NULL, NULL);
+    char *app = NULL;
+    if (reply != NULL) {
+        GVariant *value;
+        g_variant_get(reply, "(v)", &value);
+        if (g_variant_is_of_type(value, G_VARIANT_TYPE_STRING))
+            app = mirror_app_component(g_variant_get_string(value, NULL));
+        g_variant_unref(value);
+        g_variant_unref(reply);
+    }
+    if (app == NULL) {
+        const char *last = strrchr(mirror->guest_name, '.');
+        app = mirror_app_component(last == NULL
+            ? mirror->guest_name : last + 1);
+    }
+    return app;
+}
+
+static char *mpris_app(const char *guest_name)
+{
+    const char *start = g_str_has_prefix(guest_name, MPRIS_PREFIX)
+        ? guest_name + strlen(MPRIS_PREFIX) : guest_name;
+    const char *end = strchr(start, '.');
+    char *value = end == NULL ? g_strdup(start) : g_strndup(start, end - start);
+    char *app = mirror_app_component(value);
+    g_free(value);
+    return app;
+}
+
+static char *mirror_host_name(Portal *portal, const char *prefix,
+    const char *app, gboolean status_item)
+{
+    char *space_app = g_strdup_printf("%s-%s", portal->space_name, app);
+    char *name = g_strdup_printf("%s.spaces.space.%s%s.%s.i%u", prefix,
+        g_ascii_isdigit(space_app[0]) ? "s" : "", space_app,
+        status_item ? "item" : "player", ++portal->mirror_serial);
+    g_free(space_app);
     return name;
 }
 
@@ -2451,6 +2509,7 @@ static gboolean create_mirror(Portal *portal, const char *key,
     GError **error)
 {
     Mirror *mirror;
+    char *app;
     GVariant *menu_reply = NULL, *menu_value = NULL;
     const char *menu_path = NULL;
     if (g_hash_table_contains(portal->mirrors, key)) return TRUE;
@@ -2460,14 +2519,19 @@ static gboolean create_mirror(Portal *portal, const char *key,
     mirror->guest_name = g_strdup(guest_name);
     mirror->guest_path = g_strdup(guest_path);
     mirror->status_item = status_item;
-    mirror->host_name = mirror_host_name(portal,
-        status_item ? STATUS_ITEM_INTERFACE : "org.mpris.MediaPlayer2");
     mirror->nodes = g_ptr_array_new_with_free_func((GDestroyNotify)g_dbus_node_info_unref);
     mirror->paths = g_ptr_array_new_with_free_func(g_free);
     mirror->artwork_uris = g_ptr_array_new_with_free_func(g_free);
     mirror->registrations = g_array_new(FALSE, FALSE, sizeof(guint));
-    if (!name_owner(portal, guest_name, &mirror->guest_owner, error)
-        || !mirror_add_path(mirror, guest_path, error)) {
+    if (!name_owner(portal, guest_name, &mirror->guest_owner, error)) {
+        mirror_free(mirror); return FALSE;
+    }
+    app = status_item ? status_item_app(mirror) : mpris_app(guest_name);
+    mirror->host_name = mirror_host_name(portal,
+        status_item ? STATUS_ITEM_INTERFACE : "org.mpris.MediaPlayer2",
+        app, status_item);
+    g_free(app);
+    if (!mirror_add_path(mirror, guest_path, error)) {
         mirror_free(mirror); return FALSE;
     }
     if (status_item) {

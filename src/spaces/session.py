@@ -649,10 +649,29 @@ def _portal_policy_arguments(broker_name: str | None = None) -> list[str]:
     return arguments
 
 
+def _dbus_name_value(value: str) -> str:
+    """Return a readable, reversible D-Bus name component value."""
+
+    escaped: list[str] = []
+    for byte in value.encode("utf-8"):
+        character = chr(byte)
+        if character.isascii() and (character.isalnum() or character == "-"):
+            escaped.append(character)
+        elif character == "_":
+            escaped.append("__")
+        else:
+            escaped.append(f"_{byte:02x}")
+    return "".join(escaped)
+
+
 def _broker_name(space_name: str, uid: int, session_id: str) -> str:
-    identity = f"{space_name}\0{uid}\0{session_id}".encode("utf-8")
-    generation = hashlib.sha256(identity).hexdigest()[:24]
-    return f"org.anatase.Spaces.Integration.s{generation}"
+    identity = (
+        f"{_dbus_name_value(space_name)}-u{uid}-"
+        f"s{_dbus_name_value(session_id)}"
+    )
+    if identity[0].isdigit():
+        identity = f"s{identity}"
+    return f"org.anatase.Spaces.Integration.{identity}"
 
 
 def _portal_app_id(space_name: str) -> str:

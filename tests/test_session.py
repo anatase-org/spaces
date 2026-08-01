@@ -59,6 +59,20 @@ def user(
 
 
 class GraphicalSessionTests(unittest.TestCase):
+    def test_integration_broker_name_is_readable_and_session_scoped(self) -> None:
+        self.assertEqual(
+            session._broker_name("arch", 1000, "2"),
+            "org.anatase.Spaces.Integration.arch-u1000-s2",
+        )
+        self.assertEqual(
+            session._broker_name("project_dev", 42, "seat/2"),
+            "org.anatase.Spaces.Integration.project__dev-u42-sseat_2f2",
+        )
+        self.assertEqual(
+            session._broker_name("2d", 7, "3"),
+            "org.anatase.Spaces.Integration.s2d-u7-s3",
+        )
+
     def test_selects_only_matching_active_local_graphical_user_session(self) -> None:
         records = (
             graphical("1", session_type="tty"),
