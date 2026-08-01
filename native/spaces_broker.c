@@ -23,6 +23,7 @@
 #define RTKIT_PATH "/org/freedesktop/RealtimeKit1"
 #define SECRET_MAXIMUM (64 * 1024)
 #define SECRET_SIZE 64
+#define STAGED_FILE_MAXIMUM (32 * 1024 * 1024)
 
 static const char open_xml[] =
     "<node>"
@@ -60,8 +61,7 @@ static const char open_xml[] =
     "   <arg type='a{sv}' direction='out' name='results'/>"
     "  </method>"
     "  <method name='StageFile'>"
-    "   <arg type='s' direction='in' name='guest_path'/>"
-    "   <arg type='h' direction='in' name='proof_fd'/>"
+    "   <arg type='h' direction='in' name='source_fd'/>"
     "   <arg type='s' direction='out' name='host_uri'/>"
     "  </method>"
     "  <method name='ResolvePath'>"
@@ -492,28 +492,70 @@ static char *broker_launcher_id(Broker *broker, const char *desktop_id)
 static int invocation_fd(GDBusMethodInvocation *invocation, int handle,
     GError **error);
 
+static gboolean copy_staged_fd(int source, int output, const char *kind,
+    GError **error)
+{
+    struct stat metadata;
+    guint8 buffer[64 * 1024];
+    gsize total = 0;
+    off_t source_offset = 0;
+
+    if (fstat(source, &metadata) < 0) {
+        g_set_error(error, G_IO_ERROR, g_io_error_from_errno(errno),
+            "Could not inspect %s input: %s", kind, g_strerror(errno));
+        return FALSE;
+    }
+    if (!S_ISREG(metadata.st_mode) || metadata.st_size < 0
+        || metadata.st_size > STAGED_FILE_MAXIMUM) {
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+            "%s input must be a regular file no larger than 32 MiB", kind);
+        return FALSE;
+    }
+    for (;;) {
+        ssize_t count = pread(source, buffer, sizeof(buffer), source_offset);
+        gsize output_offset = 0;
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) {
+            g_set_error(error, G_IO_ERROR, g_io_error_from_errno(errno),
+                "Could not read %s input: %s", kind, g_strerror(errno));
+            return FALSE;
+        }
+        if (count == 0) return TRUE;
+        total += (gsize)count;
+        if (total > STAGED_FILE_MAXIMUM) {
+            g_set_error(error, G_IO_ERROR, G_IO_ERROR_NO_SPACE,
+                "%s input exceeds the 32 MiB staging limit", kind);
+            return FALSE;
+        }
+        while (output_offset < (gsize)count) {
+            ssize_t written = write(output, buffer + output_offset,
+                (gsize)count - output_offset);
+            if (written < 0 && errno == EINTR) continue;
+            if (written <= 0) {
+                g_set_error(error, G_IO_ERROR,
+                    written < 0 ? g_io_error_from_errno(errno)
+                                : G_IO_ERROR_FAILED,
+                    "Could not write staged %s: %s", kind,
+                    written < 0 ? g_strerror(errno) : "short write");
+                return FALSE;
+            }
+            output_offset += (gsize)written;
+        }
+        source_offset += count;
+    }
+}
+
 static int stage_wallpaper_fd(GDBusMethodInvocation *invocation, gint handle,
     char **staged_path, GError **error)
 {
     int source = -1;
     int output = -1;
     int staged = -1;
-    struct stat metadata;
     char *directory = NULL;
     char *token = NULL;
-    guint8 buffer[64 * 1024];
-    gsize total = 0;
-    off_t offset = 0;
 
     source = invocation_fd(invocation, handle, error);
     if (source < 0) goto failed;
-    if (fstat(source, &metadata) < 0) goto io_failed;
-    if (!S_ISREG(metadata.st_mode) || metadata.st_size < 0
-        || metadata.st_size > 32 * 1024 * 1024) {
-        g_set_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
-            "Wallpaper input must be a regular file no larger than 32 MiB");
-        goto failed;
-    }
     directory = g_build_filename(g_get_user_cache_dir(), "spaces",
         "wallpaper", NULL);
     if (g_mkdir_with_parents(directory, 0700) < 0) goto io_failed;
@@ -522,27 +564,7 @@ static int stage_wallpaper_fd(GDBusMethodInvocation *invocation, gint handle,
     output = open(*staged_path,
         O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
     if (output < 0) goto io_failed;
-    for (;;) {
-        ssize_t count = pread(source, buffer, sizeof(buffer), offset);
-        gsize written_total = 0;
-        if (count < 0 && errno == EINTR) continue;
-        if (count < 0) goto io_failed;
-        if (count == 0) break;
-        total += (gsize)count;
-        if (total > 32 * 1024 * 1024) {
-            g_set_error(error, G_IO_ERROR, G_IO_ERROR_NO_SPACE,
-                "Wallpaper input exceeds the 32 MiB staging limit");
-            goto failed;
-        }
-        while (written_total < (gsize)count) {
-            ssize_t written = write(output, buffer + written_total,
-                (gsize)count - written_total);
-            if (written < 0 && errno == EINTR) continue;
-            if (written <= 0) goto io_failed;
-            written_total += (gsize)written;
-        }
-        offset += count;
-    }
+    if (!copy_staged_fd(source, output, "Wallpaper", error)) goto failed;
     if (close(output) < 0) { output = -1; goto io_failed; }
     output = -1;
     staged = open(*staged_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
@@ -908,7 +930,7 @@ static void screenshot_method(Broker *broker, GVariant *parameters,
         descriptor = open(filename, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (response == 0 && (descriptor < 0 || fstat(descriptor, &metadata) < 0
             || !S_ISREG(metadata.st_mode) || metadata.st_size < 0
-            || metadata.st_size > 32 * 1024 * 1024)) {
+            || metadata.st_size > STAGED_FILE_MAXIMUM)) {
         g_clear_error(&error);
         g_set_error(&error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
             "The host screenshot result is not a bounded regular file");
@@ -1219,38 +1241,18 @@ failed:
 static void stage_file_method(Broker *broker, GVariant *parameters,
     GDBusMethodInvocation *invocation)
 {
-    const char *guest_path;
     int handle;
-    int proof = -1;
-    int mapped = -1;
+    int source = -1;
     int output = -1;
-    Mapping *mapping;
-    struct stat metadata;
     char *directory = NULL;
     char *token = NULL;
     char *filename = NULL;
     char *uri = NULL;
-    guint8 buffer[64 * 1024];
-    gsize total = 0;
     GError *error = NULL;
 
-    g_variant_get(parameters, "(&sh)", &guest_path, &handle);
-    if (!valid_guest_path(guest_path)
-        || (mapping = find_mapping(broker, guest_path)) == NULL) {
-        g_set_error(&error, G_IO_ERROR, G_IO_ERROR_PERMISSION_DENIED,
-            "The guest artwork path has no active host mapping");
-        goto failed;
-    }
-    proof = invocation_fd(invocation, handle, &error);
-    if (proof < 0) goto failed;
-    mapped = secure_open(mapping, guest_path, O_RDONLY);
-    if (mapped < 0 || !same_object(proof, mapped)
-        || fstat(mapped, &metadata) < 0 || !S_ISREG(metadata.st_mode)
-        || metadata.st_size < 0 || metadata.st_size > 32 * 1024 * 1024) {
-        g_set_error(&error, G_IO_ERROR, G_IO_ERROR_PERMISSION_DENIED,
-            "The artwork proof does not identify a bounded mapped file");
-        goto failed;
-    }
+    g_variant_get(parameters, "(h)", &handle);
+    source = invocation_fd(invocation, handle, &error);
+    if (source < 0) goto failed;
     directory = g_build_filename(g_get_user_cache_dir(), "spaces",
         "artwork", NULL);
     if (g_mkdir_with_parents(directory, 0700) < 0) goto io_failed;
@@ -1258,22 +1260,7 @@ static void stage_file_method(Broker *broker, GVariant *parameters,
     filename = g_build_filename(directory, token, NULL);
     output = open(filename, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
     if (output < 0) goto io_failed;
-    for (;;) {
-        ssize_t count = read(mapped, buffer, sizeof(buffer));
-        gsize offset = 0;
-        if (count < 0 && errno == EINTR) continue;
-        if (count < 0) goto io_failed;
-        if (count == 0) break;
-        total += (gsize)count;
-        if (total > 32 * 1024 * 1024) goto io_failed;
-        while (offset < (gsize)count) {
-            ssize_t written = write(output, buffer + offset,
-                (gsize)count - offset);
-            if (written < 0 && errno == EINTR) continue;
-            if (written <= 0) goto io_failed;
-            offset += (gsize)written;
-        }
-    }
+    if (!copy_staged_fd(source, output, "Artwork", &error)) goto failed;
     if (close(output) < 0) { output = -1; goto io_failed; }
     output = -1;
     uri = g_filename_to_uri(filename, NULL, &error);
@@ -1281,16 +1268,16 @@ static void stage_file_method(Broker *broker, GVariant *parameters,
     g_dbus_method_invocation_return_value(invocation,
         g_variant_new("(s)", uri));
     g_ptr_array_add(broker->staged_files, g_strdup(filename));
-    close(mapped); close(proof); g_free(uri); g_free(filename);
+    close(source); g_free(uri); g_free(filename);
     g_free(token); g_free(directory); return;
 io_failed:
-    g_set_error(&error, G_IO_ERROR, g_io_error_from_errno(errno),
-        "Could not stage guest artwork: %s", g_strerror(errno));
+    if (error == NULL)
+        g_set_error(&error, G_IO_ERROR, g_io_error_from_errno(errno),
+            "Could not stage guest artwork: %s", g_strerror(errno));
 failed:
     if (output >= 0) close(output);
     if (filename != NULL) unlink(filename);
-    if (mapped >= 0) close(mapped);
-    if (proof >= 0) close(proof);
+    if (source >= 0) close(source);
     g_free(uri); g_free(filename); g_free(token); g_free(directory);
     if (error == NULL)
         g_set_error(&error, G_IO_ERROR, G_IO_ERROR_FAILED,

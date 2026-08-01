@@ -1359,9 +1359,19 @@ class PortalNativeTests(unittest.TestCase):
                     screen_name,
                     standard_path,
                     "Inhibit",
-                    GLib.Variant("(ss)", ("app", "reason")),
+                    GLib.Variant(
+                        "(ss)",
+                        ("/opt/google/chrome/google-chrome", "reason"),
+                    ),
                     "(u)",
                 )[0]
+                self.assertIn(
+                    (
+                        "Inhibit",
+                        ("spaces-work-v1-google-chrome", "reason"),
+                    ),
+                    events,
+                )
                 intruder = client()
                 with self.assertRaises(GLib.Error) as denied:
                     call(
@@ -1381,6 +1391,7 @@ class PortalNativeTests(unittest.TestCase):
                     GLib.Variant("(ss)", ("app", "reason")),
                     "(u)",
                 )[0]
+                self.assertIn(("Throttle", ("app", "reason")), events)
                 self.assertEqual(
                     call(
                         screen_client,
@@ -1624,6 +1635,8 @@ class PortalNativeTests(unittest.TestCase):
                 "shadowed", encoding="utf-8"
             )
             (nested / "a").write_text("nested", encoding="utf-8")
+            private_artwork = root / "private-artwork"
+            private_artwork.write_bytes(b"private tmpfs artwork")
             base_fd = os.open(base, os.O_PATH)
             nested_fd = os.open(nested, os.O_PATH)
             ready_read, ready_write = os.pipe()
@@ -1648,6 +1661,7 @@ class PortalNativeTests(unittest.TestCase):
                 env={
                     **os.environ,
                     "DBUS_SESSION_BUS_ADDRESS": address,
+                    "XDG_CACHE_HOME": str(root / "cache"),
                 },
                 pass_fds=(base_fd, nested_fd, ready_write),
                 stdout=subprocess.DEVNULL,
@@ -1699,6 +1713,38 @@ class PortalNativeTests(unittest.TestCase):
                 longest = call("/guest/nested/a", nested / "a")
                 self.assertNotIn("proof does not identify", longest)
                 self.assertNotIn("no active host mapping", longest)
+
+                def stage(proof: Path) -> str:
+                    proof_fd = os.open(proof, os.O_RDONLY)
+                    if proof.is_file():
+                        os.lseek(proof_fd, 0, os.SEEK_END)
+                    descriptors = Gio.UnixFDList.new()
+                    handle = descriptors.append(proof_fd)
+                    os.close(proof_fd)
+                    reply, _reply_fds = connection.call_with_unix_fd_list_sync(
+                        "org.anatase.Spaces.Integration.stest",
+                        "/org/anatase/Spaces/Integration",
+                        "org.anatase.Spaces.Integration1",
+                        "StageFile",
+                        GLib.Variant("(h)", (handle,)),
+                        GLib.VariantType.new("(s)"),
+                        Gio.DBusCallFlags.NONE,
+                        2000,
+                        descriptors,
+                        None,
+                    )
+                    return reply.unpack()[0]
+
+                staged_uri = stage(private_artwork)
+                staged_path = Gio.File.new_for_uri(staged_uri).get_path()
+                self.assertIsNotNone(staged_path)
+                assert staged_path is not None
+                self.assertEqual(
+                    Path(staged_path).read_bytes(), b"private tmpfs artwork"
+                )
+                self.assertFalse(Path(staged_path).samefile(private_artwork))
+                with self.assertRaisesRegex(GLib.Error, "regular file"):
+                    stage(root)
                 connection.close_sync(None)
             finally:
                 os.close(ready_read)

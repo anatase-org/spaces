@@ -34,6 +34,7 @@
 #define RESTORE_DATA_VENDOR "Spaces"
 #define RESTORE_DATA_VERSION 1
 #define SECRET_SIZE 64
+#define STAGED_FILE_MAXIMUM (32 * 1024 * 1024)
 #define DBUS_NAME "org.freedesktop.DBus"
 #define DBUS_PATH "/org/freedesktop/DBus"
 #define DESKTOP_INTERFACE_PREFIX "org.freedesktop.portal."
@@ -1306,10 +1307,16 @@ static gboolean copy_screenshot(int source, char **uri)
     char *token = new_token();
     char *filename = g_strdup_printf("%s/%s.png", directory, token);
     guint8 buffer[64 * 1024];
+    off_t source_size;
     gsize total = 0;
     int output = -1;
     gboolean success = FALSE;
     g_free(token);
+    /* The host broker already checked S_ISREG. Recheck that the transferred
+     * descriptor is seekable and bounded without raising the guest libc ABI. */
+    source_size = lseek(source, 0, SEEK_END);
+    if (source_size < 0 || source_size > STAGED_FILE_MAXIMUM
+        || lseek(source, 0, SEEK_SET) < 0) goto out;
     if (g_mkdir_with_parents(directory, 0700) < 0) goto out;
     output = open(filename, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
     if (output < 0) goto out;
@@ -1320,7 +1327,7 @@ static gboolean copy_screenshot(int source, char **uri)
         if (count < 0) goto out;
         if (count == 0) break;
         total += (gsize)count;
-        if (total > 32 * 1024 * 1024) goto out;
+        if (total > STAGED_FILE_MAXIMUM) goto out;
         while (offset < (gsize)count) {
             ssize_t written = write(output, buffer + offset,
                 (gsize)count - offset);
@@ -1819,7 +1826,7 @@ static GVariant *stage_artwork(Mirror *mirror, GVariant *value)
                 : g_dbus_connection_call_with_unix_fd_list_sync(
                     mirror->portal->host, broker, INTEGRATION_PATH,
                     INTEGRATION_INTERFACE,
-                    "StageFile", g_variant_new("(sh)", filename, handle),
+                    "StageFile", g_variant_new("(h)", handle),
                     G_VARIANT_TYPE("(s)"), G_DBUS_CALL_FLAGS_NONE,
                     5000, fds, NULL, NULL, &error);
             if (staged != NULL) {
@@ -2135,6 +2142,30 @@ static void screen_call_done(GObject *source, GAsyncResult *result,
     g_variant_unref(reply); screen_call_free(call);
 }
 
+static char *screen_saver_application(Portal *portal,
+    const char *application)
+{
+    char *basename;
+    char *desktop_id;
+    char *cursor;
+
+    if (!g_path_is_absolute(application)) return g_strdup(application);
+    basename = g_path_get_basename(application);
+    if (g_str_has_suffix(basename, ".desktop"))
+        basename[strlen(basename) - strlen(".desktop")] = '\0';
+    for (cursor = basename; *cursor != '\0'; cursor++)
+        if (!g_ascii_isalnum(*cursor) && *cursor != '.'
+            && *cursor != '_' && *cursor != '-') *cursor = '_';
+    if (*basename == '\0') {
+        g_free(basename);
+        return g_strdup(application);
+    }
+    desktop_id = g_strdup_printf("spaces-%s-v1-%s",
+        portal->space_name, basename);
+    g_free(basename);
+    return desktop_id;
+}
+
 static void simple_bridge_call(GDBusConnection *connection, const char *sender,
     const char *object_path, const char *interface_name, const char *method_name,
     GVariant *parameters, GDBusMethodInvocation *invocation, gpointer user_data)
@@ -2158,14 +2189,21 @@ static void simple_bridge_call(GDBusConnection *connection, const char *sender,
         }
         if (g_str_equal(method_name, "Inhibit")
             || g_str_equal(method_name, "Throttle")) {
+            const char *application;
+            const char *reason;
+            char *mapped_application;
             ScreenCall *call = g_new0(ScreenCall, 1);
+            g_variant_get(parameters, "(&s&s)", &application, &reason);
+            mapped_application = screen_saver_application(portal, application);
             call->portal = portal; call->invocation = g_object_ref(invocation);
             call->owner = g_strdup(sender); call->add = TRUE;
             call->throttle = g_str_equal(method_name, "Throttle");
             g_dbus_connection_call(portal->host, SCREEN_SAVER_NAME, host_path,
-                SCREEN_SAVER_NAME, method_name, parameters,
+                SCREEN_SAVER_NAME, method_name,
+                g_variant_new("(ss)", mapped_application, reason),
                 G_VARIANT_TYPE("(u)"), G_DBUS_CALL_FLAGS_NONE, -1, NULL,
                 screen_call_done, call);
+            g_free(mapped_application);
             return;
         }
         if (g_str_equal(method_name, "UnInhibit")
