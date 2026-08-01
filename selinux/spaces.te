@@ -210,6 +210,14 @@ allow spaces_container_t tmpfs_t:file { execute execmod };
 allow spaces_container_t tmpfs_t:chr_file relabelfrom;
 allow spaces_container_t tmpfs_t:lnk_file relabelfrom;
 
+# machinectl bind creates regular-file placeholders for forwarded sockets in
+# the guest tmpfs.  Guest session teardown may remove a stale placeholder
+# after machined unmounts it.
+gen_require(`
+	type systemd_machined_tmpfs_t;
+')
+allow spaces_container_t systemd_machined_tmpfs_t:file unlink;
+
 # systemd builds mount namespaces and BPF filters for guest services.
 dev_getattr_all_chr_files(spaces_container_t)
 dev_mounton_sysfs(spaces_container_t)
@@ -467,9 +475,12 @@ allow spaces_container_t ssh_home_config_t:file {
 # systemd-machined opens the container's /dev/ptmx when machinectl starts an
 # interactive or command shell.
 gen_require(`
+	type systemd_coredump_t;
 	type systemd_machined_t;
 	attribute user_home_type;
 ')
+# Host coredump collection probes the crashing guest process for liveness.
+allow systemd_coredump_t spaces_container_t:process signull;
 allow systemd_machined_t spaces_apifs_file_t:chr_file rw_chr_file_perms;
 create_dirs_pattern(
 	systemd_machined_t,
@@ -485,9 +496,14 @@ allow systemd_machined_t spaces_apifs_file_t:{ file dir } mounton;
 allow systemd_machined_t spaces_file_t:{ file dir } mounton;
 # machinectl bind creates the destination of a forwarded credential socket
 # inside the guest's /run tmpfs before asking systemd-machined to mount on it.
-# Limit this to socket mountpoints; the source socket is still selected and
-# inode-pinned by Spaces before the request reaches machined.
+# The destination can be a socket or a machined-labeled regular placeholder;
+# the source socket is still selected and inode-pinned by Spaces first.
 allow systemd_machined_t tmpfs_t:sock_file mounton;
+allow systemd_machined_t systemd_machined_tmpfs_t:file mounton;
+# Runtime device forwarding asks machined to bind only the device nodes already
+# selected by Spaces and admitted by the service's dynamic cgroup policy.
+dev_getattr_all_blk_files(systemd_machined_t)
+dev_getattr_all_chr_files(systemd_machined_t)
 allow systemd_machined_t user_home_type:file getattr;
 allow systemd_machined_t ssh_home_t:dir search_dir_perms;
 allow systemd_machined_t ssh_home_config_t:file getattr;
