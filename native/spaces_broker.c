@@ -1469,12 +1469,12 @@ int main(int argc, char **argv)
             if (!add_mapping(
                     &broker, argv[index + 1], argv[index + 2]
                 )) {
-                g_printerr("spaces-integration-broker: invalid mapping\n");
+                g_printerr("spaces-broker: invalid mapping\n");
                 return 2;
             }
             index += 2;
         } else {
-            g_printerr("spaces-integration-broker: invalid arguments\n");
+            g_printerr("spaces-broker: invalid arguments\n");
             return 2;
         }
     }
@@ -1552,7 +1552,7 @@ int main(int argc, char **argv)
 
 failed:
     if (error != NULL) {
-        g_printerr("spaces-integration-broker: %s\n", error->message);
+        g_printerr("spaces-broker: %s\n", error->message);
         g_clear_error(&error);
     }
     if (ready_fd >= 0)

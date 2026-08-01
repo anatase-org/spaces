@@ -733,21 +733,21 @@ class PackagingTests(unittest.TestCase):
             "pam_spaces.so",
             "spaces-portal",
             "spaces-open",
-            "spaces-integration-broker",
+            "spaces-broker",
             "spaces-secret-helper",
-            "spaces-pam-worker",
-            "spaces-session-launcher",
+            "spaces-pam",
+            "spaces",
         ):
             self.assertIn(name, makefile)
         self.assertNotIn("spaces-polkit", makefile)
         self.assertNotIn("polkit-agent-1", spec)
         self.assertIn(
-            "/usr/lib/spaces/guest/spaces-session-launcher",
+            "/usr/lib/spaces/guest/spaces",
             spec,
         )
         self.assertIn("/usr/lib/spaces/guest/spaces-portal", spec)
         self.assertIn("/usr/lib/spaces/guest/spaces-open", spec)
-        self.assertIn("/usr/lib/spaces/spaces-integration-broker", spec)
+        self.assertIn("/usr/lib/spaces/spaces-broker", spec)
         self.assertIn(
             "/usr/lib/spaces/guest/spaces-secret-helper", spec
         )
@@ -758,7 +758,7 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("Requires:       librsvg2-tools", spec)
         self.assertIn("BuildRequires:  glib2-devel", spec)
         self.assertTrue(
-            (ROOT / "native" / "spaces_session_launcher.c").exists()
+            (ROOT / "native" / "spaces.c").exists()
         )
         self.assertFalse(
             (ROOT / "native" / "spaces_session.c").exists()

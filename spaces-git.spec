@@ -130,14 +130,14 @@ fi
 %config(noreplace) %{_sysconfdir}/pam.d/spaces
 %dir %{_sysconfdir}/spaces
 %dir /usr/lib/spaces
-/usr/lib/spaces/spaces-pam-worker
-/usr/lib/spaces/spaces-integration-broker
+/usr/lib/spaces/spaces-pam
+/usr/lib/spaces/spaces-broker
 %dir /usr/lib/spaces/guest
 /usr/lib/spaces/guest/pam_spaces.so
 /usr/lib/spaces/guest/spaces-portal
 /usr/lib/spaces/guest/spaces-open
 /usr/lib/spaces/guest/spaces-secret-helper
-/usr/lib/spaces/guest/spaces-session-launcher
+/usr/lib/spaces/guest/spaces
 %dir %{_datadir}/spaces/portal
 %{_datadir}/spaces/portal/*
 %{_datadir}/applications/spaces-*.desktop

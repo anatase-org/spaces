@@ -11,19 +11,19 @@ TARGET_ARCH ?= $(shell uname -m)
 
 .PHONY: all check-guest-abi clean install
 
-all: pam_spaces.so spaces-pam-worker spaces-session-launcher spaces-portal \
-	spaces-secret-helper spaces-open spaces-integration-broker
+all: pam_spaces.so spaces-pam spaces spaces-portal \
+	spaces-secret-helper spaces-open spaces-broker
 
 pam_spaces.so: pam_spaces.c protocol.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -shared -o $@ pam_spaces.c \
 		$(LDFLAGS) -lpam
 
-spaces-pam-worker: spaces_pam_worker.c protocol.h
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ spaces_pam_worker.c \
+spaces-pam: spaces_pam.c protocol.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ spaces_pam.c \
 		$(LDFLAGS) -lpam
 
-spaces-session-launcher: spaces_session_launcher.c
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ spaces_session_launcher.c \
+spaces: spaces.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ spaces.c \
 		$(LDFLAGS) -Wl,--wrap=__libc_start_main
 
 spaces-portal: spaces_portal.c
@@ -47,35 +47,35 @@ spaces-open: spaces_open.c
 		-Wl,--wrap=__libc_start_main \
 		$$(pkg-config --libs gio-unix-2.0)
 
-spaces-integration-broker: spaces_integration_broker.c
+spaces-broker: spaces_broker.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) \
 		$$(pkg-config --cflags gio-unix-2.0) \
-		-o $@ spaces_integration_broker.c $(LDFLAGS) \
+		-o $@ spaces_broker.c $(LDFLAGS) \
 		$$(pkg-config --libs gio-unix-2.0)
 
 check-guest-abi: all
 	$(PYTHON) check_guest_abi.py --target $(TARGET_ARCH) \
 		--glibc-max 2.17 \
-		--guest pam_spaces.so spaces-session-launcher spaces-portal \
+		--guest pam_spaces.so spaces spaces-portal \
 			spaces-secret-helper spaces-open \
-		--host spaces-pam-worker spaces-integration-broker
+		--host spaces-pam spaces-broker
 
 install: check-guest-abi
 	install -Dm755 pam_spaces.so \
 		$(DESTDIR)$(GUESTDIR)/pam_spaces.so
-	install -Dm755 spaces-pam-worker \
-		$(DESTDIR)$(LIBEXECDIR)/spaces-pam-worker
-	install -Dm755 spaces-session-launcher \
-		$(DESTDIR)$(GUESTDIR)/spaces-session-launcher
+	install -Dm755 spaces-pam \
+		$(DESTDIR)$(LIBEXECDIR)/spaces-pam
+	install -Dm755 spaces \
+		$(DESTDIR)$(GUESTDIR)/spaces
 	install -Dm755 spaces-portal \
 		$(DESTDIR)$(GUESTDIR)/spaces-portal
 	install -Dm755 spaces-secret-helper \
 		$(DESTDIR)$(GUESTDIR)/spaces-secret-helper
 	install -Dm755 spaces-open \
 		$(DESTDIR)$(GUESTDIR)/spaces-open
-	install -Dm755 spaces-integration-broker \
-		$(DESTDIR)$(LIBEXECDIR)/spaces-integration-broker
+	install -Dm755 spaces-broker \
+		$(DESTDIR)$(LIBEXECDIR)/spaces-broker
 
 clean:
-	rm -f pam_spaces.so spaces-pam-worker spaces-session-launcher \
-		spaces-portal spaces-secret-helper spaces-open spaces-integration-broker
+	rm -f pam_spaces.so spaces-pam spaces \
+		spaces-portal spaces-secret-helper spaces-open spaces-broker

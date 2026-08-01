@@ -10,9 +10,9 @@ pkg/
 
 # Native authentication build outputs
 /native/pam_spaces.so
-/native/spaces-pam-worker
-/native/spaces-session-launcher
+/native/spaces-pam
+/native/spaces
 /native/spaces-secret-helper
 /native/spaces-portal
 /native/spaces-open
-/native/spaces-integration-broker
+/native/spaces-broker

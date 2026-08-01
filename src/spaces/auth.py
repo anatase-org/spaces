@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 RUNTIME_ROOT = Path("/run/spaces")
 NATIVE_ROOT = Path("/usr/lib/spaces/guest")
-PAM_WORKER = Path("/usr/lib/spaces/spaces-pam-worker")
+PAM_WORKER = Path("/usr/lib/spaces/spaces-pam")
 GUEST_RUNTIME = "/run/spaces-host"
 GUEST_SOCKET = f"{GUEST_RUNTIME}/auth.sock"
 GUEST_NATIVE = f"{GUEST_RUNTIME}/bin"
@@ -34,7 +34,7 @@ GUEST_BINARIES = (
     "spaces-portal",
     "spaces-open",
     "spaces-secret-helper",
-    "spaces-session-launcher",
+    "spaces",
 )
 ELF_MACHINES = {
     "x86_64": 62,

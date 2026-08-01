@@ -1343,7 +1343,7 @@ class NativeLauncherTests(unittest.TestCase):
         source = (
             Path(__file__).parents[1]
             / "native"
-            / "spaces_session_launcher.c"
+            / "spaces.c"
         )
         try:
             subprocess.run(

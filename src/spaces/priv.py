@@ -310,7 +310,7 @@ def _machine_shell(
 ) -> int:
     actual_command = command
     if launcher:
-        actual_command = ["/run/spaces-host/bin/spaces-session-launcher"]
+        actual_command = ["/run/spaces-host/bin/spaces"]
         # Only the stable desktop environment is published to D-Bus. The
         # one-shot launch environment remains local to this command.
         for name in sorted((environment or {})):

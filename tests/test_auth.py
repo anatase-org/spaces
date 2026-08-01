@@ -186,7 +186,7 @@ class AuthenticationServiceTests(unittest.TestCase):
             self.addCleanup(peer.close)
             connection.settimeout(auth.AUTHENTICATION_TIMEOUT)
             self.assertFalse(os.get_blocking(connection.fileno()))
-            worker = directory / "spaces-pam-worker"
+            worker = directory / "spaces-pam"
             worker.touch()
 
             def run_worker(

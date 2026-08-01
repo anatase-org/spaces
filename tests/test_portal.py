@@ -480,7 +480,7 @@ class PortalNativeTests(unittest.TestCase):
                 "-C",
                 str(ROOT / "native"),
                 "spaces-portal",
-                "spaces-integration-broker",
+                "spaces-broker",
             ],
             check=True,
             stdout=subprocess.DEVNULL,
@@ -1366,7 +1366,7 @@ class PortalNativeTests(unittest.TestCase):
             ready_read, ready_write = os.pipe()
             broker = subprocess.Popen(
                 [
-                    ROOT / "native" / "spaces-integration-broker",
+                    ROOT / "native" / "spaces-broker",
                     "--name",
                     "org.anatase.Spaces.Integration.stest",
                     "--space",
