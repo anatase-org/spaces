@@ -814,7 +814,9 @@ static void portal_request_method(Broker *broker, GVariant *parameters,
     g_clear_object(&outgoing_fds);
     if (secret_host_fd >= 0) close(secret_host_fd);
     if (secret_guest_fd >= 0) close(secret_guest_fd);
-    if (staged_path != NULL) unlink(staged_path);
+    /* Desktop implementations may retain the path behind the wallpaper FD
+     * after returning success. Keep accepted wallpaper data persistent. */
+    if (staged_path != NULL && response != 0) unlink(staged_path);
     g_free(staged_path); return;
 failed:
     g_clear_pointer(&host_parameters, g_variant_unref);
