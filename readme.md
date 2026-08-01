@@ -21,9 +21,16 @@ spaces enter ubuntu # or fedora, arch, or kali
 
 And follow the graphical prompts. After the space initializes, you will face a familiar terminal. Except, this time, it is a real Ubuntu system you can do anything you want in. Install packages, add custom services, use docker, install vs code, your dev toolchains, browsers, etc.
 
-Everything works as it would on a normal system. If you install desktop packages, they appear on your taskbar. If you share your screen using Chrome, it works. The only overhead is 75mb of memory and 3 seconds of booting.
+Everything works as it would on a normal system. If you install desktop packages, they appear on your taskbar. If you share your screen using Chrome, it works. The only overhead is 75mb of memory and 6 seconds of booting.
 
-If you want your space to run on boot, run:
+By default, after creating a space or configuring it for your user, the `spaces@<your-space>` user service is enabled, ensuring that the space is started when you log in over ssh or in a graphical session. This is because the 6 seconds of startup would lead to an unacceptable user experience for novice users.
+
+You may disable this service with:
+```bash
+systemctl --user disable --now spaces@<your-space>
+```
+
+This service essentially starts the system `spaces@<your-space>` service. If you want your space to run on boot, run:
 ```bash
 sudo systemctl enable --now spaces@<your-space>
 ```
@@ -32,13 +39,9 @@ And it will start on boot. You may stop that service to poweroff your space. Onc
 
 However, if your space relies on system services accessing your user data, this will not work, as your user and its files will not be mounted on boot.  This is done partly for security reasons, and partly to avoid edge cases with solutions such as systemd-homed.
 
-Alternatively, you may use the user service. This will start the space when you login, so that the first application you launch starts faster. As you are logged in, your user will be mounted when the space starts, eliminating timing issues with those system services. Once started, the space will remain active until poweroff, even if you log out.
-```bash
-systemctl --user enable --now spaces@<your-space>
-```
 
-You can also enable lingering for your user, which starts the user manager at
-boot without requiring an interactive login.
+Instead, you can enable lingering for your user, which starts the user manager at
+boot without requiring an interactive login. This way, the service starts with important paths already mounted.
 ```bash
 loginctl enable-linger
 ```

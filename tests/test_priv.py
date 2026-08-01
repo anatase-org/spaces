@@ -363,6 +363,43 @@ class PrivilegedTests(unittest.TestCase):
             check=True,
         )
 
+    def test_create_enables_service_for_initiating_user(self) -> None:
+        info = core.create_info(
+            "work", {"id": "custom"}, self.identity, "basic", []
+        )
+        request = {**info, "enable": True}
+        with (
+            mock.patch.object(ubuntu.subprocess, "run"),
+            mock.patch.object(priv, "_enable_user_service") as enable,
+        ):
+            priv.create(request)
+
+        enable.assert_called_once_with("work", 0, 0)
+
+    def test_enable_user_service_uses_target_user_manager(self) -> None:
+        account = mock.Mock(
+            pw_dir="/home/alice",
+            pw_gid=1002,
+            pw_name="alice",
+        )
+        with (
+            mock.patch.object(priv.pwd, "getpwuid", return_value=account),
+            mock.patch.object(priv.subprocess, "run") as run,
+        ):
+            priv._enable_user_service("work", 1001, 1002)
+
+        run.assert_called_once_with(
+            [
+                "/usr/bin/systemctl",
+                "--machine=alice@.host",
+                "--user",
+                "--no-reload",
+                "reenable",
+                "spaces@work.service",
+            ],
+            check=True,
+        )
+
     def test_rebuild_removes_existing_shortcut_versions(self) -> None:
         info = core.create_info(
             "work", {"id": "custom"}, self.identity, "basic", ["Projects"]
@@ -656,6 +693,29 @@ class PrivilegedTests(unittest.TestCase):
                 },
             },
         )
+
+    def test_configure_enables_service_for_target_user(self) -> None:
+        with mock.patch.object(ubuntu.subprocess, "run"):
+            priv.create(self.info)
+        patch = {
+            "schema_version": 1,
+            "name": "ubuntu",
+            "enable": True,
+            "permissions": {
+                "user": {
+                    "uid": 1001,
+                    "gid": 1002,
+                    "permissions": {"home": ["Documents"]},
+                },
+            },
+        }
+        with (
+            mock.patch.object(priv.subprocess, "run"),
+            mock.patch.object(priv, "_enable_user_service") as enable,
+        ):
+            priv.configure(patch)
+
+        enable.assert_called_once_with("ubuntu", 1001, 1002)
 
     def test_delete_preserves_home_and_removes_space_contents(self) -> None:
         space = self.state_root / "work"

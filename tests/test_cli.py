@@ -199,6 +199,49 @@ class CliTests(unittest.TestCase):
             "Exiting due to Ctrl+C", file=cli.sys.stderr
         )
 
+    def test_create_no_enable_is_forwarded(self) -> None:
+        with mock.patch.object(cli, "_create", return_value=0) as create:
+            self.assertEqual(
+                cli.main(["create", "ubuntu", "--no-enable"]),
+                0,
+            )
+
+        create.assert_called_once_with(
+            "ubuntu",
+            purge=False,
+            enable=False,
+        )
+
+    def test_configure_no_enable_is_forwarded(self) -> None:
+        with mock.patch.object(
+            cli, "_configure", return_value=0
+        ) as configure:
+            self.assertEqual(
+                cli.main(["configure", "work", "--no-enable"]),
+                0,
+            )
+
+        configure.assert_called_once_with(
+            "work",
+            user=None,
+            enable=False,
+        )
+
+    def test_enter_no_enable_is_forwarded_after_space(self) -> None:
+        with mock.patch.object(cli, "_enter", return_value=0) as enter:
+            self.assertEqual(
+                cli.main(["enter", "work", "--no-enable"]),
+                0,
+            )
+
+        enter.assert_called_once_with(
+            "work",
+            [],
+            enter_user=None,
+            graphical=False,
+            enable=False,
+        )
+
     def test_create_ubuntu_builds_expected_payload(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary) / "home"
@@ -240,6 +283,7 @@ class CliTests(unittest.TestCase):
         operation, payload = invoke.call_args.args
         self.assertEqual(operation, "create")
         self.assertTrue(payload["purge"])
+        self.assertTrue(payload["enable"])
         self.assertEqual(payload["distribution"]["version"], "resolute")
         self.assertEqual(set(payload["permissions"]["users"]), {"1000"})
         self.assertEqual(
@@ -505,6 +549,7 @@ class CliTests(unittest.TestCase):
         self.assertFalse(wizard.call_args.kwargs["include_system"])
         self.assertEqual(wizard.call_args.kwargs["submit_label"], "Confirm")
         patch = invoke.call_args.args[1]
+        self.assertTrue(patch["enable"])
         self.assertNotIn("system", patch["permissions"])
         self.assertTrue(
             patch["permissions"]["user"]["permissions"]["administrator"]
@@ -517,7 +562,7 @@ class CliTests(unittest.TestCase):
                 0,
             )
 
-        configure.assert_called_once_with("fedora", user="")
+        configure.assert_called_once_with("fedora", user="", enable=True)
 
     def test_full_configure_includes_host_authentication(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -592,6 +637,7 @@ class CliTests(unittest.TestCase):
             ["/usr/bin/code"],
             enter_user=None,
             graphical=True,
+            enable=True,
         )
 
     def test_configure_named_user_targets_host_account(self) -> None:
@@ -935,7 +981,11 @@ class CliTests(unittest.TestCase):
             ):
                 self.assertEqual(cli.main(["enter", distribution]), 0)
 
-            create.assert_called_once_with(distribution, missing=True)
+            create.assert_called_once_with(
+                distribution,
+                missing=True,
+                enable=True,
+            )
             invoke.assert_called_once_with(
                 "enter",
                 [f"alice@{distribution}"],
@@ -977,7 +1027,7 @@ class CliTests(unittest.TestCase):
                 0,
             )
 
-        create.assert_called_once_with("arch", missing=True)
+        create.assert_called_once_with("arch", missing=True, enable=True)
         invoke.assert_called_once_with(
             "enter-as-user",
             [
@@ -1028,7 +1078,11 @@ class CliTests(unittest.TestCase):
                 ):
                     self.assertEqual(cli.main(["enter", "ubuntu"]), 0)
 
-            create.assert_called_once_with("ubuntu", missing=True)
+            create.assert_called_once_with(
+                "ubuntu",
+                missing=True,
+                enable=True,
+            )
             invoke.assert_called_once_with(
                 "enter",
                 ["alice@ubuntu"],
@@ -1048,7 +1102,7 @@ class CliTests(unittest.TestCase):
         ):
             self.assertEqual(cli.main(["enter", "ubuntu"]), 130)
 
-        create.assert_called_once_with("ubuntu", missing=True)
+        create.assert_called_once_with("ubuntu", missing=True, enable=True)
         invoke.assert_not_called()
 
     def test_missing_space_auto_create_requires_tty_and_fixed_name(

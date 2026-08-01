@@ -223,6 +223,51 @@ def _assert_initiating_user(info: dict[str, Any]) -> None:
         )
 
 
+def _requested_enable(request: dict[str, Any]) -> bool:
+    enable = request.pop("enable", False)
+    if not isinstance(enable, bool):
+        raise core.SpacesError(_("Enable option must be a boolean."))
+    return enable
+
+
+def _enable_user_service(name: str, uid: int, gid: int) -> None:
+    """Enable a space through the target account's user manager."""
+
+    try:
+        account = pwd.getpwuid(uid)
+    except KeyError as error:
+        raise core.SpacesError(
+            _("No passwd entry exists for UID {uid}.", uid=uid)
+        ) from error
+    home = Path(account.pw_dir)
+    if not home.is_absolute() or account.pw_gid != gid:
+        raise core.SpacesError(
+            _("Host account details changed for UID {uid}.", uid=uid)
+        )
+    # Reenable also removes symlinks left under the former default.target.
+    try:
+        subprocess.run(
+            [
+                SYSTEMCTL,
+                f"--machine={account.pw_name}@.host",
+                "--user",
+                "--no-reload",
+                "reenable",
+                f"spaces@{name}.service",
+            ],
+            check=True,
+        )
+    except subprocess.CalledProcessError as error:
+        raise core.SpacesError(
+            _(
+                "Space {name!r} was saved, but its user service could not "
+                "be enabled for UID {uid}.",
+                name=name,
+                uid=uid,
+            )
+        ) from error
+
+
 def _space_directory(name: str) -> Path:
     core.validate_space_name(name)
     space = core.STATE_ROOT / name
@@ -509,6 +554,8 @@ def create(request: dict[str, Any]) -> None:
     from . import shortcuts
     from .distro import DistributionError
 
+    request = dict(request)
+    enable = _requested_enable(request)
     info, purge = core.validate_create_request(request)
     _assert_initiating_user(info)
     name = info["name"]
@@ -565,11 +612,16 @@ def create(request: dict[str, Any]) -> None:
             if isinstance(error, DistributionError):
                 raise core.SpacesError(str(error)) from error
             raise
+        if enable:
+            uid_key, record = next(iter(info["permissions"]["users"].items()))
+            _enable_user_service(name, int(uid_key), record["gid"])
 
 
 def configure(patch: dict[str, Any]) -> None:
     from . import shortcuts
 
+    patch = dict(patch)
+    enable = _requested_enable(patch)
     core.validate_configure_patch(patch)
     update = patch["permissions"]["user"]
 
@@ -628,6 +680,12 @@ def configure(patch: dict[str, Any]) -> None:
             )
         else:
             shortcuts.remove(patch["name"])
+        if enable:
+            _enable_user_service(
+                patch["name"],
+                update["uid"],
+                update["gid"],
+            )
 
 
 def delete(request: dict[str, Any]) -> None:

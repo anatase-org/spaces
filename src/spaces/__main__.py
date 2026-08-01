@@ -75,6 +75,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=_("delete existing space home data before creating"),
     )
+    create_parser.add_argument(
+        "--no-enable",
+        action="store_true",
+        help=_("do not start the space automatically at desktop login"),
+    )
 
     configure_parser = subparsers.add_parser(
         "configure", help=_("configure permissions for a space")
@@ -89,6 +94,11 @@ def build_parser() -> argparse.ArgumentParser:
             "configure only USER's permissions "
             "(default: current user)"
         ),
+    )
+    configure_parser.add_argument(
+        "--no-enable",
+        action="store_true",
+        help=_("do not start the space automatically at desktop login"),
     )
 
     delete_parser = subparsers.add_parser(
@@ -124,7 +134,8 @@ def build_parser() -> argparse.ArgumentParser:
         "enter",
         help=_("enter a space or run a command in it"),
         usage=_(
-            "spaces enter [--root | --user USER] SPACE [--] [COMMAND ...]"
+            "spaces enter [--no-enable] [--root | --user USER] "
+            "SPACE [--] [COMMAND ...]"
         ),
     )
     enter_user = enter_parser.add_mutually_exclusive_group()
@@ -145,6 +156,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--graphical",
         action="store_true",
         help=_("record that the command was launched from a desktop shortcut"),
+    )
+    enter_parser.add_argument(
+        "--no-enable",
+        action="store_true",
+        help=_(
+            "do not enable automatic startup if entering creates the space"
+        ),
     )
     enter_parser.add_argument("space")
     enter_parser.add_argument(
@@ -300,6 +318,7 @@ def _create(
     *,
     missing: bool = False,
     purge: bool = False,
+    enable: bool = True,
 ) -> int:
     from .distro import DistributionError
 
@@ -419,6 +438,7 @@ def _create(
         preset=result.get("preset", "custom"),
     )
     info["purge"] = purge
+    info["enable"] = enable
     configure_logging(rich=True)
     log(
         _(
@@ -440,7 +460,12 @@ def _create(
     return return_code
 
 
-def _configure(name: str, *, user: str | None) -> int:
+def _configure(
+    name: str,
+    *,
+    user: str | None,
+    enable: bool = True,
+) -> int:
     core.validate_space_name(name)
     identity = core.initiating_identity()
     user_only = user is not None
@@ -540,6 +565,7 @@ def _configure(name: str, *, user: str | None) -> int:
     patch = {
         "schema_version": core.SCHEMA_VERSION,
         "name": name,
+        "enable": enable,
         "permissions": permissions,
     }
     core.validate_configure_patch(patch)
@@ -590,6 +616,7 @@ def _enter(
     *,
     enter_user: str | None = None,
     graphical: bool = False,
+    enable: bool = True,
 ) -> int:
     core.validate_space_name(space)
     target = core.STATE_ROOT / space
@@ -604,7 +631,7 @@ def _enter(
     if (target_missing or info_missing) and _has_controlling_terminal():
         driver = get_driver(space)
         if driver is not None and driver.default_name == space:
-            return_code = _create(space, missing=True)
+            return_code = _create(space, missing=True, enable=enable)
             if return_code != 0:
                 return return_code
 
@@ -657,6 +684,8 @@ def _normalize_enter_options(arguments: list[str]) -> list[str]:
 
     space = arguments[1]
     option = arguments[2]
+    if option == "--no-enable":
+        return ["enter", option, space, *arguments[3:]]
     if option == "--root" or option.startswith("--user="):
         return ["enter", option, space, *arguments[3:]]
     if option == "--user" and len(arguments) >= 4:
@@ -694,9 +723,17 @@ def main(argv: list[str] | None = None) -> int:
 
         arguments = build_parser().parse_args(raw_arguments)
         if arguments.command == "create":
-            return _create(arguments.type, purge=arguments.purge)
+            return _create(
+                arguments.type,
+                purge=arguments.purge,
+                enable=not arguments.no_enable,
+            )
         elif arguments.command == "configure":
-            return _configure(arguments.name, user=arguments.user)
+            return _configure(
+                arguments.name,
+                user=arguments.user,
+                enable=not arguments.no_enable,
+            )
         elif arguments.command == "delete":
             return _delete(
                 arguments.name,
@@ -709,6 +746,7 @@ def main(argv: list[str] | None = None) -> int:
                 arguments.command_arguments,
                 enter_user=arguments.enter_user,
                 graphical=arguments.graphical,
+                enable=not arguments.no_enable,
             )
         raise core.SpacesError(
             _("Unknown command: {command!r}.", command=arguments.command)
