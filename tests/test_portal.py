@@ -722,6 +722,208 @@ class PortalNativeTests(unittest.TestCase):
                     except ProcessLookupError:
                         pass
 
+    def test_status_notifier_accepts_a_same_process_bus_connection(
+        self,
+    ) -> None:
+        try:
+            import gi
+
+            gi.require_version("Gio", "2.0")
+            from gi.repository import Gio, GLib
+        except ImportError:
+            self.skipTest("PyGObject is unavailable")
+
+        item_xml = """
+        <node><interface name='org.kde.StatusNotifierItem'>
+          <method name='Activate'>
+            <arg type='i' direction='in'/><arg type='i' direction='in'/>
+          </method>
+          <property name='Id' type='s' access='read'/>
+          <property name='Menu' type='o' access='read'/>
+        </interface></node>
+        """
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            host_address, host_pid = self._bus(root / "host-bus")
+            guest_address, guest_pid = self._bus(root / "guest-bus")
+            host_portal = subprocess.Popen(
+                [
+                    "dbus-test-tool",
+                    "echo",
+                    "--name=org.freedesktop.portal.Desktop",
+                ],
+                env={**os.environ, "DBUS_SESSION_BUS_ADDRESS": host_address},
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            foreign_item = subprocess.Popen(
+                [
+                    "dbus-test-tool",
+                    "echo",
+                    "--name=org.example.ForeignStatusItem",
+                ],
+                env={**os.environ, "DBUS_SESSION_BUS_ADDRESS": guest_address},
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            process: subprocess.Popen[str] | None = None
+            connections: list[object] = []
+            registration = 0
+            loop = GLib.MainLoop()
+            loop_thread = threading.Thread(target=loop.run, daemon=True)
+            try:
+                self.assertTrue(
+                    self._wait_for_bus_name(
+                        host_address, "org.freedesktop.portal.Desktop"
+                    )
+                )
+                self.assertTrue(
+                    self._wait_for_bus_name(
+                        guest_address, "org.example.ForeignStatusItem"
+                    )
+                )
+                process = subprocess.Popen(
+                    [ROOT / "native" / "spaces-portal"],
+                    env={
+                        **os.environ,
+                        "DBUS_SESSION_BUS_ADDRESS": guest_address,
+                        "SPACES_NAME": "work",
+                        "SPACES_PORTAL_TEST_ADDRESS": host_address,
+                    },
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                self.assertTrue(
+                    self._wait_for_bus_name(
+                        guest_address, "org.kde.StatusNotifierWatcher"
+                    )
+                )
+                flags = (
+                    Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT
+                    | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION
+                )
+                caller = Gio.DBusConnection.new_for_address_sync(
+                    guest_address, flags, None, None
+                )
+                item = Gio.DBusConnection.new_for_address_sync(
+                    guest_address, flags, None, None
+                )
+                connections.extend((caller, item))
+
+                def item_call(
+                    _connection: object,
+                    _sender: str,
+                    _path: str,
+                    _interface: str,
+                    _method: str,
+                    _parameters: object,
+                    invocation: object,
+                ) -> None:
+                    invocation.return_value(None)
+
+                def item_property(
+                    _connection: object,
+                    _sender: str,
+                    _path: str,
+                    _interface: str,
+                    property_name: str,
+                ) -> object:
+                    if property_name == "Id":
+                        return GLib.Variant("s", "Flameshot")
+                    if property_name == "Menu":
+                        return GLib.Variant("o", "/")
+                    raise AssertionError(property_name)
+
+                node = Gio.DBusNodeInfo.new_for_xml(item_xml)
+                registration = item.register_object(
+                    "/StatusNotifierItem",
+                    node.interfaces[0],
+                    item_call,
+                    item_property,
+                    None,
+                )
+                loop_thread.start()
+
+                watcher_name = "org.kde.StatusNotifierWatcher"
+                watcher_path = "/StatusNotifierWatcher"
+                with self.assertRaises(GLib.Error) as denied:
+                    caller.call_sync(
+                        watcher_name,
+                        watcher_path,
+                        watcher_name,
+                        "RegisterStatusNotifierItem",
+                        GLib.Variant(
+                            "(s)", ("org.example.ForeignStatusItem",)
+                        ),
+                        GLib.VariantType.new("()"),
+                        Gio.DBusCallFlags.NONE,
+                        3000,
+                        None,
+                    )
+                self.assertIn("AccessDenied", str(denied.exception))
+
+                reply = caller.call_sync(
+                    watcher_name,
+                    watcher_path,
+                    watcher_name,
+                    "RegisterStatusNotifierItem",
+                    GLib.Variant("(s)", (item.get_unique_name(),)),
+                    GLib.VariantType.new("()"),
+                    Gio.DBusCallFlags.NONE,
+                    3000,
+                    None,
+                )
+                self.assertEqual(reply.unpack(), ())
+                registered = caller.call_sync(
+                    watcher_name,
+                    watcher_path,
+                    "org.freedesktop.DBus.Properties",
+                    "Get",
+                    GLib.Variant(
+                        "(ss)",
+                        (watcher_name, "RegisteredStatusNotifierItems"),
+                    ),
+                    GLib.VariantType.new("(v)"),
+                    Gio.DBusCallFlags.NONE,
+                    3000,
+                    None,
+                )
+                items = registered.get_child_value(0).get_variant().unpack()
+                self.assertIn(item.get_unique_name(), items)
+                self.assertTrue(
+                    self._wait_for_bus_name(
+                        host_address,
+                        "org.kde.StatusNotifierItem.spaces.space."
+                        "work-flameshot.item.i1",
+                    )
+                )
+            finally:
+                if registration and connections:
+                    connections[-1].unregister_object(registration)
+                for connection in connections:
+                    try:
+                        connection.close_sync(None)
+                    except GLib.Error:
+                        pass
+                if process is not None and process.poll() is None:
+                    process.terminate()
+                    process.wait(timeout=2)
+                if process is not None and process.stderr is not None:
+                    process.stderr.close()
+                for child in (foreign_item, host_portal):
+                    if child.poll() is None:
+                        child.terminate()
+                    child.wait(timeout=2)
+                loop.quit()
+                if loop_thread.is_alive():
+                    loop_thread.join(timeout=2)
+                for pid in (host_pid, guest_pid):
+                    try:
+                        os.kill(pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+
     def test_native_desktop_services_forward_calls_signals_and_lifetimes(
         self,
     ) -> None:

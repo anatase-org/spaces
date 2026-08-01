@@ -2504,6 +2504,29 @@ static gboolean name_owner(Portal *portal, const char *name, char **owner,
     return TRUE;
 }
 
+static gboolean connection_process(Portal *portal, const char *name,
+    guint32 *process, GError **error)
+{
+    GVariant *reply = g_dbus_connection_call_sync(portal->guest, DBUS_NAME,
+        DBUS_PATH, DBUS_NAME, "GetConnectionUnixProcessID",
+        g_variant_new("(s)", name), G_VARIANT_TYPE("(u)"),
+        G_DBUS_CALL_FLAGS_NONE, 5000, NULL, error);
+    if (reply == NULL) return FALSE;
+    g_variant_get(reply, "(u)", process);
+    g_variant_unref(reply);
+    return TRUE;
+}
+
+static gboolean same_connection_process(Portal *portal, const char *first,
+    const char *second, GError **error)
+{
+    guint32 first_process, second_process;
+    if (g_str_equal(first, second)) return TRUE;
+    return connection_process(portal, first, &first_process, error)
+        && connection_process(portal, second, &second_process, error)
+        && first_process == second_process;
+}
+
 static gboolean create_mirror(Portal *portal, const char *key,
     const char *guest_name, const char *guest_path, gboolean status_item,
     GError **error)
@@ -2583,10 +2606,12 @@ static void status_watcher_call(GDBusConnection *connection, const char *sender,
     }
     if (g_variant_is_object_path(argument)) { service = g_strdup(sender); path = argument; }
     else { service = g_strdup(argument); path = "/StatusNotifierItem"; }
-    if (!name_owner(portal, service, &owner, &error) || !g_str_equal(owner, sender)) {
+    if (!name_owner(portal, service, &owner, &error)
+        || !same_connection_process(portal, owner, sender, &error)) {
         g_clear_error(&error); g_free(owner); g_free(service);
         g_dbus_method_invocation_return_error(invocation, G_DBUS_ERROR,
-            G_DBUS_ERROR_ACCESS_DENIED, "The notifier item name belongs to another caller"); return;
+            G_DBUS_ERROR_ACCESS_DENIED,
+            "The notifier item name belongs to another process"); return;
     }
     key = g_strdup_printf("sni:%s:%s", service, path);
     if (!create_mirror(portal, key, service, path, TRUE, &error)) {
