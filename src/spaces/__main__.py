@@ -654,7 +654,8 @@ def _enter(
         enter_arguments = [enter_user, space]
     if graphical and enter_user is None:
         # pkexec sanitizes its environment, so carry only these transient
-        # same-user launch identifiers through the privileged argument list.
+        # same-user desktop launch identifiers through the privileged argument
+        # list.
         launch_environment = {
             name: value
             for name in sorted(core.GRAPHICAL_LAUNCH_ENVIRONMENT)
@@ -669,6 +670,19 @@ def _enter(
                 0,
                 f"--launch-environment={serialized}",
             )
+        steam_app_id = os.environ.get("SteamAppId", "")
+        steam_game_id = os.environ.get("SteamGameId", "")
+        if (
+            steam_app_id.isascii()
+            and steam_app_id.isdecimal()
+            and len(steam_app_id) <= 10
+            and steam_game_id.isascii()
+            and steam_game_id.isdecimal()
+            and len(steam_game_id) <= 20
+            and 0 < int(steam_app_id) <= 0xFFFFFFFF
+            and 0 < int(steam_game_id) <= 0xFFFFFFFFFFFFFFFF
+        ):
+            enter_arguments.insert(0, f"--steam-app-id={steam_app_id}")
     if command:
         enter_arguments.extend(["--", *command])
     return _invoke_raw_helper(operation, enter_arguments)

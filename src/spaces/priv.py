@@ -350,6 +350,7 @@ def _machine_shell(
     *,
     environment: dict[str, str] | None = None,
     launch_environment: dict[str, str] | None = None,
+    steam_app_id: int | None = None,
     launcher: bool = False,
     agent: str | None = None,
 ) -> int:
@@ -367,6 +368,10 @@ def _machine_shell(
             actual_command.extend([option, name])
         if agent is not None:
             actual_command.extend(["--agent", agent])
+        if steam_app_id is not None:
+            actual_command.extend(
+                ["SteamLaunch", f"AppId={steam_app_id}"]
+            )
         actual_command.append("--")
         actual_command.extend(command)
     command_environment = {
@@ -397,13 +402,15 @@ def enter(
     command: list[str],
     *,
     launch_environment: dict[str, str] | None = None,
+    steam_app_id: int | str | None = None,
 ) -> int:
     launch_environment = _validate_launch_environment(launch_environment)
-    launch_options = (
-        {"launch_environment": launch_environment}
-        if launch_environment
-        else {}
-    )
+    validated_steam_app_id = _validate_steam_app_id(steam_app_id)
+    launch_options: dict[str, Any] = {}
+    if launch_environment:
+        launch_options["launch_environment"] = launch_environment
+    if validated_steam_app_id is not None:
+        launch_options["steam_app_id"] = validated_steam_app_id
     user_name, separator, space_name = target.rpartition("@")
     if not separator or not user_name or not space_name:
         raise core.SpacesError(
@@ -547,6 +554,20 @@ def _validate_launch_environment(
     ):
         raise core.SpacesError(_("Invalid graphical launch environment."))
     return dict(environment)
+
+
+def _validate_steam_app_id(value: object | None) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise core.SpacesError(_("Invalid Steam application ID."))
+    text = str(value)
+    if not text.isascii() or not text.isdecimal() or len(text) > 10:
+        raise core.SpacesError(_("Invalid Steam application ID."))
+    app_id = int(text)
+    if app_id == 0 or app_id > 0xFFFFFFFF:
+        raise core.SpacesError(_("Invalid Steam application ID."))
+    return app_id
 
 
 def create(request: dict[str, Any]) -> None:
@@ -739,6 +760,7 @@ def build_parser() -> argparse.ArgumentParser:
     launch_parser.add_argument("space")
     enter_parser = subparsers.add_parser("enter")
     enter_parser.add_argument("--launch-environment")
+    enter_parser.add_argument("--steam-app-id")
     enter_parser.add_argument("target")
     enter_parser.add_argument(
         "command_arguments",
@@ -770,6 +792,8 @@ def main(argv: list[str] | None = None) -> int:
                 launch_options["launch_environment"] = json.loads(
                     arguments.launch_environment
                 )
+            if arguments.steam_app_id is not None:
+                launch_options["steam_app_id"] = arguments.steam_app_id
             return enter(
                 arguments.target,
                 arguments.command_arguments,

@@ -1303,6 +1303,7 @@ int main(int argc, char **argv)
     char **dbus_environment;
     bool *merge_dbus_paths;
     char **command;
+    bool steam_arguments = false;
     size_t dbus_environment_count = 0;
     int status_pipe[2];
     int status;
@@ -1345,6 +1346,12 @@ int main(int argc, char **argv)
             merge_dbus_paths[dbus_environment_count] = merge_path;
             dbus_environment_count++;
             index += 2;
+        } else if (strcmp(argv[index], "SteamLaunch") == 0) {
+            steam_arguments = true;
+            index++;
+        } else if (strncmp(argv[index], "AppId=", 6) == 0) {
+            steam_arguments = true;
+            index++;
         } else {
             fprintf(stderr, "spaces: unknown option: %s\n", argv[index]);
             free(dbus_environment);
@@ -1359,6 +1366,9 @@ int main(int argc, char **argv)
         return 2;
     }
     command = &argv[index + 1];
+    // Steam integration, we need to be named reaper with SteamLaunch/AppID=
+    if (steam_arguments)
+        (void)prctl(PR_SET_NAME, "reaper", 0, 0, 0);
 
     (void)merge_manager_path_environment(
         dbus_environment, merge_dbus_paths, dbus_environment_count

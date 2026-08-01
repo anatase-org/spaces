@@ -104,7 +104,7 @@ class GraphicalSessionTests(unittest.TestCase):
             )
         )
 
-    def test_gamescope_and_gamemode_sessions_skip_desktop_integration(
+    def test_gamescope_and_gamemode_sessions_allow_desktop_integration(
         self,
     ) -> None:
         for name, value in (
@@ -112,14 +112,15 @@ class GraphicalSessionTests(unittest.TestCase):
             ("XDG_SESSION_DESKTOP", "gamemode"),
         ):
             with self.subTest(name=name):
-                self.assertIsNone(
+                self.assertEqual(
                     session.select_graphical_session(
                         (graphical(),),
                         {
                             "XDG_SESSION_ID": "2",
                             name: value,
                         },
-                    )
+                    ),
+                    graphical(),
                 )
 
     def test_host_manager_environment_is_sanitized(self) -> None:
@@ -778,31 +779,42 @@ class DesktopControllerTests(unittest.TestCase):
         self.runtime_patch.stop()
         self.temporary.cleanup()
 
-    def test_gaming_session_disables_desktop_forwarding(self) -> None:
+    def test_gaming_session_enables_desktop_forwarding(self) -> None:
         for name, value in (
             ("XDG_CURRENT_DESKTOP", "gamescope"),
             ("XDG_SESSION_DESKTOP", "gamemode"),
         ):
+            environment = {
+                "XDG_SESSION_ID": "2",
+                name: value,
+            }
+            plan = session.DesktopPlan("2", (), {})
+            active = session._ActiveDesktop(plan)
+            self.controller.active.clear()
             with (
                 self.subTest(name=name),
                 mock.patch.object(
                     session,
                     "host_manager_environment",
-                    return_value={
-                        "XDG_SESSION_ID": "2",
-                        name: value,
-                    },
+                    return_value=environment,
                 ),
-                mock.patch.object(self.controller, "deactivate") as deactivate,
-                mock.patch.object(session, "_plan") as plan,
+                mock.patch.object(
+                    session, "_plan", return_value=plan
+                ) as build_plan,
+                mock.patch.object(
+                    self.controller,
+                    "_activate",
+                    return_value=active,
+                ) as activate,
             ):
                 self.controller.reconcile(
                     self.desktop_user,
                     (graphical(),),
                 )
 
-            deactivate.assert_called_once_with(self.desktop_user)
-            plan.assert_not_called()
+            build_plan.assert_called_once()
+            activate.assert_called_once_with(self.desktop_user, plan)
+            self.assertIs(self.controller.active[self.desktop_user.uid], active)
 
     def test_credential_agents_follow_active_login_without_desktop(self) -> None:
         credential_user = user(

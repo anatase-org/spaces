@@ -1171,7 +1171,7 @@ class CliTests(unittest.TestCase):
                 [f"alice@{space}"],
             )
 
-    def test_graphical_enter_sends_only_activation_environment_to_helper(
+    def test_graphical_enter_sends_supported_launch_environment_to_helper(
         self,
     ) -> None:
         identity = core.Identity(1000, 1000, Path("/home/alice"))
@@ -1181,6 +1181,8 @@ class CliTests(unittest.TestCase):
                 {
                     "DESKTOP_STARTUP_ID": "x11-startup-id",
                     "DISPLAY": ":1",
+                    "SteamAppId": "1234",
+                    "SteamGameId": "5678",
                     "XDG_ACTIVATION_TOKEN": "wayland-token",
                 },
                 clear=True,
@@ -1216,6 +1218,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(
             arguments,
             [
+                "--steam-app-id=1234",
                 "--launch-environment="
                 '{"DESKTOP_STARTUP_ID":"x11-startup-id",'
                 '"XDG_ACTIVATION_TOKEN":"wayland-token"}',
@@ -1225,14 +1228,18 @@ class CliTests(unittest.TestCase):
             ],
         )
 
-    def test_non_graphical_enter_does_not_send_activation_environment(
+    def test_non_graphical_enter_does_not_send_launch_environment(
         self,
     ) -> None:
         identity = core.Identity(1000, 1000, Path("/home/alice"))
         with (
             mock.patch.dict(
                 cli.os.environ,
-                {"XDG_ACTIVATION_TOKEN": "wayland-token"},
+                {
+                    "SteamAppId": "1234",
+                    "SteamGameId": "5678",
+                    "XDG_ACTIVATION_TOKEN": "wayland-token",
+                },
                 clear=True,
             ),
             mock.patch.object(
@@ -1252,6 +1259,49 @@ class CliTests(unittest.TestCase):
             self.assertEqual(cli.main(["enter", "work"]), 0)
 
         invoke.assert_called_once_with("enter", ["alice@work"])
+
+    def test_graphical_enter_requires_valid_steam_id_pair(self) -> None:
+        identity = core.Identity(1000, 1000, Path("/home/alice"))
+        environments = (
+            {"SteamAppId": "1234"},
+            {"SteamGameId": "5678"},
+            {"SteamAppId": "invalid", "SteamGameId": "5678"},
+            {"SteamAppId": "1234", "SteamGameId": "invalid"},
+            {"SteamAppId": "0", "SteamGameId": "5678"},
+            {"SteamAppId": "4294967296", "SteamGameId": "5678"},
+        )
+        for environment in environments:
+            with (
+                self.subTest(environment=environment),
+                mock.patch.dict(cli.os.environ, environment, clear=True),
+                mock.patch.object(
+                    core, "initiating_identity", return_value=identity
+                ),
+                mock.patch.object(
+                    cli.pwd,
+                    "getpwuid",
+                    return_value=mock.Mock(pw_name="alice"),
+                ),
+                mock.patch.object(
+                    cli, "_invoke_raw_helper", return_value=0
+                ) as invoke,
+            ):
+                self.assertEqual(
+                    cli.main(
+                        [
+                            "enter",
+                            "--graphical",
+                            "work",
+                            "--",
+                            "/usr/bin/kate",
+                        ]
+                    ),
+                    0,
+                )
+
+            invoke.assert_called_once_with(
+                "enter", ["alice@work", "--", "/usr/bin/kate"]
+            )
 
     def test_disabled_enter_uses_the_same_direct_entry_path(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

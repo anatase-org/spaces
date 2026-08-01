@@ -1221,6 +1221,7 @@ class PrivilegedTests(unittest.TestCase):
                 priv.main(
                     [
                         "enter",
+                        "--steam-app-id=1234",
                         "--launch-environment="
                         '{"DESKTOP_STARTUP_ID":"x11-id",'
                         '"XDG_ACTIVATION_TOKEN":"wayland-token"}',
@@ -1239,14 +1240,32 @@ class PrivilegedTests(unittest.TestCase):
                 "DESKTOP_STARTUP_ID": "x11-id",
                 "XDG_ACTIVATION_TOKEN": "wayland-token",
             },
+            steam_app_id="1234",
         )
 
     def test_graphical_launch_environment_rejects_other_names(self) -> None:
-        with self.assertRaisesRegex(
-            core.SpacesError,
-            "Invalid graphical launch environment",
-        ):
-            priv._validate_launch_environment({"DISPLAY": ":0"})
+        for name in ("DISPLAY", "SteamAppId", "SteamGameId"):
+            with (
+                self.subTest(name=name),
+                self.assertRaisesRegex(
+                    core.SpacesError,
+                    "Invalid graphical launch environment",
+                ),
+            ):
+                priv._validate_launch_environment({name: "value"})
+
+    def test_steam_application_id_validation(self) -> None:
+        self.assertIsNone(priv._validate_steam_app_id(None))
+        self.assertEqual(priv._validate_steam_app_id("1234"), 1234)
+        self.assertEqual(priv._validate_steam_app_id(0xFFFFFFFF), 0xFFFFFFFF)
+        for value in (True, "", "0", "-1", "12x", 0x100000000):
+            with (
+                self.subTest(value=value),
+                self.assertRaisesRegex(
+                    core.SpacesError, "Invalid Steam application ID"
+                ),
+            ):
+                priv._validate_steam_app_id(value)
 
     def test_enter_as_user_parser_rejects_launch_environment(self) -> None:
         with self.assertRaises(SystemExit):
@@ -1305,6 +1324,7 @@ class PrivilegedTests(unittest.TestCase):
                     launch_environment={
                         "XDG_ACTIVATION_TOKEN": "wayland-token"
                     },
+                    steam_app_id=1234,
                 ),
                 42,
             )
@@ -1318,6 +1338,7 @@ class PrivilegedTests(unittest.TestCase):
             launch_environment={
                 "XDG_ACTIVATION_TOKEN": "wayland-token"
             },
+            steam_app_id=1234,
             launcher=True,
             agent="/agent",
         )
@@ -1482,7 +1503,9 @@ class PrivilegedTests(unittest.TestCase):
             ],
         )
 
-    def test_machine_shell_keeps_activation_token_launch_scoped(self) -> None:
+    def test_machine_shell_keeps_transient_launch_environment_scoped(
+        self,
+    ) -> None:
         completed = subprocess.CompletedProcess([], 0)
         with mock.patch.object(
             priv.subprocess, "run", return_value=completed
@@ -1497,6 +1520,7 @@ class PrivilegedTests(unittest.TestCase):
                         "DESKTOP_STARTUP_ID": "x11-id",
                         "XDG_ACTIVATION_TOKEN": "wayland-token",
                     },
+                    steam_app_id=1234,
                     launcher=True,
                 ),
                 0,
@@ -1517,6 +1541,8 @@ class PrivilegedTests(unittest.TestCase):
                 "/run/spaces-host/bin/spaces",
                 "--dbus-env",
                 "DISPLAY",
+                "SteamLaunch",
+                "AppId=1234",
                 "--",
                 "/usr/bin/kate",
             ],
