@@ -1990,6 +1990,109 @@ static void bridge_done(GObject *source, GAsyncResult *result, gpointer user_dat
     g_object_unref(invocation);
 }
 
+static char *resolve_host_file_uri(Portal *portal, const char *uri,
+    GError **error)
+{
+    const char *broker = g_getenv("SPACES_INTEGRATION_BROKER");
+    char *filename;
+    char *host_uri = NULL;
+    GUnixFDList *fds;
+    GVariant *reply;
+    int descriptor;
+    gint handle;
+
+    if (broker == NULL || *broker == '\0') {
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_NOT_CONNECTED,
+            "The Spaces integration broker is unavailable");
+        return NULL;
+    }
+    filename = g_filename_from_uri(uri, NULL, error);
+    if (filename == NULL) return NULL;
+    descriptor = open(filename, O_PATH | O_CLOEXEC);
+    if (descriptor < 0) {
+        g_set_error(error, G_IO_ERROR, g_io_error_from_errno(errno),
+            "Could not open the guest notification path: %s",
+            g_strerror(errno));
+        g_free(filename);
+        return NULL;
+    }
+    fds = g_unix_fd_list_new();
+    handle = g_unix_fd_list_append(fds, descriptor, error);
+    reply = handle < 0 ? NULL
+        : g_dbus_connection_call_with_unix_fd_list_sync(
+            portal->host, broker, INTEGRATION_PATH, INTEGRATION_INTERFACE,
+            "ResolvePath", g_variant_new("(sh)", filename, handle),
+            G_VARIANT_TYPE("(s)"), G_DBUS_CALL_FLAGS_NONE,
+            5000, fds, NULL, NULL, error);
+    if (reply != NULL) {
+        const char *value;
+        g_variant_get(reply, "(&s)", &value);
+        host_uri = g_strdup(value);
+        g_variant_unref(reply);
+    }
+    g_object_unref(fds);
+    close(descriptor);
+    g_free(filename);
+    return host_uri;
+}
+
+static GVariant *rewrite_notification_paths(Portal *portal,
+    GVariant *parameters)
+{
+    const char *app_name, *app_icon, *summary, *body;
+    guint replaces;
+    gint timeout;
+    GVariant *actions, *hints, *urls;
+    GVariantIter iterator;
+    GVariantBuilder mapped_urls;
+    GVariantDict dictionary;
+    const char *uri;
+    gboolean changed = FALSE;
+
+    g_variant_get(parameters, "(&su&s&s&s@as@a{sv}i)", &app_name,
+        &replaces, &app_icon, &summary, &body, &actions, &hints, &timeout);
+    urls = g_variant_lookup_value(hints, "x-kde-urls",
+        G_VARIANT_TYPE_STRING_ARRAY);
+    if (urls == NULL) {
+        g_variant_unref(actions);
+        g_variant_unref(hints);
+        return g_variant_ref(parameters);
+    }
+    g_variant_builder_init(&mapped_urls, G_VARIANT_TYPE_STRING_ARRAY);
+    g_variant_iter_init(&iterator, urls);
+    while (g_variant_iter_next(&iterator, "&s", &uri)) {
+        char *host_uri = NULL;
+        if (g_str_has_prefix(uri, "file:")) {
+            GError *error = NULL;
+            changed = TRUE;
+            host_uri = resolve_host_file_uri(portal, uri, &error);
+            if (host_uri == NULL) {
+                g_warning("Could not map notification file URI: %s",
+                    error == NULL ? "unknown error" : error->message);
+            }
+            g_clear_error(&error);
+        }
+        if (host_uri != NULL || !g_str_has_prefix(uri, "file:"))
+            g_variant_builder_add(&mapped_urls, "s",
+                host_uri == NULL ? uri : host_uri);
+        g_free(host_uri);
+    }
+    g_variant_unref(urls);
+    if (!changed) {
+        g_variant_builder_clear(&mapped_urls);
+        g_variant_unref(actions);
+        g_variant_unref(hints);
+        return g_variant_ref(parameters);
+    }
+    g_variant_dict_init(&dictionary, hints);
+    g_variant_dict_insert_value(&dictionary, "x-kde-urls",
+        g_variant_builder_end(&mapped_urls));
+    g_variant_unref(hints);
+    return g_variant_ref_sink(g_variant_new("(susss@as@a{sv}i)",
+        app_name, replaces, app_icon, summary, body, actions,
+        g_variant_dict_end(&dictionary), timeout));
+}
+
 typedef struct {
     Portal *portal;
     GDBusMethodInvocation *invocation;
@@ -2042,6 +2145,7 @@ static void simple_bridge_call(GDBusConnection *connection, const char *sender,
     GDBusInterfaceInfo *info = find_registered_interface(portal, interface_name);
     GDBusMethodInfo *method = info == NULL ? NULL : find_method(info, method_name);
     GVariantType *reply_type;
+    GVariant *mapped = NULL;
     GUnixFDList *fds;
     (void)connection; (void)sender;
     if (g_str_equal(interface_name, SCREEN_SAVER_NAME)) {
@@ -2110,12 +2214,17 @@ static void simple_bridge_call(GDBusConnection *connection, const char *sender,
             G_DBUS_ERROR_UNKNOWN_METHOD, "Unknown desktop integration method");
         return;
     }
+    if (g_str_equal(interface_name, NOTIFICATIONS_NAME)
+        && g_str_equal(method_name, "Notify"))
+        mapped = rewrite_notification_paths(portal, parameters);
     reply_type = method_output_type(method);
     fds = g_dbus_message_get_unix_fd_list(g_dbus_method_invocation_get_message(invocation));
     g_dbus_connection_call_with_unix_fd_list(portal->host, host_name, host_path,
-        interface_name, method_name, parameters, reply_type, G_DBUS_CALL_FLAGS_NONE,
+        interface_name, method_name, mapped == NULL ? parameters : mapped,
+        reply_type, G_DBUS_CALL_FLAGS_NONE,
         -1, fds, NULL, bridge_done, g_object_ref(invocation));
     g_variant_type_free(reply_type);
+    g_clear_pointer(&mapped, g_variant_unref);
 }
 
 static const GDBusInterfaceVTable simple_bridge_vtable = { .method_call = simple_bridge_call };

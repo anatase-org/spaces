@@ -161,6 +161,7 @@ class PortalConfigurationTests(unittest.TestCase):
             "org.anatase.Spaces.Integration1.OpenDirectory", broker_policy
         )
         self.assertIn("org.anatase.Spaces.Integration1.MakeGameMode", broker_policy)
+        self.assertIn("org.anatase.Spaces.Integration1.ResolvePath", broker_policy)
         self.assertIn(
             "org.anatase.Spaces.Integration1.RemoveStagedFile",
             broker_policy,
@@ -973,6 +974,14 @@ class PortalNativeTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
+            guest_home = root / "guest-home"
+            host_home = root / "host-home"
+            guest_home.mkdir()
+            host_home.mkdir()
+            host_screenshot = host_home / "capture.png"
+            guest_screenshot = guest_home / "capture.png"
+            host_screenshot.write_bytes(b"guest screenshot")
+            os.link(host_screenshot, guest_screenshot)
             host_address, host_pid = self._bus(root / "host-bus")
             guest_address, guest_pid = self._bus(root / "guest-bus")
             flags = (
@@ -1103,6 +1112,37 @@ class PortalNativeTests(unittest.TestCase):
             loop = GLib.MainLoop()
             loop_thread = threading.Thread(target=loop.run, daemon=True)
             loop_thread.start()
+            broker_name = "org.anatase.Spaces.Integration.stest"
+            mapping_fd = os.open(host_home, os.O_PATH | os.O_CLOEXEC)
+            ready_read, ready_write = os.pipe()
+            broker = subprocess.Popen(
+                [
+                    ROOT / "native" / "spaces-broker",
+                    "--name",
+                    broker_name,
+                    "--space",
+                    "work",
+                    "--app-id",
+                    "org.anatase.Spaces.work",
+                    "--ready-fd",
+                    str(ready_write),
+                    "--map",
+                    str(guest_home),
+                    str(mapping_fd),
+                ],
+                env={
+                    **os.environ,
+                    "DBUS_SESSION_BUS_ADDRESS": host_address,
+                },
+                pass_fds=(mapping_fd, ready_write),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            os.close(mapping_fd)
+            os.close(ready_write)
+            self.assertEqual(os.read(ready_read, 1), b"1")
+            os.close(ready_read)
             process = subprocess.Popen(
                 [ROOT / "native" / "spaces-portal"],
                 env={
@@ -1110,6 +1150,7 @@ class PortalNativeTests(unittest.TestCase):
                     "DBUS_SESSION_BUS_ADDRESS": guest_address,
                     "SPACES_NAME": "work",
                     "SPACES_PORTAL_TEST_ADDRESS": host_address,
+                    "SPACES_INTEGRATION_BROKER": broker_name,
                 },
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
@@ -1192,7 +1233,12 @@ class PortalNativeTests(unittest.TestCase):
                                 "Summary",
                                 "Body",
                                 ["default", "Open"],
-                                {"urgency": GLib.Variant("y", 1)},
+                                {
+                                    "urgency": GLib.Variant("y", 1),
+                                    "x-kde-urls": GLib.Variant(
+                                        "as", (guest_screenshot.as_uri(),)
+                                    ),
+                                },
                                 -1,
                             ),
                         ),
@@ -1200,6 +1246,16 @@ class PortalNativeTests(unittest.TestCase):
                     ),
                     (73,),
                 )
+                notification_event = next(
+                    parameters
+                    for method, parameters in events
+                    if method == "Notify"
+                )
+                mapped_urls = notification_event[6]["x-kde-urls"]
+                if isinstance(mapped_urls, GLib.Variant):
+                    mapped_urls = mapped_urls.unpack()
+                self.assertEqual(mapped_urls, [host_screenshot.as_uri()])
+                self.assertTrue(host_screenshot.samefile(guest_screenshot))
                 notification_client.close_sync(None)
                 clients.remove(notification_client)
                 time.sleep(0.05)
@@ -1427,6 +1483,11 @@ class PortalNativeTests(unittest.TestCase):
                 process.wait(timeout=2)
                 if process.stderr is not None:
                     process.stderr.close()
+                if broker.poll() is None:
+                    broker.terminate()
+                broker.wait(timeout=2)
+                if broker.stderr is not None:
+                    broker.stderr.close()
                 loop.quit()
                 loop_thread.join(timeout=2)
                 for registration in registrations:

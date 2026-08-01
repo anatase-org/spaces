@@ -64,6 +64,11 @@ static const char open_xml[] =
     "   <arg type='h' direction='in' name='proof_fd'/>"
     "   <arg type='s' direction='out' name='host_uri'/>"
     "  </method>"
+    "  <method name='ResolvePath'>"
+    "   <arg type='s' direction='in' name='guest_path'/>"
+    "   <arg type='h' direction='in' name='proof_fd'/>"
+    "   <arg type='s' direction='out' name='host_uri'/>"
+    "  </method>"
     "  <method name='RemoveStagedFile'>"
     "   <arg type='s' direction='in' name='host_uri'/>"
     "  </method>"
@@ -1151,6 +1156,66 @@ static gboolean same_object(int left, int right)
             == (right_metadata.st_mode & S_IFMT);
 }
 
+static void resolve_path_method(Broker *broker, GVariant *parameters,
+    GDBusMethodInvocation *invocation)
+{
+    const char *guest_path;
+    char descriptor_path[64];
+    char *host_path = NULL;
+    char *host_uri = NULL;
+    int handle;
+    int proof = -1;
+    int mapped = -1;
+    Mapping *mapping;
+    GError *error = NULL;
+
+    g_variant_get(parameters, "(&sh)", &guest_path, &handle);
+    if (!valid_guest_path(guest_path)
+        || (mapping = find_mapping(broker, guest_path)) == NULL) {
+        g_set_error(&error, G_IO_ERROR, G_IO_ERROR_PERMISSION_DENIED,
+            "The guest path has no active host mapping");
+        goto failed;
+    }
+    proof = invocation_fd(invocation, handle, &error);
+    if (proof < 0) goto failed;
+    mapped = secure_open(mapping, guest_path, O_PATH);
+    if (mapped < 0 || !same_object(proof, mapped)) {
+        g_set_error(&error, G_IO_ERROR, G_IO_ERROR_PERMISSION_DENIED,
+            "The proof does not identify the mapped host path");
+        goto failed;
+    }
+    if (g_snprintf(descriptor_path, sizeof(descriptor_path),
+            "/proc/self/fd/%d", mapped) >= (int)sizeof(descriptor_path)) {
+        g_set_error(&error, G_IO_ERROR, G_IO_ERROR_FILENAME_TOO_LONG,
+            "The mapped descriptor path is too long");
+        goto failed;
+    }
+    host_path = g_file_read_link(descriptor_path, &error);
+    if (host_path == NULL) goto failed;
+    if (!g_path_is_absolute(host_path)
+        || g_str_has_suffix(host_path, " (deleted)")) {
+        g_set_error(&error, G_IO_ERROR, G_IO_ERROR_INVALID_FILENAME,
+            "The mapped descriptor has no stable host path");
+        goto failed;
+    }
+    host_uri = g_filename_to_uri(host_path, NULL, &error);
+    if (host_uri == NULL) goto failed;
+    g_dbus_method_invocation_return_value(invocation,
+        g_variant_new("(s)", host_uri));
+    close(mapped); close(proof); g_free(host_uri); g_free(host_path);
+    return;
+
+failed:
+    if (mapped >= 0) close(mapped);
+    if (proof >= 0) close(proof);
+    g_free(host_uri); g_free(host_path);
+    if (error == NULL)
+        g_set_error(&error, G_IO_ERROR, G_IO_ERROR_FAILED,
+            "Could not resolve the mapped host path");
+    g_dbus_method_invocation_return_gerror(invocation, error);
+    g_clear_error(&error);
+}
+
 static void stage_file_method(Broker *broker, GVariant *parameters,
     GDBusMethodInvocation *invocation)
 {
@@ -1306,6 +1371,10 @@ static void open_method(
     }
     if (g_str_equal(method_name, "StageFile")) {
         stage_file_method(broker, parameters, invocation);
+        return;
+    }
+    if (g_str_equal(method_name, "ResolvePath")) {
+        resolve_path_method(broker, parameters, invocation);
         return;
     }
     if (g_str_equal(method_name, "RemoveStagedFile")) {

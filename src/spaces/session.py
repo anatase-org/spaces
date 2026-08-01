@@ -536,6 +536,10 @@ def _portal_policy_arguments(broker_name: str | None = None) -> list[str]:
                 ),
                 (
                     f"--call={broker_name}=org.anatase.Spaces.Integration1."
+                    f"ResolvePath@/org/anatase/Spaces/Integration"
+                ),
+                (
+                    f"--call={broker_name}=org.anatase.Spaces.Integration1."
                     f"RemoveStagedFile@/org/anatase/Spaces/Integration"
                 ),
                 (
