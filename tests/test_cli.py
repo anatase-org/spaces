@@ -944,6 +944,14 @@ class CliTests(unittest.TestCase):
     def test_enter_after_creation_preserves_options_and_command(self) -> None:
         with (
             tempfile.TemporaryDirectory() as temporary,
+            mock.patch.dict(
+                cli.os.environ,
+                {
+                    "DESKTOP_STARTUP_ID": "x11-startup-id",
+                    "XDG_ACTIVATION_TOKEN": "wayland-token",
+                },
+                clear=True,
+            ),
             mock.patch.object(core, "STATE_ROOT", Path(temporary)),
             mock.patch.object(
                 cli, "_has_controlling_terminal", return_value=True
@@ -1109,9 +1117,20 @@ class CliTests(unittest.TestCase):
                 [f"alice@{space}"],
             )
 
-    def test_enter_never_sends_terminal_session_data_to_helper(self) -> None:
+    def test_graphical_enter_sends_only_activation_environment_to_helper(
+        self,
+    ) -> None:
         identity = core.Identity(1000, 1000, Path("/home/alice"))
         with (
+            mock.patch.dict(
+                cli.os.environ,
+                {
+                    "DESKTOP_STARTUP_ID": "x11-startup-id",
+                    "DISPLAY": ":1",
+                    "XDG_ACTIVATION_TOKEN": "wayland-token",
+                },
+                clear=True,
+            ),
             mock.patch.object(
                 core, "initiating_identity", return_value=identity
             ),
@@ -1142,8 +1161,43 @@ class CliTests(unittest.TestCase):
         arguments = invoke.call_args.args[1]
         self.assertEqual(
             arguments,
-            ["alice@work", "--", "/usr/bin/kate"],
+            [
+                "--launch-environment="
+                '{"DESKTOP_STARTUP_ID":"x11-startup-id",'
+                '"XDG_ACTIVATION_TOKEN":"wayland-token"}',
+                "alice@work",
+                "--",
+                "/usr/bin/kate",
+            ],
         )
+
+    def test_non_graphical_enter_does_not_send_activation_environment(
+        self,
+    ) -> None:
+        identity = core.Identity(1000, 1000, Path("/home/alice"))
+        with (
+            mock.patch.dict(
+                cli.os.environ,
+                {"XDG_ACTIVATION_TOKEN": "wayland-token"},
+                clear=True,
+            ),
+            mock.patch.object(
+                core, "initiating_identity", return_value=identity
+            ),
+            mock.patch.object(
+                cli.pwd,
+                "getpwuid",
+                return_value=mock.Mock(pw_name="alice"),
+            ),
+            mock.patch.object(
+                cli,
+                "_invoke_raw_helper",
+                return_value=0,
+            ) as invoke,
+        ):
+            self.assertEqual(cli.main(["enter", "work"]), 0)
+
+        invoke.assert_called_once_with("enter", ["alice@work"])
 
     def test_disabled_enter_uses_the_same_direct_entry_path(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

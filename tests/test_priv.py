@@ -1152,6 +1152,53 @@ class PrivilegedTests(unittest.TestCase):
 
         enter.assert_called_once_with("alice@work", ["--help"])
 
+    def test_enter_parser_forwards_graphical_launch_environment(self) -> None:
+        with (
+            mock.patch.object(priv.os, "geteuid", return_value=0),
+            mock.patch.object(priv, "enter", return_value=42) as enter,
+        ):
+            self.assertEqual(
+                priv.main(
+                    [
+                        "enter",
+                        "--launch-environment="
+                        '{"DESKTOP_STARTUP_ID":"x11-id",'
+                        '"XDG_ACTIVATION_TOKEN":"wayland-token"}',
+                        "alice@work",
+                        "--",
+                        "/usr/bin/kate",
+                    ]
+                ),
+                42,
+            )
+
+        enter.assert_called_once_with(
+            "alice@work",
+            ["/usr/bin/kate"],
+            launch_environment={
+                "DESKTOP_STARTUP_ID": "x11-id",
+                "XDG_ACTIVATION_TOKEN": "wayland-token",
+            },
+        )
+
+    def test_graphical_launch_environment_rejects_other_names(self) -> None:
+        with self.assertRaisesRegex(
+            core.SpacesError,
+            "Invalid graphical launch environment",
+        ):
+            priv._validate_launch_environment({"DISPLAY": ":0"})
+
+    def test_enter_as_user_parser_rejects_launch_environment(self) -> None:
+        with self.assertRaises(SystemExit):
+            priv.build_parser().parse_args(
+                [
+                    "enter-as-user",
+                    "--launch-environment={}",
+                    "root",
+                    "work",
+                ]
+            )
+
     def test_enter_parser_has_no_session_manifest_option(self) -> None:
         with self.assertRaises(SystemExit):
             priv.build_parser().parse_args(
@@ -1192,7 +1239,13 @@ class PrivilegedTests(unittest.TestCase):
             mock.patch.object(priv, "_machine_shell", return_value=42) as shell,
         ):
             self.assertEqual(
-                priv.enter("alice@work", ["/usr/bin/kate"]),
+                priv.enter(
+                    "alice@work",
+                    ["/usr/bin/kate"],
+                    launch_environment={
+                        "XDG_ACTIVATION_TOKEN": "wayland-token"
+                    },
+                ),
                 42,
             )
 
@@ -1202,6 +1255,9 @@ class PrivilegedTests(unittest.TestCase):
             "work",
             ["/usr/bin/kate"],
             environment={"DISPLAY": ":0"},
+            launch_environment={
+                "XDG_ACTIVATION_TOKEN": "wayland-token"
+            },
             launcher=True,
             agent="/agent",
         )
@@ -1363,6 +1419,46 @@ class PrivilegedTests(unittest.TestCase):
                 "--",
                 "/usr/bin/code",
                 "--reuse-window",
+            ],
+        )
+
+    def test_machine_shell_keeps_activation_token_launch_scoped(self) -> None:
+        completed = subprocess.CompletedProcess([], 0)
+        with mock.patch.object(
+            priv.subprocess, "run", return_value=completed
+        ) as run:
+            self.assertEqual(
+                priv._machine_shell(
+                    "alice",
+                    "work",
+                    ["/usr/bin/kate"],
+                    environment={"DISPLAY": ":0"},
+                    launch_environment={
+                        "DESKTOP_STARTUP_ID": "x11-id",
+                        "XDG_ACTIVATION_TOKEN": "wayland-token",
+                    },
+                    launcher=True,
+                ),
+                0,
+            )
+
+        self.assertEqual(
+            run.call_args.args[0],
+            [
+                "/usr/bin/machinectl",
+                "--quiet",
+                "--uid=alice",
+                "--setenv=DESKTOP_STARTUP_ID=x11-id",
+                "--setenv=DISPLAY=:0",
+                "--setenv=XDG_ACTIVATION_TOKEN=wayland-token",
+                "--",
+                "shell",
+                "work",
+                "/run/spaces-host/bin/spaces-session-launcher",
+                "--dbus-env",
+                "DISPLAY",
+                "--",
+                "/usr/bin/kate",
             ],
         )
 

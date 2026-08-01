@@ -625,6 +625,23 @@ def _enter(
     else:
         operation = "enter-as-user"
         enter_arguments = [enter_user, space]
+    if graphical and enter_user is None:
+        # pkexec sanitizes its environment, so carry only these transient
+        # same-user launch identifiers through the privileged argument list.
+        launch_environment = {
+            name: value
+            for name in sorted(core.GRAPHICAL_LAUNCH_ENVIRONMENT)
+            if (value := os.environ.get(name))
+        }
+        if launch_environment:
+            serialized = json.dumps(
+                launch_environment,
+                separators=(",", ":"),
+            )
+            enter_arguments.insert(
+                0,
+                f"--launch-environment={serialized}",
+            )
     if command:
         enter_arguments.extend(["--", *command])
     return _invoke_raw_helper(operation, enter_arguments)

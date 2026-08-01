@@ -304,12 +304,15 @@ def _machine_shell(
     command: list[str],
     *,
     environment: dict[str, str] | None = None,
+    launch_environment: dict[str, str] | None = None,
     launcher: bool = False,
     agent: str | None = None,
 ) -> int:
     actual_command = command
     if launcher:
         actual_command = ["/run/spaces-host/bin/spaces-session-launcher"]
+        # Only the stable desktop environment is published to D-Bus. The
+        # one-shot launch environment remains local to this command.
         for name in sorted((environment or {})):
             option = (
                 "--dbus-env-path"
@@ -321,6 +324,10 @@ def _machine_shell(
             actual_command.extend(["--agent", agent])
         actual_command.append("--")
         actual_command.extend(command)
+    command_environment = {
+        **(environment or {}),
+        **(launch_environment or {}),
+    }
     completed = subprocess.run(
         [
             MACHINECTL,
@@ -328,7 +335,7 @@ def _machine_shell(
             f"--uid={user_name}",
             *(
                 f"--setenv={name}={value}"
-                for name, value in sorted((environment or {}).items())
+                for name, value in sorted(command_environment.items())
             ),
             "--",
             "shell",
@@ -343,7 +350,15 @@ def _machine_shell(
 def enter(
     target: str,
     command: list[str],
+    *,
+    launch_environment: dict[str, str] | None = None,
 ) -> int:
+    launch_environment = _validate_launch_environment(launch_environment)
+    launch_options = (
+        {"launch_environment": launch_environment}
+        if launch_environment
+        else {}
+    )
     user_name, separator, space_name = target.rpartition("@")
     if not separator or not user_name or not space_name:
         raise core.SpacesError(
@@ -380,7 +395,12 @@ def enter(
     if returncode != 0:
         return returncode
     if caller_uid == 0:
-        return _machine_shell(user.pw_name, space_name, command)
+        return _machine_shell(
+            user.pw_name,
+            space_name,
+            command,
+            **launch_options,
+        )
     desktop = user_permissions.get("desktop", True) and caller_uid != 0
     credential_agents = (
         user_permissions.get("credential_agents", True)
@@ -395,7 +415,12 @@ def enter(
         else {}
     )
     if not environment:
-        return _machine_shell(user.pw_name, space_name, command)
+        return _machine_shell(
+            user.pw_name,
+            space_name,
+            command,
+            **launch_options,
+        )
     graphical_environment = desktop and any(
         name != "SSH_AUTH_SOCK" for name in environment
     )
@@ -405,6 +430,7 @@ def enter(
             space_name,
             command,
             environment=environment,
+            **launch_options,
         )
     agent: str | None = None
     agent = session.polkit_agent(
@@ -425,6 +451,7 @@ def enter(
         environment=environment,
         launcher=True,
         agent=agent,
+        **launch_options,
     )
 
 
@@ -461,6 +488,20 @@ def enter_as_user(
     if returncode != 0:
         return returncode
     return _machine_shell(user_name, space_name, command)
+
+
+def _validate_launch_environment(
+    environment: object | None,
+) -> dict[str, str]:
+    if environment is None:
+        return {}
+    if not isinstance(environment, dict) or any(
+        name not in core.GRAPHICAL_LAUNCH_ENVIRONMENT
+        or not isinstance(value, str)
+        for name, value in environment.items()
+    ):
+        raise core.SpacesError(_("Invalid graphical launch environment."))
+    return dict(environment)
 
 
 def create(request: dict[str, Any]) -> None:
@@ -639,6 +680,7 @@ def build_parser() -> argparse.ArgumentParser:
     launch_parser = subparsers.add_parser("launch")
     launch_parser.add_argument("space")
     enter_parser = subparsers.add_parser("enter")
+    enter_parser.add_argument("--launch-environment")
     enter_parser.add_argument("target")
     enter_parser.add_argument(
         "command_arguments",
@@ -665,9 +707,15 @@ def main(argv: list[str] | None = None) -> int:
         if arguments.command == "launch":
             return launch(arguments.space)
         if arguments.command == "enter":
+            launch_options = {}
+            if arguments.launch_environment is not None:
+                launch_options["launch_environment"] = json.loads(
+                    arguments.launch_environment
+                )
             return enter(
                 arguments.target,
                 arguments.command_arguments,
+                **launch_options,
             )
         if arguments.command == "enter-as-user":
             return enter_as_user(
