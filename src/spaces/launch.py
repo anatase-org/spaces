@@ -11,6 +11,7 @@ import pwd
 import select
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import tempfile
@@ -2226,6 +2227,7 @@ def _command(
         "--quiet",
         f"--directory={rootfs}",
         f"--machine={space_name}",
+        f"--hostname={socket.gethostname()}",
         f"--bind={home}:/home",
         f"--bind={home / 'root'}:/root",
         *_unit_mask_bind_arguments(),

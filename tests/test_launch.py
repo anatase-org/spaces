@@ -441,6 +441,7 @@ class LaunchTests(unittest.TestCase):
             "--quiet",
             f"--directory={self.rootfs}",
             "--machine=work",
+            f"--hostname={launch_module.socket.gethostname()}",
             f"--bind={self.home}:/home",
             f"--bind={self.root_home}:/root",
             *launch_module._unit_mask_bind_arguments(),
@@ -541,6 +542,25 @@ class LaunchTests(unittest.TestCase):
                         launch_module.API_VFS_WRITABLE,
                         environment,
                     )
+
+    def test_command_uses_host_hostname_without_changing_machine_name(
+        self,
+    ) -> None:
+        with mock.patch.object(
+            launch_module.socket,
+            "gethostname",
+            return_value="host.example",
+        ):
+            arguments = launch_module._command(
+                "work",
+                self.rootfs,
+                self.home,
+                "basic",
+                "basic",
+            )
+
+        self.assertIn("--machine=work", arguments)
+        self.assertIn("--hostname=host.example", arguments)
 
     def test_selinux_arguments_require_active_selinux_and_policy(self) -> None:
         selinuxfs = Path(self.temporary.name) / "selinux"
