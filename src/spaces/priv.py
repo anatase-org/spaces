@@ -11,6 +11,9 @@ import fcntl
 import json
 import os
 import pwd
+import select
+import secrets
+import signal
 import shutil
 import stat
 import subprocess
@@ -33,6 +36,7 @@ MACHINECTL = "/usr/bin/machinectl"
 MERGED_DBUS_PATH_ENVIRONMENT = frozenset(
     {"XCURSOR_PATH", "XDG_CONFIG_DIRS", "XDG_DATA_DIRS"}
 )
+PROC_ROOT = Path("/proc")
 
 
 def get_driver(distribution_id: str) -> Any:
@@ -351,12 +355,16 @@ def _machine_shell(
     environment: dict[str, str] | None = None,
     launch_environment: dict[str, str] | None = None,
     steam_app_id: int | None = None,
+    caller_pidfd: int | None = None,
     launcher: bool = False,
     agent: str | None = None,
 ) -> int:
     actual_command = command
+    launch_id = secrets.token_hex(16) if caller_pidfd is not None else None
     if launcher:
         actual_command = ["/run/spaces-host/bin/spaces"]
+        if launch_id is not None:
+            actual_command.extend(["--launch-id", launch_id])
         # Only the stable desktop environment is published to D-Bus. The
         # one-shot launch environment remains local to this command.
         for name in sorted((environment or {})):
@@ -378,23 +386,46 @@ def _machine_shell(
         **(environment or {}),
         **(launch_environment or {}),
     }
-    completed = subprocess.run(
-        [
-            MACHINECTL,
-            "--quiet",
-            f"--uid={user_name}",
-            *(
-                f"--setenv={name}={value}"
-                for name, value in sorted(command_environment.items())
-            ),
-            "--",
-            "shell",
-            space_name,
-            *actual_command,
-        ],
-        check=False,
-    )
-    return completed.returncode
+    machine_command = [
+        MACHINECTL,
+        "--quiet",
+        f"--uid={user_name}",
+        *(
+            f"--setenv={name}={value}"
+            for name, value in sorted(command_environment.items())
+        ),
+        "--",
+        "shell",
+        space_name,
+        *actual_command,
+    ]
+    if caller_pidfd is None:
+        return subprocess.run(machine_command, check=False).returncode
+
+    poller = select.poll()
+    poller.register(caller_pidfd, select.POLLIN)
+    if poller.poll(0):
+        return 128 + signal.SIGTERM
+
+    process = subprocess.Popen(machine_command)
+    process_pidfd = os.pidfd_open(process.pid)
+    try:
+        poller.register(process_pidfd, select.POLLIN)
+        while True:
+            ready = {descriptor for descriptor, _events in poller.poll()}
+            returncode = process.poll()
+            if returncode is not None:
+                return returncode
+            if caller_pidfd in ready:
+                if launch_id is not None:
+                    user = pwd.getpwnam(user_name)
+                    _terminate_launch(launch_id, user.pw_uid)
+                if process.poll() is None:
+                    process.terminate()
+                process.wait()
+                return 128 + signal.SIGTERM
+    finally:
+        os.close(process_pidfd)
 
 
 def enter(
@@ -403,6 +434,7 @@ def enter(
     *,
     launch_environment: dict[str, str] | None = None,
     steam_app_id: int | str | None = None,
+    caller_pidfd: int | None = None,
 ) -> int:
     launch_environment = _validate_launch_environment(launch_environment)
     validated_steam_app_id = _validate_steam_app_id(steam_app_id)
@@ -411,6 +443,8 @@ def enter(
         launch_options["launch_environment"] = launch_environment
     if validated_steam_app_id is not None:
         launch_options["steam_app_id"] = validated_steam_app_id
+    if caller_pidfd is not None:
+        launch_options["caller_pidfd"] = caller_pidfd
     user_name, separator, space_name = target.rpartition("@")
     if not separator or not user_name or not space_name:
         raise core.SpacesError(
@@ -568,6 +602,45 @@ def _validate_steam_app_id(value: object | None) -> int | None:
     if app_id == 0 or app_id > 0xFFFFFFFF:
         raise core.SpacesError(_("Invalid Steam application ID."))
     return app_id
+
+
+def _open_caller_pidfd(value: str) -> int:
+    if not value.isascii() or not value.isdecimal():
+        raise core.SpacesError(_("Invalid caller process ID."))
+    caller_pid = int(value)
+    if caller_pid <= 1 or caller_pid != os.getppid():
+        raise core.SpacesError(_("The initiating process is unavailable."))
+    return os.pidfd_open(caller_pid)
+
+
+def _terminate_launch(launch_id: str, uid: int) -> None:
+    marker = f"--launch-id\0{launch_id}\0".encode()
+    for entry in PROC_ROOT.iterdir():
+        if not entry.name.isdecimal():
+            continue
+        descriptor = None
+        try:
+            descriptor = os.pidfd_open(int(entry.name))
+            command_line = (entry / "cmdline").read_bytes()
+            status = (entry / "status").read_text(encoding="utf-8")
+            process_uid = next(
+                int(line.split()[1])
+                for line in status.splitlines()
+                if line.startswith("Uid:")
+            )
+            if (
+                process_uid == uid
+                and command_line.startswith(
+                    b"/run/spaces-host/bin/spaces\0"
+                )
+                and marker in command_line
+            ):
+                signal.pidfd_send_signal(descriptor, signal.SIGTERM)
+        except (FileNotFoundError, ProcessLookupError, PermissionError):
+            pass
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
 
 
 def create(request: dict[str, Any]) -> None:
@@ -759,6 +832,7 @@ def build_parser() -> argparse.ArgumentParser:
     launch_parser = subparsers.add_parser("launch")
     launch_parser.add_argument("space")
     enter_parser = subparsers.add_parser("enter")
+    enter_parser.add_argument("--caller-pid")
     enter_parser.add_argument("--launch-environment")
     enter_parser.add_argument("--steam-app-id")
     enter_parser.add_argument("target")
@@ -794,11 +868,19 @@ def main(argv: list[str] | None = None) -> int:
                 )
             if arguments.steam_app_id is not None:
                 launch_options["steam_app_id"] = arguments.steam_app_id
-            return enter(
-                arguments.target,
-                arguments.command_arguments,
-                **launch_options,
-            )
+            caller_pidfd = None
+            if arguments.caller_pid is not None:
+                caller_pidfd = _open_caller_pidfd(arguments.caller_pid)
+                launch_options["caller_pidfd"] = caller_pidfd
+            try:
+                return enter(
+                    arguments.target,
+                    arguments.command_arguments,
+                    **launch_options,
+                )
+            finally:
+                if caller_pidfd is not None:
+                    os.close(caller_pidfd)
         if arguments.command == "enter-as-user":
             return enter_as_user(
                 arguments.user,

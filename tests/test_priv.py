@@ -4,6 +4,7 @@ import ast
 import io
 import json
 import os
+import signal
 import stat
 import subprocess
 import tempfile
@@ -1215,12 +1216,17 @@ class PrivilegedTests(unittest.TestCase):
     def test_enter_parser_forwards_graphical_launch_environment(self) -> None:
         with (
             mock.patch.object(priv.os, "geteuid", return_value=0),
+            mock.patch.object(
+                priv, "_open_caller_pidfd", return_value=99
+            ) as open_caller,
+            mock.patch.object(priv.os, "close") as close,
             mock.patch.object(priv, "enter", return_value=42) as enter,
         ):
             self.assertEqual(
                 priv.main(
                     [
                         "enter",
+                        "--caller-pid=4321",
                         "--steam-app-id=1234",
                         "--launch-environment="
                         '{"DESKTOP_STARTUP_ID":"x11-id",'
@@ -1241,7 +1247,26 @@ class PrivilegedTests(unittest.TestCase):
                 "XDG_ACTIVATION_TOKEN": "wayland-token",
             },
             steam_app_id="1234",
+            caller_pidfd=99,
         )
+        open_caller.assert_called_once_with("4321")
+        close.assert_called_once_with(99)
+
+    def test_caller_pidfd_requires_the_direct_parent(self) -> None:
+        with (
+            mock.patch.object(priv.os, "getppid", return_value=4321),
+            mock.patch.object(priv.os, "pidfd_open", return_value=99) as open_pidfd,
+        ):
+            self.assertEqual(priv._open_caller_pidfd("4321"), 99)
+        open_pidfd.assert_called_once_with(4321)
+
+        for value in ("", "invalid", "0", "1", "4322"):
+            with (
+                self.subTest(value=value),
+                mock.patch.object(priv.os, "getppid", return_value=4321),
+                self.assertRaises(core.SpacesError),
+            ):
+                priv._open_caller_pidfd(value)
 
     def test_graphical_launch_environment_rejects_other_names(self) -> None:
         for name in ("DISPLAY", "SteamAppId", "SteamGameId"):
@@ -1442,6 +1467,86 @@ class PrivilegedTests(unittest.TestCase):
                 "-u",
             ],
         )
+
+    def test_machine_shell_stops_when_the_caller_exits(self) -> None:
+        real_popen = subprocess.Popen
+        caller = real_popen(["/usr/bin/sleep", "0.1"])
+        caller_pidfd = os.pidfd_open(caller.pid)
+        machine = None
+
+        def launch_machine(_command: list[str]) -> subprocess.Popen[bytes]:
+            nonlocal machine
+            machine = real_popen(["/usr/bin/sleep", "30"])
+            return machine
+
+        try:
+            with mock.patch.object(
+                priv.subprocess,
+                "Popen",
+                side_effect=launch_machine,
+            ), mock.patch.object(
+                priv.secrets, "token_hex", return_value="launch-token"
+            ), mock.patch.object(
+                priv.pwd,
+                "getpwnam",
+                return_value=mock.Mock(pw_uid=1000),
+            ), mock.patch.object(priv, "_terminate_launch") as terminate:
+                self.assertEqual(
+                    priv._machine_shell(
+                        "alice",
+                        "work",
+                        ["id", "-u"],
+                        caller_pidfd=caller_pidfd,
+                        launcher=True,
+                    ),
+                    128 + signal.SIGTERM,
+                )
+            terminate.assert_called_once_with("launch-token", 1000)
+            assert machine is not None
+            self.assertEqual(machine.returncode, -signal.SIGTERM)
+        finally:
+            os.close(caller_pidfd)
+            caller.wait()
+            if machine is not None and machine.poll() is None:
+                machine.terminate()
+                machine.wait()
+
+    def test_terminate_launch_signals_only_the_matching_user_reaper(
+        self,
+    ) -> None:
+        proc = Path(self.temporary.name) / "proc"
+        matching = proc / "123"
+        matching.mkdir(parents=True)
+        (matching / "cmdline").write_bytes(
+            b"/run/spaces-host/bin/spaces\0"
+            b"--launch-id\0launch-token\0--\0application\0"
+        )
+        (matching / "status").write_text(
+            "Name:\treaper\nUid:\t1000\t1000\t1000\t1000\n",
+            encoding="utf-8",
+        )
+        wrong_user = proc / "124"
+        wrong_user.mkdir()
+        (wrong_user / "cmdline").write_bytes(
+            (matching / "cmdline").read_bytes()
+        )
+        (wrong_user / "status").write_text(
+            "Name:\treaper\nUid:\t1001\t1001\t1001\t1001\n",
+            encoding="utf-8",
+        )
+
+        with (
+            mock.patch.object(priv, "PROC_ROOT", proc),
+            mock.patch.object(priv.os, "pidfd_open", side_effect=[23, 24]),
+            mock.patch.object(priv.os, "close") as close,
+            mock.patch.object(priv.signal, "pidfd_send_signal") as send,
+        ):
+            priv._terminate_launch("launch-token", 1000)
+
+        send.assert_called_once()
+        self.assertIn(send.call_args.args[0], {23, 24})
+        self.assertEqual(send.call_args.args[1], signal.SIGTERM)
+        self.assertEqual(close.call_args_list, [mock.call(23), mock.call(24)])
 
     def test_machine_shell_passes_file_environment_to_pam_command(self) -> None:
         completed = subprocess.CompletedProcess([], 0)

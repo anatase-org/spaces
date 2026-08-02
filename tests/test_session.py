@@ -2132,6 +2132,27 @@ class NativeLauncherTests(unittest.TestCase):
         process.terminate()
         self.assertEqual(process.wait(timeout=5), 23)
 
+    def test_application_survives_launcher_hangup(self) -> None:
+        process = subprocess.Popen(
+            [
+                self.launcher,
+                "--",
+                "/bin/sh",
+                "-c",
+                "trap 'exit 23' TERM; while :; do sleep 0.05; done",
+            ]
+        )
+        try:
+            time.sleep(0.1)
+            process.send_signal(signal.SIGHUP)
+            time.sleep(0.1)
+            self.assertIsNone(process.poll())
+            process.terminate()
+            self.assertEqual(process.wait(timeout=5), 23)
+        finally:
+            if process.poll() is None:
+                process.kill()
+
     @unittest.skipUnless(shutil.which("script"), "script is unavailable")
     def test_application_remains_in_terminal_foreground(self) -> None:
         application = [

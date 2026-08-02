@@ -682,6 +682,7 @@ def _enter(
             and 0 < int(steam_app_id) <= 0xFFFFFFFF
             and 0 < int(steam_game_id) <= 0xFFFFFFFFFFFFFFFF
         ):
+            enter_arguments.insert(0, f"--caller-pid={os.getpid()}")
             enter_arguments.insert(0, f"--steam-app-id={steam_app_id}")
     if command:
         enter_arguments.extend(["--", *command])

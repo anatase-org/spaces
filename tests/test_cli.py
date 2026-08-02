@@ -1200,6 +1200,7 @@ class CliTests(unittest.TestCase):
                 "_invoke_raw_helper",
                 return_value=0,
             ) as invoke,
+            mock.patch.object(cli.os, "getpid", return_value=4321),
         ):
             self.assertEqual(
                 cli.main(
@@ -1219,6 +1220,7 @@ class CliTests(unittest.TestCase):
             arguments,
             [
                 "--steam-app-id=1234",
+                "--caller-pid=4321",
                 "--launch-environment="
                 '{"DESKTOP_STARTUP_ID":"x11-startup-id",'
                 '"XDG_ACTIVATION_TOKEN":"wayland-token"}',

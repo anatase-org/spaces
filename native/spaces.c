@@ -1346,6 +1346,14 @@ int main(int argc, char **argv)
             merge_dbus_paths[dbus_environment_count] = merge_path;
             dbus_environment_count++;
             index += 2;
+        } else if (strcmp(argv[index], "--launch-id") == 0) {
+            if (index + 1 >= argc) {
+                fprintf(stderr, "spaces: --launch-id requires a value\n");
+                free(dbus_environment);
+                free(merge_dbus_paths);
+                return 2;
+            }
+            index += 2;
         } else if (strcmp(argv[index], "SteamLaunch") == 0) {
             steam_arguments = true;
             index++;
