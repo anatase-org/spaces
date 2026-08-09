@@ -77,6 +77,11 @@ class PackagingTests(unittest.TestCase):
                 1,
             )[0]
             self.assertNotIn("selinux/packages/spaces.pp", main_files)
+            self.assertIn("%dir %{_localstatedir}/lib/spaces", main_files)
+            self.assertIn(
+                "%{buildroot}%{_localstatedir}/lib/spaces",
+                spec,
+            )
             policy_files = spec.split("%files selinux\n", 1)[1]
             self.assertIn("selinux/packages/spaces.pp", policy_files)
 

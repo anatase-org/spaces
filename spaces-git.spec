@@ -76,6 +76,7 @@ install -Dm644 selinux/spaces.pp \
   %{buildroot}%{_datadir}/selinux/packages/spaces.pp
 install -d -m0755 \
   %{buildroot}%{_sysconfdir}/spaces \
+  %{buildroot}%{_localstatedir}/lib/spaces \
   %{buildroot}%{_prefix}/local/share/applications/spaces-icons
 for distro in arch fedora ubuntu; do
   install -Dm644 "data/applications/spaces-${distro}.desktop" \
@@ -129,6 +130,7 @@ fi
 %{_datadir}/spaces/repos/*
 %config(noreplace) %{_sysconfdir}/pam.d/spaces
 %dir %{_sysconfdir}/spaces
+%dir %{_localstatedir}/lib/spaces
 %dir /usr/lib/spaces
 /usr/lib/spaces/spaces-pam
 /usr/lib/spaces/spaces-broker

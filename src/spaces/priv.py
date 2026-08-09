@@ -31,6 +31,8 @@ from . import session
 
 SYSTEMCTL = "/usr/bin/systemctl"
 MACHINECTL = "/usr/bin/machinectl"
+RESTORECON = "/usr/sbin/restorecon"
+SELINUXFS = Path("/sys/fs/selinux")
 # These are search paths, not scalar session coordinates.  Keep Spaces'
 # entries first, then retain guest distribution and administrator additions.
 MERGED_DBUS_PATH_ENVIRONMENT = frozenset(
@@ -63,6 +65,13 @@ def _root_owned_directory(path: Path) -> None:
         )
     os.chown(path, 0, 0)
     os.chmod(path, 0o755)
+    # Heal SELinux when starting
+    if (
+        path == core.STATE_ROOT
+        and (SELINUXFS / "enforce").is_file()
+        and Path(RESTORECON).is_file()
+    ):
+        subprocess.run([RESTORECON, "-F", str(path)], check=True)
 
 
 @contextmanager

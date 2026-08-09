@@ -214,6 +214,47 @@ class PrivilegedTests(unittest.TestCase):
 
         self.assertEqual(targets, [space])
 
+    def test_new_state_root_is_relabelled_when_selinux_is_active(self) -> None:
+        selinuxfs = Path(self.temporary.name) / "selinux"
+        (selinuxfs / "enforce").parent.mkdir()
+        (selinuxfs / "enforce").touch()
+        restorecon = Path(self.temporary.name) / "restorecon"
+        restorecon.touch()
+
+        with (
+            mock.patch.object(priv, "SELINUXFS", selinuxfs),
+            mock.patch.object(priv, "RESTORECON", str(restorecon)),
+            mock.patch.object(priv.subprocess, "run") as run,
+            priv._space_lock(self.state_root / "work", create=True),
+        ):
+            pass
+
+        run.assert_called_once_with(
+            [str(restorecon), "-F", str(self.state_root)],
+            check=True,
+        )
+
+    def test_existing_state_root_context_is_checked(self) -> None:
+        self.state_root.mkdir()
+        selinuxfs = Path(self.temporary.name) / "selinux"
+        (selinuxfs / "enforce").parent.mkdir()
+        (selinuxfs / "enforce").touch()
+        restorecon = Path(self.temporary.name) / "restorecon"
+        restorecon.touch()
+
+        with (
+            mock.patch.object(priv, "SELINUXFS", selinuxfs),
+            mock.patch.object(priv, "RESTORECON", str(restorecon)),
+            mock.patch.object(priv.subprocess, "run") as run,
+            priv._space_lock(self.state_root / "work", create=True),
+        ):
+            pass
+
+        run.assert_called_once_with(
+            [str(restorecon), "-F", str(self.state_root)],
+            check=True,
+        )
+
     def test_different_space_locks_can_run_concurrently(self) -> None:
         release = threading.Event()
         entered = {
