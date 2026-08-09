@@ -1088,6 +1088,47 @@ class CliTests(unittest.TestCase):
                 ["alice@ubuntu"],
             )
 
+    def test_enter_creates_partial_space_with_missing_rootfs(self) -> None:
+        identity = core.Identity(1000, 1000, Path("/home/alice"))
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            target = state / "ubuntu"
+            target.mkdir()
+            (target / "info.json").write_text("{}", encoding="utf-8")
+            with (
+                mock.patch.object(core, "STATE_ROOT", state),
+                mock.patch.object(
+                    cli,
+                    "_has_controlling_terminal",
+                    return_value=True,
+                ),
+                mock.patch.object(cli, "_create", return_value=0) as create,
+                mock.patch.object(
+                    core,
+                    "initiating_identity",
+                    return_value=identity,
+                ),
+                mock.patch.object(
+                    cli.pwd,
+                    "getpwuid",
+                    return_value=mock.Mock(pw_name="alice"),
+                ),
+                mock.patch.object(
+                    cli, "_invoke_raw_helper", return_value=0
+                ) as invoke,
+            ):
+                self.assertEqual(cli.main(["enter", "ubuntu"]), 0)
+
+        create.assert_called_once_with(
+            "ubuntu",
+            missing=True,
+            enable=True,
+        )
+        invoke.assert_called_once_with(
+            "enter",
+            ["alice@ubuntu"],
+        )
+
     def test_cancelled_missing_space_creation_does_not_enter(self) -> None:
         with (
             tempfile.TemporaryDirectory() as temporary,
@@ -1113,7 +1154,6 @@ class CliTests(unittest.TestCase):
             ("arch", False, None),
             ("work", True, None),
             ("custom", True, None),
-            ("arch", True, "metadata"),
             ("arch", True, "space-symlink"),
             ("arch", True, "info-symlink"),
         )
@@ -1128,13 +1168,7 @@ class CliTests(unittest.TestCase):
             ):
                 state = Path(temporary)
                 target = state / space
-                if target_kind == "metadata":
-                    target.mkdir()
-                    (target / "info.json").write_text(
-                        "{}",
-                        encoding="utf-8",
-                    )
-                elif target_kind == "space-symlink":
+                if target_kind == "space-symlink":
                     target.symlink_to(state / "missing-target")
                 elif target_kind == "info-symlink":
                     target.mkdir()

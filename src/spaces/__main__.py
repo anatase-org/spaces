@@ -621,6 +621,7 @@ def _enter(
     core.validate_space_name(space)
     target = core.STATE_ROOT / space
     info_path = target / "info.json"
+    rootfs = target / "rootfs"
     target_missing = not target.exists() and not target.is_symlink()
     info_missing = (
         not target.is_symlink()
@@ -628,7 +629,16 @@ def _enter(
         and not info_path.exists()
         and not info_path.is_symlink()
     )
-    if (target_missing or info_missing) and _has_controlling_terminal():
+    rootfs_missing = (
+        not target.is_symlink()
+        and target.is_dir()
+        and not info_path.is_symlink()
+        and not rootfs.exists()
+        and not rootfs.is_symlink()
+    )
+    if (
+        target_missing or info_missing or rootfs_missing
+    ) and _has_controlling_terminal():
         driver = get_driver(space)
         if driver is not None and driver.default_name == space:
             return_code = _create(space, missing=True, enable=enable)
