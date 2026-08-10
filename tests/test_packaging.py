@@ -405,6 +405,17 @@ class PackagingTests(unittest.TestCase):
             type_enforcement,
         )
         self.assertIn(
+            'type_transition spaces_t usr_t:dir spaces_shortcut_t '
+            '"spaces-icons";',
+            type_enforcement,
+        )
+        self.assertIn(
+            "allow spaces_t usr_t:dir {\n"
+            "\tadd_name create list_dir_perms remove_name rmdir write\n"
+            "};",
+            type_enforcement,
+        )
+        self.assertIn(
             "/usr/lib/spaces/guest(/.*)?",
             file_contexts,
         )

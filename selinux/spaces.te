@@ -70,13 +70,17 @@ files_var_lib_filetrans(spaces_t, spaces_file_t, dir, "spaces")
 
 # Exported desktop entries and their icons are the only host /usr content
 # Spaces may modify.  Flat desktop IDs require creating entries in the shared
-# applications directory; new regular files transition immediately to the
-# narrowly managed shortcut type.
+# applications directory.  The shared directory itself keeps usr_t when it
+# has to be created, while the private icon directory and new regular files
+# transition immediately to the narrowly managed shortcut type.
 gen_require(`
 	type usr_t;
 ')
 type_transition spaces_t usr_t:file spaces_shortcut_t;
-allow spaces_t usr_t:dir { add_name list_dir_perms remove_name write };
+type_transition spaces_t usr_t:dir spaces_shortcut_t "spaces-icons";
+allow spaces_t usr_t:dir {
+	add_name create list_dir_perms remove_name rmdir write
+};
 manage_dirs_pattern(spaces_t, spaces_shortcut_t, spaces_shortcut_t)
 manage_files_pattern(spaces_t, spaces_shortcut_t, spaces_shortcut_t)
 manage_lnk_files_pattern(spaces_t, spaces_shortcut_t, spaces_shortcut_t)
