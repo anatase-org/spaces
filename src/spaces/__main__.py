@@ -130,6 +130,11 @@ def build_parser() -> argparse.ArgumentParser:
         metavar=_("ARGUMENT"),
     )
 
+    start_parser = subparsers.add_parser(
+        "start", help=_("start a configured space")
+    )
+    start_parser.add_argument("space")
+
     enter_parser = subparsers.add_parser(
         "enter",
         help=_("enter a space or run a command in it"),
@@ -610,6 +615,13 @@ def _cp(arguments: list[str]) -> int:
     return _invoke_helper("cp", {"arguments": fixed_arguments})
 
 
+def _start(space: str) -> int:
+    """Start a configured space through the privileged helper."""
+
+    core.validate_space_name(space)
+    return _invoke_raw_helper("start", [space])
+
+
 def _enter(
     space: str,
     command: list[str],
@@ -765,6 +777,8 @@ def main(argv: list[str] | None = None) -> int:
                 noconfirm=arguments.noconfirm,
                 purge=arguments.purge,
             )
+        elif arguments.command == "start":
+            return _start(arguments.space)
         elif arguments.command == "enter":
             return _enter(
                 arguments.space,

@@ -185,6 +185,14 @@ class CliTests(unittest.TestCase):
 
         agent.assert_called_once_with()
 
+    def test_start_invokes_privileged_raw_helper(self) -> None:
+        with mock.patch.object(
+            cli, "_invoke_raw_helper", return_value=42
+        ) as invoke:
+            self.assertEqual(cli.main(["start", "work"]), 42)
+
+        invoke.assert_called_once_with("start", ["work"])
+
     def test_all_parser_distributions_have_drivers(self) -> None:
         for distribution_id in ("arch", "fedora", "ubuntu", "kali", "custom"):
             self.assertIsNotNone(cli.get_driver(distribution_id))

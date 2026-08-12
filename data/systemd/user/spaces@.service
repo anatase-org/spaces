@@ -1,9 +1,10 @@
 [Unit]
 Description=Start Spaces environment %I for the current user
+ConditionPathExists=/var/lib/spaces/%I/info.json
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/pkexec /usr/bin/spaces.priv start %I
+ExecStart=/usr/bin/spaces start %I
 
 [Install]
 WantedBy=default.target

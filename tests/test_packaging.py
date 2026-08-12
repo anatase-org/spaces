@@ -150,11 +150,16 @@ class PackagingTests(unittest.TestCase):
             strict=False,
         )
         user_unit.read(user_service, encoding="utf-8")
+        self.assertEqual(
+            user_unit["Unit"]["ConditionPathExists"],
+            "/var/lib/spaces/%I/info.json",
+        )
         self.assertEqual(user_unit["Service"]["Type"], "oneshot")
         self.assertEqual(
             user_unit["Service"]["ExecStart"],
-            "/usr/bin/pkexec /usr/bin/spaces.priv start %I",
+            "/usr/bin/spaces start %I",
         )
+        self.assertNotIn("pkexec", user_unit["Service"]["ExecStart"])
         self.assertNotIn("RemainAfterExit", user_unit["Service"])
         self.assertEqual(
             user_unit["Install"]["WantedBy"],
