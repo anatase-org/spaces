@@ -67,6 +67,11 @@ manage_sock_files_pattern(spaces_t, spaces_file_t, spaces_file_t)
 manage_chr_files_pattern(spaces_t, spaces_file_t, spaces_file_t)
 manage_blk_files_pattern(spaces_t, spaces_file_t, spaces_file_t)
 files_var_lib_filetrans(spaces_t, spaces_file_t, dir, "spaces")
+# The supervisor runs restorecon -F over persistent state before each
+# operation.  Files created while an unconfined SELinux user initiated an
+# operation can already have the right type but the initiating user's object
+# identity.  Let the trusted supervisor restore the complete default context.
+domain_obj_id_change_exemption(spaces_t)
 
 # Exported desktop entries and their icons are the only host /usr content
 # Spaces may modify.  Flat desktop IDs require creating entries in the shared
@@ -103,6 +108,11 @@ manage_chr_files_pattern(spaces_t, spaces_apifs_file_t, spaces_apifs_file_t)
 manage_blk_files_pattern(spaces_t, spaces_apifs_file_t, spaces_apifs_file_t)
 allow spaces_t spaces_apifs_file_t:{ file dir } mounton;
 allow spaces_t spaces_apifs_file_t:filesystem { mount remount unmount };
+
+# nspawn bind-mounts the device nodes admitted by Spaces while it is still in
+# the host supervisor domain.  The application-level device selection and the
+# service cgroup policy restrict which nodes are available for these mounts.
+dev_mounton_all_device_nodes(spaces_t)
 
 # systemd-nspawn uses setexeccon(3) for --selinux-context before it executes
 # the container's init.

@@ -272,6 +272,14 @@ class PackagingTests(unittest.TestCase):
             type_enforcement,
         )
         self.assertIn(
+            "domain_obj_id_change_exemption(spaces_t)",
+            type_enforcement,
+        )
+        self.assertIn(
+            "dev_mounton_all_device_nodes(spaces_t)",
+            type_enforcement,
+        )
+        self.assertIn(
             "allow spaces_container_t cgroup_t:filesystem mount;",
             type_enforcement,
         )
