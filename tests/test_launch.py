@@ -445,14 +445,6 @@ class LaunchTests(unittest.TestCase):
             f"--bind={self.home}:/home",
             f"--bind={self.root_home}:/root",
             *launch_module._unit_mask_bind_arguments(),
-            "--boot",
-            "--setenv=SYSTEMD_GETTY_AUTO=no",
-            "--console=read-only",
-            "--private-users=no",
-            "--keep-unit",
-            "--settings=no",
-            "--notify-ready=yes",
-            "--resolv-conf=bind-host",
         ]
 
         for network, added_caps in network_caps.items():
@@ -523,25 +515,33 @@ class LaunchTests(unittest.TestCase):
                     for capability in dropped_caps
                     if capability not in expected_kept
                 ]
+                network_sysctl_arguments = (
+                    list(launch_module.NETWORK_SYSCTL_BINDS)
+                    if network == "admin"
+                    else []
+                )
                 self.assertEqual(
                     arguments,
                     [
                         *common,
+                        *network_sysctl_arguments,
+                        "--boot",
+                        "--setenv=SYSTEMD_GETTY_AUTO=no",
+                        "--console=read-only",
+                        "--private-users=no",
+                        "--keep-unit",
+                        "--settings=no",
+                        "--notify-ready=yes",
+                        "--resolv-conf=bind-host",
                         f"--drop-capability={','.join(expected_dropped)}",
                         f"--capability={','.join(expected_kept)}",
                     ],
                 )
                 self.assertEqual(environment["PRESERVED"], "yes")
-                if network == "admin":
-                    self.assertEqual(
-                        environment[launch_module.API_VFS_WRITABLE],
-                        "network",
-                    )
-                else:
-                    self.assertNotIn(
-                        launch_module.API_VFS_WRITABLE,
-                        environment,
-                    )
+                self.assertNotIn(
+                    launch_module.API_VFS_WRITABLE,
+                    environment,
+                )
 
     def test_command_uses_host_hostname_without_changing_machine_name(
         self,
@@ -708,6 +708,8 @@ class LaunchTests(unittest.TestCase):
             run.call_args.kwargs["env"][launch_module.API_VFS_WRITABLE],
             "yes",
         )
+        for argument in launch_module.NETWORK_SYSCTL_BINDS:
+            self.assertNotIn(argument, run.call_args.args[0])
 
     def test_enabled_authentication_starts_service_and_adds_exact_binds(
         self,

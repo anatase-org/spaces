@@ -150,6 +150,10 @@ KERNEL_CAPS = {
     "development": DEVELOPMENT_KERNEL_CAPS,
     "admin": DEVELOPMENT_KERNEL_CAPS,
 }
+NETWORK_SYSCTL_BINDS = (
+    "--bind=/proc/sys/net:/run/spaces-host/proc-sys-net",
+    "--bind=/run/spaces-host/proc-sys-net:/proc/sys/net",
+)
 
 
 @dataclass(frozen=True)
@@ -2235,6 +2239,14 @@ def _command(
         *custom_binds,
         *custom_overlays,
         *(_bind_argument(mount) for mount in mounts),
+        # nspawn resolves mounts below /proc after making /proc/sys read-only.
+        # Stage the host view outside /proc first, then bind it over the
+        # network subtree while leaving every other sysctl read-only.
+        *(
+            NETWORK_SYSCTL_BINDS
+            if network == "admin" and kernel_capabilities != "admin"
+            else ()
+        ),
         "--boot",
         "--setenv=SYSTEMD_GETTY_AUTO=no",
         "--console=read-only",
@@ -2278,8 +2290,6 @@ def launch(space_name: str) -> int:
     environment.pop(API_VFS_WRITABLE, None)
     if kernel_capabilities == "admin":
         environment[API_VFS_WRITABLE] = "yes"
-    elif network == "admin":
-        environment[API_VFS_WRITABLE] = "network"
 
     _apply_rootfs_fixups(rootfs)
     users = _resolve_users(info, home)
