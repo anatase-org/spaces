@@ -264,6 +264,7 @@ gen_require(`
 	type device_t;
 	type fixed_disk_device_t;
 	type fonts_t;
+	type hsa_device_t;
 	type hugetlbfs_t;
 	type lvm_control_t;
 	type mtrr_device_t;
@@ -313,6 +314,10 @@ manage_sock_files_pattern(
 # host devices enter a space.  SELinux must then permit those selected devices
 # to function.
 allow spaces_container_t fixed_disk_device_t:blk_file rw_blk_file_perms;
+allow spaces_container_t device_t:chr_file rw_chr_file_perms;
+allow spaces_container_t device_t:chr_file map;
+allow spaces_container_t hsa_device_t:chr_file rw_chr_file_perms;
+allow spaces_container_t hsa_device_t:chr_file map;
 allow spaces_container_t lvm_control_t:chr_file rw_chr_file_perms;
 allow spaces_container_t sound_device_t:chr_file rw_chr_file_perms;
 allow spaces_container_t cpu_device_t:chr_file { open read };
