@@ -1,3 +1,5 @@
 Spaces is a small sandboxing application implemented as a thin wrapper over systemd-nspawn and machinectl. It is used to launch "Spaces", which are nspawn machines that contain systemd systems that use Arch, Fedora, Ubuntu, etc.
 
 You can run a command in a space with `spaces enter <space> -- <cmd>`. The name of the space is also the name of the nspawn machine. You may interact with it with a command such as `sudo machinectl --quiet shell root@ubuntu` directly. ALWAYS USE SUDO WHEN INTERACTING WITH MACHINECTL / SYSTEMD-RUN TO AVOID POLKITS. `spaces enter` does not require sudo for the same user, but `spaces create` and `spaces configure` do to avoid polkits.
+
+When working on another device over ssh, we can use `./sync.sh <device>` to sync spaces to the device. `--selinux` also syncs the SELinux policy. YOU MUST NEVER USE `--selinux` YOURSELF, IT CORRUPTS THE DEVICE POLICY AND BREAKS UPDATES. ASK THE USER INSTEAD.
