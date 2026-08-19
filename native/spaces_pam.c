@@ -121,10 +121,10 @@ int main(int argc, char **argv) {
     int result = pam_start("spaces", user, &conversation, &handle);
     if (result == PAM_SUCCESS) {
         spaces_send_frame(fd, SPACES_READY, NULL, 0);
-        result = pam_authenticate(handle, PAM_DISALLOW_NULL_AUTHTOK);
+        result = pam_authenticate(handle, 0);
     }
     if (result == PAM_SUCCESS) {
-        result = pam_acct_mgmt(handle, PAM_DISALLOW_NULL_AUTHTOK);
+        result = pam_acct_mgmt(handle, 0);
     }
     uint32_t network_result = htonl((uint32_t)result);
     spaces_send_frame(

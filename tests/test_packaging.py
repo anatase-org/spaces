@@ -929,6 +929,17 @@ class PackagingTests(unittest.TestCase):
         self.assertNotIn("notify_session", closing)
         self.assertNotIn("SPACES_AUTH_SESSION", source)
 
+    def test_host_pam_worker_defers_empty_password_policy_to_pam(
+        self,
+    ) -> None:
+        source = (ROOT / "native" / "spaces_pam.c").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("pam_authenticate(handle, 0)", source)
+        self.assertIn("pam_acct_mgmt(handle, 0)", source)
+        self.assertNotIn("PAM_DISALLOW_NULL_AUTHTOK", source)
+
     def test_pkgbuild_is_not_in_source_manifest(self) -> None:
         manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8")
         self.assertNotIn("PKGBUILD", manifest)
