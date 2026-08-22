@@ -346,6 +346,15 @@ class PackagingTests(unittest.TestCase):
             type_enforcement,
         )
         self.assertIn(
+            "allow spaces_container_t xserver_misc_device_t:chr_file "
+            "rw_chr_file_perms;",
+            type_enforcement,
+        )
+        self.assertIn(
+            "allow spaces_container_t xserver_misc_device_t:chr_file map;",
+            type_enforcement,
+        )
+        self.assertIn(
             "allow spaces_container_t lvm_control_t:chr_file "
             "rw_chr_file_perms;",
             type_enforcement,

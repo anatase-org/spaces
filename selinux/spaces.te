@@ -278,6 +278,7 @@ gen_require(`
 	type user_tty_device_t;
 	type tun_tap_device_t;
 	type vhost_device_t;
+	type xserver_misc_device_t;
 ')
 allow spaces_container_t cgroup_t:filesystem mount;
 allow spaces_container_t cgroup_t:file mounton;
@@ -318,6 +319,10 @@ allow spaces_container_t device_t:chr_file rw_chr_file_perms;
 allow spaces_container_t device_t:chr_file map;
 allow spaces_container_t hsa_device_t:chr_file rw_chr_file_perms;
 allow spaces_container_t hsa_device_t:chr_file map;
+# NVIDIA's udev rules label its control, GPU, UVM, and capability nodes as
+# xserver_misc_device_t.
+allow spaces_container_t xserver_misc_device_t:chr_file rw_chr_file_perms;
+allow spaces_container_t xserver_misc_device_t:chr_file map;
 allow spaces_container_t lvm_control_t:chr_file rw_chr_file_perms;
 allow spaces_container_t sound_device_t:chr_file rw_chr_file_perms;
 allow spaces_container_t cpu_device_t:chr_file { open read };
