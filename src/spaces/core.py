@@ -30,6 +30,7 @@ KERNEL_CAPABILITY_LEVELS = (
 DEVICE_LEVELS = ("disabled", "basic", "admin", "full")
 DEFAULT_HOME_FOLDERS = ("Projects", "Downloads")
 DEFAULT_HOME_FILES = (
+    ".gitconfig",
     ".ssh/config",
 )
 EXCLUDED_HOME_FILES = frozenset({".bash_history", ".zhistory"})
@@ -66,6 +67,7 @@ PERMISSION_PRESETS: dict[str, dict[str, dict[str, Any]]] = {
                 "Projects",
                 ".bashrc",
                 ".zshrc",
+                ".gitconfig",
                 ".ssh/config",
             ],
             "administrator": True,
