@@ -107,8 +107,8 @@ restorecon -RF %{_bindir}/spaces.priv %{_localstatedir}/lib/spaces \
 restorecon -F /home/*/.ssh/config /root/.ssh/config 2>/dev/null || :
 
 %postun selinux
-%selinux_modules_uninstall spaces
 if [ $1 -eq 0 ]; then
+  %selinux_modules_uninstall spaces
   restorecon -F /home/*/.ssh/config /root/.ssh/config 2>/dev/null || :
 fi
 
