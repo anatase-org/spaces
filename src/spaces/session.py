@@ -2547,6 +2547,19 @@ class DesktopController:
             pass
 
     def _prepare_guest_root(self, user: DesktopUser) -> None:
+        # pam_systemd starts user-runtime-dir@.service when the first guest
+        # login is opened.  If credential sockets are mounted before that,
+        # the later /run/user/<uid> mount hides them while leaving the child
+        # mounts visible in mountinfo.  Establish the standard runtime mount
+        # first so login sessions reuse it and the socket binds remain
+        # reachable.
+        self._machine_root(
+            [
+                SYSTEMCTL,
+                "start",
+                f"user-runtime-dir@{user.uid}.service",
+            ]
+        )
         self._machine_root(
             [
                 "/usr/bin/install",

@@ -962,6 +962,24 @@ class DesktopControllerTests(unittest.TestCase):
         self.assertEqual(command[-1], binding.destination)
         self.assertTrue(command[-2].startswith(f"/proc/{os.getpid()}/fd/"))
 
+    def test_prepares_runtime_mount_before_session_bind_targets(self) -> None:
+        with mock.patch.object(
+            self.controller, "_machine_root"
+        ) as machine_root:
+            self.controller._prepare_guest_root(self.desktop_user)
+
+        self.assertEqual(machine_root.call_count, 2)
+        self.assertEqual(
+            machine_root.call_args_list[0].args[0],
+            [
+                session.SYSTEMCTL,
+                "start",
+                f"user-runtime-dir@{self.desktop_user.uid}.service",
+            ],
+        )
+        install = machine_root.call_args_list[1].args[0]
+        self.assertEqual(install[0], "/usr/bin/install")
+
     def test_mount_reports_replaced_resource_and_destination(self) -> None:
         source = self.root / "socket"
         source.write_text("old", encoding="utf-8")
