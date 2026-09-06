@@ -65,6 +65,7 @@ spaces = ["overlay/*.png"]
   "data/portal/dbus-1/services/org.freedesktop.secrets.service",
   "data/portal/dbus-1/services/org.kde.secretservicecompat.service",
   "data/portal/dbus-1/services/org.kde.kwalletd5.service",
+  "data/portal/dbus-1/services/org.kde.kwalletd6.service",
   "data/portal/dbus-1/services/org.kde.StatusNotifierWatcher.service",
 ]
 "share/spaces/portal/systemd/user" = [

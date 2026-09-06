@@ -301,6 +301,7 @@ class PortalConfigurationTests(unittest.TestCase):
             "org.freedesktop.secrets",
             "org.kde.secretservicecompat",
             "org.kde.kwalletd5",
+            "org.kde.kwalletd6",
         ):
             service = configparser.ConfigParser()
             service.optionxform = str
@@ -324,6 +325,17 @@ class PortalConfigurationTests(unittest.TestCase):
             "apiEnabled[$i]=true",
         ):
             self.assertIn(entry, wallet)
+
+        helper = (ROOT / "native" / "spaces_secret_helper.c").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('"org.kde.kwalletd6"', helper)
+        self.assertIn('"/modules/kwalletd6"', helper)
+        self.assertIn('"org.kde.KWallet", "open"', helper)
+        self.assertIn('"(sxs)", "spaces-managed-v1"', helper)
+        self.assertNotIn(
+            '"org.freedesktop.Secret.Collection", "Locked"', helper
+        )
 
 
 class PortalProxyTests(unittest.TestCase):

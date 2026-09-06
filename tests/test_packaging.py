@@ -862,6 +862,7 @@ class PackagingTests(unittest.TestCase):
             "org.freedesktop.secrets.service",
             "org.kde.secretservicecompat.service",
             "org.kde.kwalletd5.service",
+            "org.kde.kwalletd6.service",
             "data/portal/config/kwalletrc",
         ):
             self.assertIn(asset, pyproject)

@@ -203,8 +203,9 @@ generated bus names disappear.
 
 ## Optional credential activation services
 
-The existing `org.freedesktop.secrets`, `org.kde.secretservicecompat`, and
-`org.kde.kwalletd5` activation names are not public portal-router interfaces.
+The existing `org.freedesktop.secrets`, `org.kde.secretservicecompat`,
+`org.kde.kwalletd5`, and `org.kde.kwalletd6` activation names are not public
+portal-router interfaces.
 They start the guest KWallet integration independently when the corresponding
 guest packages are installed.  Test the interface appropriate to the image;
 for a Secret Service client this can be done with `secret-tool`:
@@ -218,10 +219,13 @@ spaces enter "$space" -- secret-tool lookup spaces-methodology key
 
 Expect the lookup to return `spaces-value`, no host wallet file to be mounted
 inside the Space, and a different Space not to unlock or read this Space's
-wallet.  An explicit KWallet `isOpen=false` backs up the managed `.kwl`,
-`.salt`, and `_attributes.json` files with the first free shared numeric suffix
-before recreating the wallet.  A D-Bus timeout kills the provider and leaves
-the wallet files untouched.  Test the timeout branch with a managed
+wallet.  On KF6 the helper starts the `kwalletd6` compatibility proxy and
+performs a real `org.kde.KWallet.open` call to verify that the managed
+collection is usable; the Secret Service `Locked` property is not a sufficient
+startup check.  A failed open backs up the managed `.kwl`, `.salt`, and
+`_attributes.json` files with the first free shared numeric suffix before
+recreating the wallet.  A D-Bus timeout kills the provider and leaves the
+wallet files untouched.  Test the timeout branch with a managed
 `dbus-test-tool echo --sleep-ms=100000` owner and compare the wallet checksum
 before and after the helper call; the helper must fail, remove the owner, and
 preserve the checksum.  If the image has no KWallet/Secret Service

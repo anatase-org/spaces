@@ -452,20 +452,60 @@ static WalletState wallet_open_state(
 )
 {
     const char *name = kf6
-        ? "org.kde.ksecretd" : "org.kde.kwalletd5";
+        ? "org.kde.kwalletd6" : "org.kde.kwalletd5";
     const char *path = kf6
-        ? "/ksecretd" : "/modules/kwalletd5";
+        ? "/modules/kwalletd6" : "/modules/kwalletd5";
     GVariant *reply;
     GError *error = NULL;
     gboolean open = FALSE;
 
+    if (kf6) {
+        gint handle;
+
+        reply = g_dbus_connection_call_sync(
+            bus, name, path, "org.kde.KWallet", "open",
+            g_variant_new(
+                "(sxs)", "spaces-managed-v1", (gint64)0,
+                "spaces-secret-helper"
+            ),
+            G_VARIANT_TYPE("(i)"),
+            G_DBUS_CALL_FLAGS_NONE, 3000, NULL, &error
+        );
+        if (reply == NULL)
+            goto failed;
+        g_variant_get(reply, "(i)", &handle);
+        g_variant_unref(reply);
+        if (handle < 0)
+            return WALLET_CLOSED;
+
+        /* Drop only the proxy's bookkeeping handle.  This does not lock the
+         * Secret Service collection owned and unlocked by ksecretd. */
+        reply = g_dbus_connection_call_sync(
+            bus, name, path, "org.kde.KWallet", "close",
+            g_variant_new(
+                "(ibs)", handle, TRUE, "spaces-secret-helper"
+            ),
+            G_VARIANT_TYPE("(i)"), G_DBUS_CALL_FLAGS_NONE,
+            3000, NULL, &error
+        );
+        g_clear_error(&error);
+        g_clear_pointer(&reply, g_variant_unref);
+        return WALLET_OPEN;
+    }
     reply = g_dbus_connection_call_sync(
         bus, name, path, "org.kde.KWallet", "isOpen",
         g_variant_new("(s)", "spaces-managed-v1"),
         G_VARIANT_TYPE("(b)"), G_DBUS_CALL_FLAGS_NONE,
         3000, NULL, &error
     );
-    if (reply == NULL) {
+    if (reply != NULL) {
+        g_variant_get(reply, "(b)", &open);
+        g_variant_unref(reply);
+        return open ? WALLET_OPEN : WALLET_CLOSED;
+    }
+
+failed:
+    {
         gboolean timeout = g_error_matches(
             error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT
         ) || g_error_matches(error, G_DBUS_ERROR, G_DBUS_ERROR_NO_REPLY)
@@ -477,9 +517,6 @@ static WalletState wallet_open_state(
         g_clear_error(&error);
         return timeout ? WALLET_TIMEOUT : WALLET_ERROR;
     }
-    g_variant_get(reply, "(b)", &open);
-    g_variant_unref(reply);
-    return open ? WALLET_OPEN : WALLET_CLOSED;
 }
 
 static pid_t connection_pid(GDBusConnection *bus, const char *name)
@@ -781,6 +818,28 @@ static pid_t spawn_plain(const char *program)
     return child;
 }
 
+static pid_t ensure_kf6_proxy(GDBusConnection *bus)
+{
+    pid_t child;
+
+    if (name_has_owner(bus, "org.kde.kwalletd6"))
+        return 0;
+    if (!g_file_test("/usr/bin/kwalletd6", G_FILE_TEST_IS_EXECUTABLE)) {
+        g_printerr(
+            "spaces-secret-helper: KWallet compatibility proxy is missing\n"
+        );
+        return -1;
+    }
+    child = spawn_plain("/usr/bin/kwalletd6");
+    if (child <= 0
+        || !wait_for_owner(bus, "org.kde.kwalletd6", child)) {
+        if (child > 0)
+            kill(child, SIGTERM);
+        return -1;
+    }
+    return child;
+}
+
 static gboolean marker_exists(const char *path)
 {
     struct stat metadata;
@@ -826,6 +885,7 @@ static int activate_provider(
     WalletState state;
     gboolean wallet_backed_up = FALSE;
     pid_t child = -1;
+    pid_t proxy_child = -1;
     int result = 1;
 
     memset(portal_secret, 0, sizeof(portal_secret));
@@ -841,8 +901,12 @@ static int activate_provider(
         goto out;
     }
     if (storage_owned) {
+        if (kf6 && (proxy_child = ensure_kf6_proxy(bus)) < 0)
+            goto out;
         state = wallet_open_state(bus, kf6);
         if (state == WALLET_TIMEOUT) {
+            if (kf6)
+                kill_provider(bus, "org.kde.kwalletd6", proxy_child);
             kill_provider(bus, storage_name, -1);
             (void)unlink(marker);
             g_printerr(
@@ -851,6 +915,8 @@ static int activate_provider(
             goto out;
         }
         if (state == WALLET_ERROR) {
+            if (kf6)
+                kill_provider(bus, "org.kde.kwalletd6", proxy_child);
             g_printerr(
                 "spaces-secret-helper: could not query the managed wallet\n"
             );
@@ -859,6 +925,9 @@ static int activate_provider(
         if (state == WALLET_CLOSED) {
             guint backup;
 
+            if (kf6)
+                kill_provider(bus, "org.kde.kwalletd6", proxy_child);
+            proxy_child = -1;
             kill_provider(bus, storage_name, -1);
             (void)unlink(marker);
             if (!spaces_backup_failed_wallet(
@@ -901,9 +970,17 @@ static int activate_provider(
                 );
                 goto out;
             }
+            if (kf6 && (proxy_child = ensure_kf6_proxy(bus)) < 0) {
+                kill_provider(bus, storage_name, child);
+                child = -1;
+                goto out;
+            }
             state = wallet_open_state(bus, kf6);
             if (state == WALLET_OPEN)
                 break;
+            if (kf6)
+                kill_provider(bus, "org.kde.kwalletd6", proxy_child);
+            proxy_child = -1;
             kill_provider(bus, storage_name, child);
             child = -1;
             (void)unlink(marker);
@@ -947,27 +1024,6 @@ static int activate_provider(
         }
         secure_clear(key, sizeof(key));
     }
-    if (g_str_equal(activation_name, "org.kde.kwalletd5")
-        && kf6
-        && !name_has_owner(bus, "org.kde.kwalletd5")) {
-        pid_t proxy;
-
-        if (!g_file_test(
-                "/usr/bin/kwalletd6", G_FILE_TEST_IS_EXECUTABLE
-            )) {
-            g_printerr(
-                "spaces-secret-helper: KWallet compatibility proxy is missing\n"
-            );
-            goto out;
-        }
-        proxy = spawn_plain("/usr/bin/kwalletd6");
-        if (proxy <= 0
-            || !wait_for_owner(bus, "org.kde.kwalletd5", proxy)) {
-            if (proxy > 0)
-                kill(proxy, SIGTERM);
-            goto out;
-        }
-    }
     if (!name_has_owner(bus, activation_name)) {
         g_printerr(
             "spaces-secret-helper: provider did not claim %s\n",
@@ -1001,7 +1057,8 @@ int main(int argc, char **argv)
              || g_str_equal(
                  activation_name, "org.kde.secretservicecompat"
              )
-             || g_str_equal(activation_name, "org.kde.kwalletd5"))) {
+             || g_str_equal(activation_name, "org.kde.kwalletd5")
+             || g_str_equal(activation_name, "org.kde.kwalletd6"))) {
         g_printerr("spaces-secret-helper: invalid activation name\n");
         return 2;
     }
