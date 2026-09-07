@@ -1723,7 +1723,7 @@ class _MountWorker:
                     if (
                         self._portals_enabled
                         or any(
-                            user.credential_agents
+                            user.desktop or user.credential_agents
                             for user in self._users
                         )
                     )
@@ -1836,7 +1836,12 @@ class _MountWorker:
     def _reconcile(self) -> None:
         snapshot = _login_snapshot(self._monitor, self._users)
         if snapshot == self._login_snapshot:
-            if any(user.credential_agents for user in self._users):
+            # The manager imports its environment and creates sockets after
+            # logind announces the login. An unchanged logind snapshot does
+            # not imply that desktop resources have finished starting.
+            if any(
+                user.desktop or user.credential_agents for user in self._users
+            ):
                 if not self._reconcile_desktops(snapshot):
                     self._login_snapshot = None
             self._desktop.reconcile_portals()

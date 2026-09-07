@@ -962,7 +962,7 @@ class DesktopControllerTests(unittest.TestCase):
         self.assertEqual(command[-1], binding.destination)
         self.assertTrue(command[-2].startswith(f"/proc/{os.getpid()}/fd/"))
 
-    def test_prepares_runtime_mount_before_session_bind_targets(self) -> None:
+    def test_holds_pam_session_before_session_bind_targets(self) -> None:
         with mock.patch.object(
             self.controller, "_machine_root"
         ) as machine_root:
@@ -972,13 +972,47 @@ class DesktopControllerTests(unittest.TestCase):
         self.assertEqual(
             machine_root.call_args_list[0].args[0],
             [
-                session.SYSTEMCTL,
-                "start",
-                f"user-runtime-dir@{self.desktop_user.uid}.service",
+                session.SYSTEMD_RUN,
+                f"--unit=spaces-session-{self.desktop_user.uid}",
+                "--collect",
+                "--property=Type=exec",
+                f"--property=User={self.desktop_user.uid}",
+                "--property=PAMName=login",
+                "/usr/bin/sleep",
+                "infinity",
             ],
         )
         install = machine_root.call_args_list[1].args[0]
         self.assertEqual(install[0], "/usr/bin/install")
+
+    def test_guest_session_survives_plan_updates_and_stops_on_logout(self) -> None:
+        with mock.patch.object(self.controller, "_machine_root") as run:
+            self.controller._prepare_guest_root(self.desktop_user)
+            self.controller._prepare_guest_root(self.desktop_user)
+            starts = [
+                call for call in run.call_args_list
+                if call.args[0][0] == session.SYSTEMD_RUN
+            ]
+            self.assertEqual(len(starts), 1)
+            # Also release a session left behind by a failed activation.
+            self.controller.deactivate(self.desktop_user)
+            run.assert_called_with([
+                session.SYSTEMCTL, "stop",
+                f"spaces-session-{self.desktop_user.uid}.service",
+            ])
+        self.assertFalse(self.controller.guest_sessions)
+
+    def test_logout_releases_session_after_failed_activation(self) -> None:
+        self.controller.guest_sessions.add(self.desktop_user.uid)
+        with mock.patch.object(self.controller, "_machine_root") as run:
+            self.controller.reconcile(
+                self.desktop_user, (), session_active=False
+            )
+        run.assert_called_once_with([
+            session.SYSTEMCTL, "stop",
+            f"spaces-session-{self.desktop_user.uid}.service",
+        ])
+        self.assertFalse(self.controller.guest_sessions)
 
     def test_mount_reports_replaced_resource_and_destination(self) -> None:
         source = self.root / "socket"

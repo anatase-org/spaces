@@ -2013,7 +2013,7 @@ class LoginAndMountWorkerTests(unittest.TestCase):
         )
         self.assertEqual(wait.call_count, 2)
 
-    def test_unchanged_graphical_snapshot_skips_desktop_reconciliation(
+    def test_unchanged_graphical_snapshot_rechecks_desktop_resources(
         self,
     ) -> None:
         user = self._user(1000, desktop=True)
@@ -2051,7 +2051,8 @@ class LoginAndMountWorkerTests(unittest.TestCase):
         worker._reconcile()
         worker._reconcile()
 
-        worker._desktop.reconcile.assert_called_once_with(
+        self.assertEqual(worker._desktop.reconcile.call_count, 2)
+        worker._desktop.reconcile.assert_called_with(
             user, (graphical,), ()
         )
 

@@ -2069,6 +2069,7 @@ class DesktopController:
         self.space_home = core.STATE_ROOT / space_name / "home"
         self.portals_enabled = portals_enabled
         self.active: dict[int, _ActiveDesktop] = {}
+        self.guest_sessions: set[int] = set()
         self.destination_users: dict[str, set[int]] = {}
         self.destination_sources: dict[str, tuple[int, int]] = {}
 
@@ -2086,7 +2087,7 @@ class DesktopController:
             or (not user.desktop and not credential_agents)
             or not session_active
         ):
-            if user.uid in self.active:
+            if user.uid in self.active or user.uid in self.guest_sessions:
                 self.deactivate(user)
             return
         environment = host_manager_environment(user)
@@ -2209,10 +2210,12 @@ class DesktopController:
     def deactivate(self, user: DesktopUser) -> None:
         current = self.active.get(user.uid)
         if current is None:
+            self._stop_guest_session(user)
             set_status(self.space_name, user.uid, "inactive")
             return
         set_status(self.space_name, user.uid, "pending")
         self._deactivate(user, current)
+        self._stop_guest_session(user)
         set_status(self.space_name, user.uid, "inactive")
 
     def close(self) -> None:
@@ -2223,7 +2226,7 @@ class DesktopController:
                 user.desktop
                 or getattr(user, "credential_agents", False)
             ) and user.uid != 0:
-                set_status(self.space_name, user.uid, "inactive")
+                self.deactivate(user)
 
     def reconcile_portals(self) -> None:
         """Retry portal-only failures without rebuilding desktop forwarding."""
@@ -2254,6 +2257,7 @@ class DesktopController:
                 current.portal.close()
                 current.portal.socket_path.unlink(missing_ok=True)
         self.active.clear()
+        self.guest_sessions.clear()
         self.destination_users.clear()
         self.destination_sources.clear()
         for user in self.users.values():
@@ -2547,19 +2551,26 @@ class DesktopController:
             pass
 
     def _prepare_guest_root(self, user: DesktopUser) -> None:
-        # pam_systemd starts user-runtime-dir@.service when the first guest
-        # login is opened.  If credential sockets are mounted before that,
-        # the later /run/user/<uid> mount hides them while leaving the child
-        # mounts visible in mountinfo.  Establish the standard runtime mount
-        # first so login sessions reuse it and the socket binds remain
-        # reachable.
-        self._machine_root(
-            [
-                SYSTEMCTL,
-                "start",
-                f"user-runtime-dir@{user.uid}.service",
-            ]
-        )
+        # A one-shot PAM command only keeps the guest user manager alive
+        # until logind's stop delay expires. Its teardown removes the GPG
+        # bind and forgets D-Bus activation state, even though the host login
+        # and our plan have not changed. Hold a PAM session for the lifetime
+        # of forwarding, including across plan updates. Type=exec waits for
+        # PAM to establish /run/user/<uid> before we mount anything beneath it.
+        if user.uid not in self.guest_sessions:
+            self._machine_root(
+                [
+                    SYSTEMD_RUN,
+                    f"--unit=spaces-session-{user.uid}",
+                    "--collect",
+                    "--property=Type=exec",
+                    f"--property=User={user.uid}",
+                    "--property=PAMName=login",
+                    "/usr/bin/sleep",
+                    "infinity",
+                ]
+            )
+            self.guest_sessions.add(user.uid)
         self._machine_root(
             [
                 "/usr/bin/install",
@@ -2576,6 +2587,14 @@ class DesktopController:
                 f"/run/user/{user.uid}/gnupg",
             ]
         )
+
+    def _stop_guest_session(self, user: DesktopUser) -> None:
+        if user.uid not in self.guest_sessions:
+            return
+        self._machine_root(
+            [SYSTEMCTL, "stop", f"spaces-session-{user.uid}.service"]
+        )
+        self.guest_sessions.remove(user.uid)
 
     def _mount(self, uid: int, binding: DesktopBind) -> None:
         identity = (binding.device, binding.inode)
