@@ -542,6 +542,16 @@ def generate(
         if (
             BLACKLIST_TERMINAL
             and main.get("Terminal", "").strip().casefold() == "true"
+            # Hidden terminal helpers can be the application's only OAuth
+            # callback handler. Export those even though terminal apps are
+            # otherwise omitted from the host's application menu.
+            and not (
+                main.get("NoDisplay", "").strip().casefold() == "true"
+                and any(
+                    value.strip().startswith("x-scheme-handler/")
+                    for value in main.get("MimeType", "").split(";")
+                )
+            )
         ):
             continue
         parsed.append((source, groups, main))

@@ -222,6 +222,27 @@ class ShortcutExportTests(unittest.TestCase):
             [],
         )
 
+    def test_hidden_terminal_callback_is_exported(self) -> None:
+        source = self.system / "nordvpn.desktop"
+        source.write_text(
+            self.desktop(
+                "NordVPN",
+                command="nordvpn click %u",
+                extra="Terminal=true\nMimeType=x-scheme-handler/nordvpn;\n",
+            ),
+            encoding="utf-8",
+        )
+        shortcuts.reconcile("work", self.rootfs, "custom", applications_root=self.output)
+        exported = self.output / "spaces-work-v1-nordvpn.desktop"
+        text = exported.read_text()
+        self.assertIn(
+            "Exec=/usr/bin/spaces enter --graphical work -- nordvpn click %u\n",
+            text,
+        )
+        self.assertIn("NoDisplay=true\n", text)
+        self.assertIn("Terminal=true\n", text)
+        self.assertIn("MimeType=x-scheme-handler/nordvpn;\n", text)
+
     def test_local_prefix_collision_gets_stable_suffix(self) -> None:
         (self.system / "local-foo.desktop").write_text(
             self.desktop("System"), encoding="utf-8"
