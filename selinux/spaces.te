@@ -472,6 +472,14 @@ kernel_io_uring_use(spaces_container_t)
 userdom_manage_user_home_content(spaces_container_t)
 userdom_exec_user_home_content_files(spaces_container_t)
 
+# Nested container runtimes bind selected host-home directories into their
+# mount namespaces. The bind retains user_home_t, and setting its mount
+# propagation requires mounton on that directory.
+gen_require(`
+	type user_home_t;
+')
+allow spaces_container_t user_home_t:dir mounton;
+
 # A user's selected /run/media directory is bind-mounted read-write. Native
 # Linux filesystems without host labels appear as unlabeled_t, while removable
 # media commonly uses removable_t and the user mount directory itself uses
