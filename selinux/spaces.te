@@ -251,6 +251,18 @@ kernel_mounton_all_proc(spaces_container_t)
 kernel_mounton_all_sysctls(spaces_container_t)
 kernel_mounton_kernel_sysctl(spaces_container_t)
 term_mount_pty_fs(spaces_container_t)
+# Podman/Buildah's crun remounts devpts and bind-mounts an admitted FUSE
+# device into the nested container. It also mounts over /sys/fs/selinux,
+# which can retain the selinuxfs label or the label of a masking tmpfs.
+gen_require(`
+	type fuse_device_t;
+	type security_t;
+	type user_tmp_t;
+')
+allow spaces_container_t devpts_t:filesystem remount;
+allow spaces_container_t fuse_device_t:chr_file mounton;
+allow spaces_container_t { init_var_run_t security_t user_tmp_t }:dir mounton;
+
 allow spaces_container_t self:bpf {
 	map_create map_read map_write prog_load prog_run
 };
