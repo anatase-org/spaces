@@ -102,6 +102,7 @@ done
 %selinux_modules_install %{_datadir}/selinux/packages/spaces.pp
 restorecon -RF %{_bindir}/spaces.priv %{_localstatedir}/lib/spaces \
   /usr/lib/spaces/guest %{_datadir}/spaces/portal %{_rundir}/spaces \
+  %{_datadir}/spaces/system-bridge \
   %{_prefix}/local/share/applications/spaces-icons \
   2>/dev/null || :
 restorecon -F /home/*/.ssh/config /root/.ssh/config 2>/dev/null || :
@@ -136,12 +137,15 @@ fi
 %dir /usr/lib/spaces
 /usr/lib/spaces/spaces-pam
 /usr/lib/spaces/spaces-broker
+/usr/lib/spaces/spaces-system-broker
 %dir /usr/lib/spaces/guest
 /usr/lib/spaces/guest/pam_spaces.so
 /usr/lib/spaces/guest/spaces-portal
+/usr/lib/spaces/guest/spaces-system-broker
 /usr/lib/spaces/guest/spaces-open
 /usr/lib/spaces/guest/spaces-secret-helper
 /usr/lib/spaces/guest/spaces
+%{_datadir}/spaces/system-bridge
 %dir %{_datadir}/spaces/portal
 %{_datadir}/spaces/portal/*
 %{_datadir}/applications/spaces-*.desktop

@@ -16,3 +16,5 @@ pkg/
 /native/spaces-portal
 /native/spaces-open
 /native/spaces-broker
+
+/native/spaces-system-broker

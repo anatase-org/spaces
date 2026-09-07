@@ -364,7 +364,7 @@ class PermissionForm(
         "admin": PermissionOption(
             _("Admin"),
             _(
-                "Full network admin, docker+VMs+nmap "
+                "Full network admin, docker+VMs+nmap+VPNs "
                 "(CAP_NET_RAW, CAP_NET_ADMIN)."
             ),
         ),

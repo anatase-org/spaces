@@ -5,6 +5,7 @@ HOME_DIR/\.ssh/config	--	gen_context(system_u:object_r:ssh_home_config_t,s0)
 
 /usr/lib/spaces/guest(/.*)?	gen_context(system_u:object_r:spaces_apifs_file_t,s0)
 /usr/share/spaces/portal(/.*)?	gen_context(system_u:object_r:spaces_apifs_file_t,s0)
+/usr/share/spaces/system-bridge(/.*)?	gen_context(system_u:object_r:spaces_apifs_file_t,s0)
 
 /var/lib/spaces(/.*)?		gen_context(system_u:object_r:spaces_file_t,s0)
 

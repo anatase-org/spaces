@@ -82,3 +82,13 @@ spaces = ["overlay/*.png"]
 "share/spaces/portal/config" = [
   "data/portal/config/kwalletrc",
 ]
+
+"share/spaces/system-bridge" = [
+  "data/system-bridge/spaces-system-broker.service",
+  "data/system-bridge/system.conf",
+]
+"share/spaces/system-bridge/dbus-1/system-services" = [
+  "data/system-bridge/dbus-1/system-services/org.freedesktop.resolve1.service",
+  "data/system-bridge/dbus-1/system-services/org.freedesktop.NetworkManager.service",
+  "data/system-bridge/dbus-1/system-services/org.freedesktop.UPower.service",
+]

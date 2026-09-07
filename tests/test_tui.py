@@ -152,7 +152,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                 [
                     "Basic — Shared networking, host ports above 1024.",
                     "Advanced — Shared networking, host any port.",
-                    "Admin — Full network admin, docker+VMs+nmap "
+                    "Admin — Full network admin, docker+VMs+nmap+VPNs "
                     "(CAP_NET_RAW, CAP_NET_ADMIN).",
                 ],
             )

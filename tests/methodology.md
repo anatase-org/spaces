@@ -301,3 +301,44 @@ sudo machinectl terminate "$space"
 
 If SELinux was temporarily switched to permissive for diagnosis, restore its
 original mode after collecting `ausearch -m AVC` output.
+
+## Host system D-Bus bridge
+
+`tests/test_system_bus.py` exercises two private D-Bus daemons and mock host
+services. Build with `make -C native check-guest-abi`, then run the complete
+bridge suite with:
+
+```sh
+sudo env PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p test_system_bus.py
+```
+
+Root is required to test the production EXTERNAL authentication boundary and
+ordinary-user calls. The mocks never contact the host resolver or NetworkManager.
+The suite covers descriptor transfer in both directions, remote errors, dynamic
+introspection and properties, NetworkManager's ObjectManager parent path,
+credential callbacks and spoof rejection, broadcasts, restarts, client cleanup,
+message limits, and independent space permissions.
+
+| Service operation | Ordinary guest users | Guest root |
+| --- | --- | --- |
+| UPower properties, enumeration, history and refresh | Allowed | Allowed |
+| UPower configuration | Denied | Denied |
+| Resolver and NetworkManager status | Allowed | Allowed |
+| Host DNS or NetworkManager changes | Denied | Only Network Admin |
+| NetworkManager secrets and credential-agent registration | Denied | Only Network Admin |
+
+The Develop preset already grants Network Admin. Guest sudo uses the existing
+administrator permission; desktop and host-authentication permissions do not gate
+the system bridge. NetworkManager profiles, VPN plugins, and file-path arguments
+belong to the host. Guest logind is unchanged. Hosts without a requested service
+receive service-unavailable errors instead of falling back to guest daemons.
+
+For live validation, use a temporary private guest bus with the relay and broker
+against the real host services. Verify `nmcli general status`, `resolvectl status`,
+and `upower -e`; ordinary-user `nmcli general permissions` must deny changes.
+Create a disposable dummy interface, set its DNS through the bridge, confirm the
+host sees that setting, check an ordinary user cannot revert it, then revert as
+root and remove the interface. Do not assign a default route or a `~.` routing
+domain during this test. Finally validate packaged Ubuntu startup and NordVPN
+connectivity under the installed Spaces SELinux domain. Updating that policy is
+a user action; never run `sync.sh --selinux` as the agent.

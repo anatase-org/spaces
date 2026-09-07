@@ -103,6 +103,18 @@ class LaunchTests(unittest.TestCase):
             "_set_device_policy",
         )
         self.device_policy = self.device_policy_patch.start()
+        self.system_bridge = mock.Mock()
+        self.system_bridge.bind_arguments = launch_module.system_bus.guest_bind_arguments(
+            Path("/run/spaces/work/system-bus")
+        )
+        bridge_patch = mock.patch.object(
+            launch_module.system_bus, "SystemBusService", return_value=self.system_bridge
+        )
+        self.system_bridge_class = bridge_patch.start()
+        self.addCleanup(bridge_patch.stop)
+        native_patch = mock.patch.object(launch_module.auth, "validate_native_runtime")
+        self.native_validation = native_patch.start()
+        self.addCleanup(native_patch.stop)
 
     def tearDown(self) -> None:
         self.device_policy_patch.stop()
@@ -524,6 +536,8 @@ class LaunchTests(unittest.TestCase):
                     arguments,
                     [
                         *common,
+                        launch_module.auth.native_bind_argument(),
+                        *self.system_bridge.bind_arguments,
                         *network_sysctl_arguments,
                         "--boot",
                         "--setenv=SYSTEMD_GETTY_AUTO=no",
@@ -796,7 +810,7 @@ class LaunchTests(unittest.TestCase):
         for bind in runtime.bind_arguments:
             self.assertIn(bind, command)
 
-    def test_disabled_authentication_has_no_runtime_binds(self) -> None:
+    def test_system_bridge_runs_without_authentication_or_desktop(self) -> None:
         self._write_info(host_authentication=False)
         process = mock.Mock()
         process.wait.return_value = 0
@@ -812,11 +826,14 @@ class LaunchTests(unittest.TestCase):
             self.assertEqual(launch_module.launch("work"), 0)
 
         prepare.assert_not_called()
-        self.assertFalse(
-            any(
-                "spaces-host" in argument
-                for argument in popen.call_args.args[0]
-            )
+        self.system_bridge.start.assert_called_once_with()
+        self.system_bridge.stop.assert_called_once_with()
+        self.native_validation.assert_called_once_with(self.rootfs)
+        for bind in self.system_bridge.bind_arguments:
+            self.assertIn(bind, popen.call_args.args[0])
+        self.assertIn(
+            "--bind-ro=/usr/lib/spaces/guest:/run/spaces-host/bin",
+            popen.call_args.args[0],
         )
 
     def test_desktop_permission_mounts_guest_native_launcher(self) -> None:

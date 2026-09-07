@@ -32,6 +32,7 @@ GUEST_NATIVE = f"{GUEST_RUNTIME}/bin"
 GUEST_BINARIES = (
     "pam_spaces.so",
     "spaces-portal",
+    "spaces-system-broker",
     "spaces-open",
     "spaces-secret-helper",
     "spaces",
@@ -97,12 +98,12 @@ def validate_native_bundle(machine: str) -> None:
             header = _elf_header(path)
         except OSError as error:
             raise core.SpacesError(
-                _("Host authentication binary is missing: {path}.", path=path)
+                _("Guest-native helper is missing: {path}.", path=path)
             ) from error
         if not _compatible_elf(header, expected_machine):
             raise core.SpacesError(
                 _(
-                    "Host authentication binary has an incompatible "
+                    "Guest-native helper has an incompatible "
                     "architecture: {path}.",
                     path=path,
                 )

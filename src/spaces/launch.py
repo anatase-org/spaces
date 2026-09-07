@@ -29,6 +29,7 @@ from . import devices
 from . import host_config
 from . import session
 from . import shortcuts
+from . import system_bus
 from .distro import get_driver
 from .logging import configure_logging
 
@@ -2364,6 +2365,7 @@ def launch(space_name: str) -> int:
     shortcut_worker: shortcuts.ShortcutWorker | None = None
     device_policy_set = False
     authentication: auth.AuthenticationService | None = None
+    system_bridge: system_bus.SystemBusService | None = None
     authentication_binds: tuple[str, ...] = ()
     portal_binds = (
         session.portal_bind_arguments(rootfs)
@@ -2407,12 +2409,11 @@ def launch(space_name: str) -> int:
                         error=error,
                     )
                 )
-        native_required = host_authentication or any(
-            user.desktop and user.uid != 0 for user in users
-        )
-        if native_required:
-            auth.validate_native_runtime(rootfs)
-            authentication_binds = (auth.native_bind_argument(),)
+        auth.validate_native_runtime(rootfs)
+        authentication_binds = (auth.native_bind_argument(),)
+        system_bridge = system_bus.SystemBusService(space_name, network)
+        system_bridge.start()
+        authentication_binds += system_bridge.bind_arguments
         if host_authentication:
             authentication_runtime = auth.prepare_runtime(
                 space_name,
@@ -2522,5 +2523,7 @@ def launch(space_name: str) -> int:
             device_udev.close()
         if authentication is not None:
             authentication.stop()
+        if system_bridge is not None:
+            system_bridge.stop()
         if device_policy_set:
             _set_device_policy(space_name, "disabled")

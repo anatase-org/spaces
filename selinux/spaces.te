@@ -150,6 +150,24 @@ optional_policy(`
 	fprintd_dbus_chat(spaces_t)
 ')
 
+# The system bridge is a host service client. Guest root reaches only the
+# per-space private socket; no host system bus socket is mounted in the guest.
+dbus_system_bus_client(spaces_t)
+optional_policy(`
+    gen_require(`
+        type systemd_resolved_t;
+        class dbus send_msg;
+    ')
+    allow spaces_t systemd_resolved_t:dbus send_msg;
+    allow systemd_resolved_t spaces_t:dbus send_msg;
+')
+optional_policy(`
+    networkmanager_dbus_chat(spaces_t)
+')
+optional_policy(`
+    devicekit_dbus_chat_power(spaces_t)
+')
+
 # The per-user host portal broker connects to the initiating user's session
 # bus and places its filtered proxy in a transient user scope.
 gen_require(`

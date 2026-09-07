@@ -11,6 +11,8 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
+#include "dbus_message.h"
+
 /* A lingering Space must not activate the host portal between desktop
  * logins, when its backend-selection environment is absent or stale. */
 #define PORTAL_NAME "org.freedesktop.portal.Desktop"
@@ -3245,9 +3247,7 @@ int main(void)
     address = test_address != NULL ? g_strdup(test_address) : g_strdup_printf("unix:path=/run/spaces/desktop/%u/portal/bus", (unsigned)getuid());
     portal.guest = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, &error);
     if (portal.guest == NULL) goto failed;
-    portal.host = g_dbus_connection_new_for_address_sync(address,
-        G_DBUS_CONNECTION_FLAGS_AUTHENTICATION_CLIENT | G_DBUS_CONNECTION_FLAGS_MESSAGE_BUS_CONNECTION,
-        NULL, NULL, &error);
+    portal.host = spaces_connect_bus(address, &error);
     if (portal.host == NULL) goto failed;
     portal.loop = g_main_loop_new(NULL, FALSE);
     portal.owned_nodes = g_ptr_array_new_with_free_func((GDestroyNotify)g_dbus_node_info_unref);

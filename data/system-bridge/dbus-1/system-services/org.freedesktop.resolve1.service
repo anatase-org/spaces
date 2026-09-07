@@ -1,0 +1,5 @@
+[D-BUS Service]
+Name=org.freedesktop.resolve1
+Exec=/run/spaces-host/bin/spaces-system-broker --relay /run/spaces-host/system/bus.sock
+User=root
+SystemdService=spaces-system-broker.service
