@@ -17,6 +17,8 @@
 
 #define INTEGRATION_PATH "/org/anatase/Spaces/Integration"
 #define INTEGRATION_INTERFACE "org.anatase.Spaces.Integration1"
+/* A lingering Space must not activate the host portal between desktop
+ * logins, when its backend-selection environment is absent or stale. */
 #define PORTAL_NAME "org.freedesktop.portal.Desktop"
 #define PORTAL_PATH "/org/freedesktop/portal/desktop"
 #define RTKIT_NAME "org.freedesktop.RealtimeKit1"
@@ -309,7 +311,7 @@ static gboolean call_host_portal(
         "org.freedesktop.portal.OpenURI", method,
         g_variant_new("(sh@a{sv})", "", handle,
                       g_variant_builder_end(&options)),
-        G_VARIANT_TYPE("(o)"), G_DBUS_CALL_FLAGS_NONE, -1,
+        G_VARIANT_TYPE("(o)"), G_DBUS_CALL_FLAGS_NO_AUTO_START, -1,
         fd_list, NULL, NULL, error
     );
     g_object_unref(fd_list);
@@ -376,7 +378,7 @@ static gboolean screenshot_request(
         "org.freedesktop.portal.Screenshot", "Screenshot",
         g_variant_new("(s@a{sv})", parent_window,
             g_variant_ref_sink(updated)),
-        G_VARIANT_TYPE("(o)"), G_DBUS_CALL_FLAGS_NONE, -1, NULL, error
+        G_VARIANT_TYPE("(o)"), G_DBUS_CALL_FLAGS_NO_AUTO_START, -1, NULL, error
     );
     if (reply == NULL) {
         g_dbus_connection_signal_unsubscribe(broker->bus, subscription);
@@ -422,7 +424,7 @@ static gboolean wait_portal_request(Broker *broker, const char *interface,
         G_DBUS_SIGNAL_FLAGS_NONE, response_signal, &pending, NULL);
     reply = g_dbus_connection_call_with_unix_fd_list_sync(broker->bus,
         PORTAL_NAME, PORTAL_PATH, interface, method, parameters,
-        G_VARIANT_TYPE("(o)"), G_DBUS_CALL_FLAGS_NONE, -1, fds,
+        G_VARIANT_TYPE("(o)"), G_DBUS_CALL_FLAGS_NO_AUTO_START, -1, fds,
         NULL, NULL, error);
     if (reply == NULL) {
         g_dbus_connection_signal_unsubscribe(broker->bus, subscription);
@@ -885,7 +887,7 @@ static void dynamic_launcher_method(Broker *broker, GVariant *parameters,
     } else goto invalid;
     reply = g_dbus_connection_call_sync(broker->bus, PORTAL_NAME, PORTAL_PATH,
         "org.freedesktop.portal.DynamicLauncher", method, host_parameters,
-        reply_type, G_DBUS_CALL_FLAGS_NONE, -1, NULL, &error);
+        reply_type, G_DBUS_CALL_FLAGS_NO_AUTO_START, -1, NULL, &error);
     if (reply == NULL) goto failed;
     g_dbus_method_invocation_return_value(invocation,
         g_variant_new("(v)", reply));
@@ -1152,7 +1154,7 @@ static void game_mode_method(Broker *broker, GVariant *parameters,
     reply = g_dbus_connection_call_with_unix_fd_list_sync(broker->bus,
         PORTAL_NAME, PORTAL_PATH, "org.freedesktop.portal.GameMode", method,
         g_variant_new("(hh)", target_handle, requester_handle),
-        G_VARIANT_TYPE("(i)"), G_DBUS_CALL_FLAGS_NONE, -1, fds, NULL, NULL,
+        G_VARIANT_TYPE("(i)"), G_DBUS_CALL_FLAGS_NO_AUTO_START, -1, fds, NULL, NULL,
         &error);
     if (reply == NULL) goto failed;
     g_dbus_method_invocation_return_value(invocation, reply);
@@ -1549,7 +1551,7 @@ int main(int argc, char **argv)
         "org.freedesktop.host.portal.Registry", "Register",
         g_variant_new("(s@a{sv})", broker.app_id,
             g_variant_new_array(G_VARIANT_TYPE("{sv}"), NULL, 0)),
-        G_VARIANT_TYPE_UNIT, G_DBUS_CALL_FLAGS_NONE, 5000, NULL, NULL);
+        G_VARIANT_TYPE_UNIT, G_DBUS_CALL_FLAGS_NO_AUTO_START, 5000, NULL, NULL);
     if (reply != NULL) g_variant_unref(reply);
     node = g_dbus_node_info_new_for_xml(open_xml, &error);
     if (node == NULL)

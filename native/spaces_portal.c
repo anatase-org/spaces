@@ -11,6 +11,8 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
+/* A lingering Space must not activate the host portal between desktop
+ * logins, when its backend-selection environment is absent or stale. */
 #define PORTAL_NAME "org.freedesktop.portal.Desktop"
 #define PORTAL_PATH "/org/freedesktop/portal/desktop"
 #define REQUEST_INTERFACE "org.freedesktop.portal.Request"
@@ -729,7 +731,7 @@ static void close_host_object(Portal *portal, const char *path, const char *inte
 {
     if (path == NULL) return;
     g_dbus_connection_call(portal->host, PORTAL_NAME, path, interface, "Close",
-        NULL, NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL, NULL);
+        NULL, NULL, G_DBUS_CALL_FLAGS_NO_AUTO_START, -1, NULL, NULL, NULL);
 }
 
 static void lifecycle_call(GDBusConnection *connection, const char *sender,
@@ -1785,7 +1787,7 @@ static void portal_method_call(GDBusConnection *connection, const char *sender,
     fds = g_dbus_message_get_unix_fd_list(g_dbus_method_invocation_get_message(invocation));
     g_dbus_connection_call_with_unix_fd_list(portal->host, PORTAL_NAME,
         PORTAL_PATH, interface_name, method_name, mapped, reply_type,
-        G_DBUS_CALL_FLAGS_NONE, -1, fds, NULL, forward_done, call);
+        G_DBUS_CALL_FLAGS_NO_AUTO_START, -1, fds, NULL, forward_done, call);
     g_variant_type_free(reply_type);
     g_variant_unref(mapped);
 }
@@ -1886,7 +1888,7 @@ static GVariant *portal_get_property(GDBusConnection *connection, const char *se
     reply = g_dbus_connection_call_sync(portal->host, PORTAL_NAME, PORTAL_PATH,
         "org.freedesktop.DBus.Properties", "Get",
         g_variant_new("(ss)", interface_name, property_name), G_VARIANT_TYPE("(v)"),
-        G_DBUS_CALL_FLAGS_NONE, 5000, NULL, error);
+        G_DBUS_CALL_FLAGS_NO_AUTO_START, 5000, NULL, error);
     if (reply == NULL) return NULL;
     g_variant_get(reply, "(v)", &value);
     g_variant_unref(reply);
@@ -2978,7 +2980,7 @@ static gboolean register_interfaces(Portal *portal, GError **error)
     gboolean host_metadata = TRUE;
     reply = g_dbus_connection_call_sync(portal->host, PORTAL_NAME, PORTAL_PATH,
         "org.freedesktop.DBus.Introspectable", "Introspect", NULL,
-        G_VARIANT_TYPE("(s)"), G_DBUS_CALL_FLAGS_NONE, 5000, NULL,
+        G_VARIANT_TYPE("(s)"), G_DBUS_CALL_FLAGS_NO_AUTO_START, 5000, NULL,
         &introspection_error);
     if (reply != NULL) {
         g_variant_get(reply, "(&s)", &xml);
@@ -3124,7 +3126,7 @@ static gboolean register_host_identity(Portal *portal, GError **error)
         PORTAL_PATH, "org.freedesktop.host.portal.Registry", "Register",
         g_variant_new("(s@a{sv})", portal->app_id,
             g_variant_new_array(G_VARIANT_TYPE("{sv}"), NULL, 0)),
-        G_VARIANT_TYPE_UNIT, G_DBUS_CALL_FLAGS_NONE, 5000, NULL, error);
+        G_VARIANT_TYPE_UNIT, G_DBUS_CALL_FLAGS_NO_AUTO_START, 5000, NULL, error);
     if (reply == NULL) return FALSE;
     g_variant_unref(reply);
     return TRUE;
@@ -3279,7 +3281,7 @@ int main(void)
         SCREEN_SAVER_NAME, G_BUS_NAME_WATCHER_FLAGS_AUTO_START,
         screen_saver_appeared, screen_saver_vanished, &portal, NULL);
     host_portal_watcher = g_bus_watch_name_on_connection(portal.host,
-        PORTAL_NAME, G_BUS_NAME_WATCHER_FLAGS_AUTO_START,
+        PORTAL_NAME, G_BUS_NAME_WATCHER_FLAGS_NONE,
         host_portal_appeared, host_portal_vanished, &portal, NULL);
     portal_owner = g_bus_own_name_on_connection(portal.guest, PORTAL_NAME,
         G_BUS_NAME_OWNER_FLAGS_ALLOW_REPLACEMENT | G_BUS_NAME_OWNER_FLAGS_REPLACE,
