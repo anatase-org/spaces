@@ -54,6 +54,10 @@ spaces = ["overlay/*.png"]
   "data/keys/kali-archive-key.gpg.base64",
 ]
 "share/spaces/repos" = ["data/repos/fedora.repo"]
+"share/spaces/systemd" = [
+  "data/run-spaces-proc.mount",
+  "data/local-fs-spaces-proc.conf",
+]
 "lib/systemd/system" = ["data/spaces@.service"]
 "lib/systemd/user" = ["data/systemd/user/spaces@.service"]
 "share/spaces/portal/dbus-1/services" = [

@@ -117,6 +117,7 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(unit["Service"]["Type"], "notify")
         self.assertEqual(unit["Service"]["NotifyAccess"], "all")
         self.assertEqual(unit["Service"]["Delegate"], "yes")
+        self.assertEqual(unit["Service"]["DelegateSubgroup"], "supervisor")
         self.assertEqual(unit["Service"]["KillMode"], "mixed")
         self.assertEqual(unit["Service"]["SyslogIdentifier"], "spaces-%I")
         self.assertEqual(unit["Service"]["DevicePolicy"], "closed")

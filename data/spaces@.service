@@ -5,6 +5,7 @@ Description=Spaces environment %I
 Type=notify
 NotifyAccess=all
 Delegate=yes
+DelegateSubgroup=supervisor
 KillMode=mixed
 SyslogIdentifier=spaces-%I
 DevicePolicy=closed

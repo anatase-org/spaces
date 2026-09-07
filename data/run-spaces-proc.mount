@@ -1,0 +1,10 @@
+[Unit]
+Description=Guest procfs for nested rootless containers
+Before=local-fs.target
+ConditionVirtualization=systemd-nspawn
+
+[Mount]
+What=proc
+Where=/run/spaces/proc
+Type=proc
+Options=nosuid,nodev,noexec

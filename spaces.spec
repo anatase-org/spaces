@@ -124,6 +124,8 @@ fi
 %{_datadir}/spaces/keys/*
 %dir %{_datadir}/spaces/repos
 %{_datadir}/spaces/repos/*
+%dir %{_datadir}/spaces/systemd
+%{_datadir}/spaces/systemd/*
 %config(noreplace) %{_sysconfdir}/pam.d/spaces
 %dir %{_sysconfdir}/spaces
 %dir %{_localstatedir}/lib/spaces

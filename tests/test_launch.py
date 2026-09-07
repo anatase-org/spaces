@@ -578,13 +578,13 @@ class LaunchTests(unittest.TestCase):
             (selinuxfs / "enforce").touch()
             self.assertEqual(
                 launch_module._selinux_arguments(),
-                ("--inaccessible=/sys/fs/selinux",),
+                ("--tmpfs=/sys/fs/selinux:ro,mode=000",),
             )
             policy.touch()
             self.assertEqual(
                 launch_module._selinux_arguments(),
                 (
-                    "--inaccessible=/sys/fs/selinux",
+                    "--tmpfs=/sys/fs/selinux:ro,mode=000",
                     "--selinux-context="
                     "system_u:system_r:spaces_container_t:s0",
                     "--selinux-apifs-context="
@@ -594,7 +594,7 @@ class LaunchTests(unittest.TestCase):
 
     def test_command_adds_available_selinux_contexts(self) -> None:
         contexts = (
-            "--inaccessible=/sys/fs/selinux",
+            "--tmpfs=/sys/fs/selinux:ro,mode=000",
             "--selinux-context=test_process_t",
             "--selinux-apifs-context=test_file_t",
         )
@@ -710,6 +710,23 @@ class LaunchTests(unittest.TestCase):
         )
         for argument in launch_module.NETWORK_SYSCTL_BINDS:
             self.assertNotIn(argument, run.call_args.args[0])
+
+    def test_nested_proc_mount_requires_development_or_admin_permission(self) -> None:
+        for level in ("basic", "development", "admin"):
+            with self.subTest(level=level):
+                arguments = launch_module._command(
+                    "work", self.rootfs, self.home, "basic", level,
+                )
+                proc_binds = [
+                    arg for arg in arguments
+                    if "run-spaces-proc.mount" in arg or "local-fs-spaces-proc.conf" in arg
+                ]
+                self.assertEqual(len(proc_binds), 0 if level == "basic" else 2)
+                if level != "basic":
+                    self.assertTrue(any(
+                        "/local-fs.target.d/spaces-proc.conf" in arg
+                        for arg in proc_binds
+                    ))
 
     def test_enabled_authentication_starts_service_and_adds_exact_binds(
         self,

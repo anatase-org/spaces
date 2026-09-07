@@ -2196,7 +2196,10 @@ def _selinux_arguments() -> tuple[str, ...]:
 
     if not (SELINUXFS / "enforce").is_file():
         return ()
-    mask = f"--inaccessible={SELINUX_GUEST_PATH}"
+    # --inaccessible binds a host runtime inode, whose SELinux label prevents
+    # nested rootless runtimes from mounting their own mask over this path.
+    # nspawn labels this empty tmpfs with --selinux-apifs-context instead.
+    mask = f"--tmpfs={SELINUX_GUEST_PATH}:ro,mode=000"
     if not SELINUX_POLICY_PACKAGE.is_file():
         logger.warning(
             _(
@@ -2240,6 +2243,19 @@ def _command(
         f"--bind={home}:/home",
         f"--bind={home / 'root'}:/root",
         *_unit_mask_bind_arguments(),
+        # A complete procfs in the guest PID namespace lets rootless runtimes
+        # mount their own procfs without removing nspawn's boot_id/kmsg binds.
+        # Development and admin spaces support nested container runtimes.
+        *(
+            (
+                "--bind-ro=/usr/share/spaces/systemd/run-spaces-proc.mount:"
+                "/run/systemd/system/run-spaces-proc.mount",
+                "--bind-ro=/usr/share/spaces/systemd/local-fs-spaces-proc.conf:"
+                "/run/systemd/system/local-fs.target.d/spaces-proc.conf",
+            )
+            if kernel_capabilities in ("development", "admin")
+            else ()
+        ),
         *authentication_binds,
         *custom_binds,
         *custom_overlays,
