@@ -53,7 +53,12 @@ class SystemBusRuntimeTests(unittest.TestCase):
                         for item in bindings
                     )
                 )
-        self.assertTrue(any("multi-user.target.wants" in item for item in bindings))
+        self.assertIn(
+            f"--bind-ro={system_bus.DATA_ROOT / 'multi-user.conf'}:"
+            "/etc/systemd/system/multi-user.target.d/50-spaces-system-broker.conf",
+            bindings,
+        )
+        self.assertFalse(any("multi-user.target.wants" in item for item in bindings))
         self.assertFalse(any("login1" in item for item in bindings))
 
     def test_network_permission_is_explicit(self):

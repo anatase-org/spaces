@@ -32,7 +32,8 @@ def guest_bind_arguments(directory: Path) -> tuple[str, ...]:
     bindings = [
         f"--bind-ro={directory}:{GUEST_RUNTIME}",
         f"--bind-ro={unit}:/etc/systemd/system/spaces-system-broker.service",
-        f"--bind-ro={unit}:/etc/systemd/system/multi-user.target.wants/spaces-system-broker.service",
+        f"--bind-ro={DATA_ROOT / 'multi-user.conf'}:"
+        "/etc/systemd/system/multi-user.target.d/50-spaces-system-broker.conf",
         f"--bind-ro={DATA_ROOT / 'system.conf'}:/etc/dbus-1/system.d/zz-spaces-system.conf",
     ]
     bindings.extend(f"--bind-ro=/dev/null:/etc/systemd/system/{name}" for name in MASKS)
