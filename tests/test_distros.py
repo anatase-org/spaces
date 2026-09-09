@@ -243,8 +243,16 @@ class DistributionDriverTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             rootfs = Path(temporary) / "rootfs"
             rootfs.mkdir()
-            with mock.patch.object(fedora.subprocess, "run") as run:
+            with (
+                mock.patch.object(fedora, "hidden_selinuxfs") as hidden_selinuxfs,
+                mock.patch.object(fedora.subprocess, "run") as run,
+            ):
                 fedora.DISTRIBUTION.bootstrap(metadata, rootfs)
+            hidden_selinuxfs.assert_called_once_with()
+            hidden_selinuxfs.return_value.__enter__.assert_called_once_with()
+            hidden_selinuxfs.return_value.__exit__.assert_called_once_with(
+                None, None, None
+            )
         self.assertEqual(
             [call.args[0] for call in run.call_args_list],
             [
@@ -327,10 +335,16 @@ class DistributionDriverTests(unittest.TestCase):
                 return subprocess.CompletedProcess(command, 0)
 
             with (
+                mock.patch.object(fedora, "hidden_selinuxfs") as hidden_selinuxfs,
                 mock.patch.object(fedora.subprocess, "run", side_effect=run),
                 self.assertRaises(subprocess.CalledProcessError),
             ):
                 fedora.DISTRIBUTION.bootstrap(metadata, rootfs)
+            hidden_selinuxfs.return_value.__exit__.assert_called_once()
+            self.assertIs(
+                hidden_selinuxfs.return_value.__exit__.call_args.args[0],
+                subprocess.CalledProcessError,
+            )
 
         self.assertEqual(commands[-2:], [
             ["umount", str(rootfs / "sys")],

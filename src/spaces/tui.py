@@ -91,8 +91,8 @@ class CleanRadioButton(RadioButton):
         content = super().render()
         if self.has_class("-selected"):
             # Textual retains its blue block-cursor background beneath later
-            # component styles. Apply an opaque final background here so the
-            # accent and hover states cannot blend with that cached blue.
+            # component styles. Start at the label, after the spacer: a span
+            # starting earlier is overridden when the label's blue span begins.
             background = Color.parse(
                 self.app.theme_variables[
                     "background" if self.mouse_hover else "accent-muted"
@@ -100,7 +100,7 @@ class CleanRadioButton(RadioButton):
             )
             content = content.stylize(
                 Style(background=background),
-                start=len(self._button),
+                start=len(self._button) + 1,
             )
         return content
 
