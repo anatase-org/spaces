@@ -21,8 +21,9 @@ SERVICES = (
     "org.freedesktop.NetworkManager",
     "org.freedesktop.UPower",
 )
-MASKS = (
+GUEST_DAEMONS = (
     "systemd-resolved.service",
+    "NetworkManager.service",
     "upower.service",
 )
 
@@ -36,14 +37,21 @@ def guest_bind_arguments(directory: Path) -> tuple[str, ...]:
         "/etc/systemd/system/multi-user.target.d/50-spaces-system-broker.conf",
         f"--bind-ro={DATA_ROOT / 'system.conf'}:/etc/dbus-1/system.d/zz-spaces-system.conf",
     ]
-    bindings.extend(f"--bind-ro=/dev/null:/etc/systemd/system/{name}" for name in MASKS)
+    # Binding onto a unit alias follows its symlink into /usr, making the
+    # package-owned unit a mount point that package managers cannot replace.
+    # Conditions also let package scripts start/restart the unit successfully
+    # without launching a guest daemon that competes with the host bridge.
+    for name in (*GUEST_DAEMONS, *(f"dbus-{name}.service" for name in SERVICES)):
+        bindings.append(
+            f"--bind-ro={DATA_ROOT / 'host-service.conf'}:"
+            f"/etc/systemd/system/{name}.d/50-spaces-host-service.conf"
+        )
     for name in SERVICES:
-        bindings.append(f"--bind-ro=/dev/null:/etc/systemd/system/dbus-{name}.service")
-        for prefix in ("/usr/share", "/usr/local/share"):
-            bindings.append(
-                f"--bind-ro={DATA_ROOT}/dbus-1/system-services/{name}.service:"
-                f"{prefix}/dbus-1/system-services/{name}.service"
-            )
+        # The system bus searches /etc before package-owned service directories.
+        bindings.append(
+            f"--bind-ro={DATA_ROOT}/dbus-1/system-services/{name}.service:"
+            f"/etc/dbus-1/system-services/{name}.service"
+        )
     return tuple(bindings)
 
 

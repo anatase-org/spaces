@@ -319,6 +319,19 @@ introspection and properties, NetworkManager's ObjectManager parent path,
 credential callbacks and spoof rejection, broadcasts, restarts, client cleanup,
 message limits, and independent space permissions.
 
+The root-only mount regression uses a private mount namespace with Ubuntu-style
+systemd aliases. With the bridge mounts applied, it verifies that package-owned
+units and D-Bus activation files still support hard-link backups and replacement.
+Guest daemons are suppressed with condition drop-ins; D-Bus activation overrides
+live in `/etc/dbus-1/system-services`, ahead of the vendor directories.
+
+For upgrade validation, install the updated Spaces package and fully stop/start
+the Ubuntu space so the old bind mounts disappear. Inside the guest, run
+`sudo apt --fix-broken install`, then retry the upgrade. Confirm that
+`systemctl show systemd-resolved.service -p ConditionResult -p ActiveState`
+reports the guest resolver inactive after a start attempt, and that
+`resolvectl status` still reaches the host bridge.
+
 | Service operation | Ordinary guest users | Guest root |
 | --- | --- | --- |
 | UPower properties, enumeration, history and refresh | Allowed | Allowed |

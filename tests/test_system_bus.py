@@ -7,9 +7,11 @@ these tests never call the host NetworkManager or resolver.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -35,24 +37,30 @@ except ImportError:
 
 
 class SystemBusRuntimeTests(unittest.TestCase):
-    def test_activation_and_daemon_masks(self):
+    def test_activation_and_daemon_conditions(self):
         bindings = system_bus.guest_bind_arguments(Path("/run/private"))
         self.assertIn("--bind-ro=/run/private:/run/spaces-host/system", bindings)
-        for name in ("systemd-resolved.service", "upower.service"):
-            self.assertIn(f"--bind-ro=/dev/null:/etc/systemd/system/{name}", bindings)
+        for name in (
+            "systemd-resolved.service",
+            "NetworkManager.service",
+            "upower.service",
+        ):
+            self.assertIn(
+                f"--bind-ro={system_bus.DATA_ROOT / 'host-service.conf'}:"
+                f"/etc/systemd/system/{name}.d/50-spaces-host-service.conf",
+                bindings,
+            )
         for name in system_bus.SERVICES:
             self.assertIn(
-                f"--bind-ro=/dev/null:/etc/systemd/system/dbus-{name}.service", bindings
+                f"--bind-ro={system_bus.DATA_ROOT / 'host-service.conf'}:"
+                f"/etc/systemd/system/dbus-{name}.service.d/50-spaces-host-service.conf",
+                bindings,
             )
-            for prefix in ("/usr/share", "/usr/local/share"):
-                self.assertTrue(
-                    any(
-                        item.endswith(
-                            f":{prefix}/dbus-1/system-services/{name}.service"
-                        )
-                        for item in bindings
-                    )
-                )
+            self.assertIn(
+                f"--bind-ro={system_bus.DATA_ROOT}/dbus-1/system-services/{name}.service:"
+                f"/etc/dbus-1/system-services/{name}.service",
+                bindings,
+            )
         self.assertIn(
             f"--bind-ro={system_bus.DATA_ROOT / 'multi-user.conf'}:"
             "/etc/systemd/system/multi-user.target.d/50-spaces-system-broker.conf",
@@ -60,6 +68,21 @@ class SystemBusRuntimeTests(unittest.TestCase):
         )
         self.assertFalse(any("multi-user.target.wants" in item for item in bindings))
         self.assertFalse(any("login1" in item for item in bindings))
+
+    def test_mounts_leave_package_files_and_unit_aliases_replaceable(self):
+        for binding in system_bus.guest_bind_arguments(Path("/run/private")):
+            destination = binding.split(":", 1)[1]
+            self.assertFalse(destination.startswith(("/usr/", "/lib/")))
+            if destination.startswith("/etc/systemd/system/"):
+                self.assertTrue(
+                    destination.endswith(".conf")
+                    or destination.endswith("/spaces-system-broker.service"),
+                    destination,
+                )
+
+    def test_guest_daemons_are_skipped_only_with_bridge_present(self):
+        config = (ROOT / "data/system-bridge/host-service.conf").read_text()
+        self.assertIn(f"ConditionPathExists=!{system_bus.GUEST_RUNTIME}\n", config)
 
     def test_network_permission_is_explicit(self):
         for level in core.NETWORK_LEVELS:
@@ -83,6 +106,78 @@ class SystemBusRuntimeTests(unittest.TestCase):
                 ROOT / f"data/system-bridge/dbus-1/system-services/{service}.service"
             ).read_text()
             self.assertIn("SystemdService=spaces-system-broker.service", entry)
+
+
+@unittest.skipUnless(
+    os.geteuid() == 0 and shutil.which("unshare"), "root and unshare required"
+)
+class SystemBusMountTests(unittest.TestCase):
+    def test_package_files_can_be_replaced_with_bridge_mounted(self):
+        with tempfile.TemporaryDirectory(prefix="spaces-package-test-") as temporary:
+            directory = Path(temporary)
+            runtime = directory / "bridge"
+            runtime.mkdir()
+            rootfs = directory / "rootfs"
+            vendor_files = []
+            for name, service in zip(system_bus.GUEST_DAEMONS, system_bus.SERVICES):
+                unit = rootfs / "usr/lib/systemd/system" / name
+                unit.parent.mkdir(parents=True, exist_ok=True)
+                unit.write_text("[Service]\nExecStart=/bin/true\n")
+                alias = rootfs / "etc/systemd/system" / f"dbus-{service}.service"
+                alias.parent.mkdir(parents=True, exist_ok=True)
+                alias.symlink_to(f"../../../usr/lib/systemd/system/{name}")
+                vendor_files.append(str(unit))
+                for prefix in ("usr/share", "usr/local/share"):
+                    activation = (
+                        rootfs
+                        / prefix
+                        / "dbus-1/system-services"
+                        / f"{service}.service"
+                    )
+                    activation.parent.mkdir(parents=True, exist_ok=True)
+                    activation.write_text("package activation file\n")
+                    vendor_files.append(str(activation))
+            with mock.patch.object(
+                system_bus, "DATA_ROOT", ROOT / "data/system-bridge"
+            ):
+                bindings = system_bus.guest_bind_arguments(runtime)
+            # Keep real mounts confined to a child namespace. Simulate dpkg's
+            # hard-link backup followed by replacement of each vendor file.
+            script = """import json, os, pathlib, subprocess, sys
+rootfs, bindings, vendor_files = json.loads(sys.argv[1])
+subprocess.run(['mount', '--make-rprivate', '/'], check=True)
+for binding in bindings:
+    source, destination = binding.removeprefix('--bind-ro=').split(':', 1)
+    target = pathlib.Path(rootfs) / destination.lstrip('/')
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if pathlib.Path(source).is_dir():
+        target.mkdir(exist_ok=True)
+    elif not target.exists():
+        target.touch()
+    subprocess.run(['mount', '--bind', source, str(target)], check=True)
+    subprocess.run(['mount', '-o', 'remount,bind,ro', str(target)], check=True)
+for filename in vendor_files:
+    target = pathlib.Path(filename)
+    os.link(target, filename + '.dpkg-tmp')
+    replacement = pathlib.Path(filename + '.dpkg-new')
+    replacement.write_text('upgraded package file\\n')
+    replacement.replace(target)
+    assert target.read_text() == 'upgraded package file\\n'
+"""
+            result = subprocess.run(
+                [
+                    "unshare",
+                    "--mount",
+                    sys.executable,
+                    "-c",
+                    script,
+                    json.dumps([str(rootfs), bindings, vendor_files]),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
 
 
 @unittest.skipUnless(
