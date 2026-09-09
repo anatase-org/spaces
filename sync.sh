@@ -126,15 +126,17 @@ mapfile -t selinux_rpm_candidates < <(
     die "expected exactly one Spaces SELinux policy RPM"
 
 spaces_rpm_path=${spaces_rpm_candidates[0]}
-spaces_rpm_name=${spaces_rpm_path##*/}
+spaces_rpm_name=spaces.rpm
 selinux_rpm_path=${selinux_rpm_candidates[0]}
-selinux_rpm_name=${selinux_rpm_path##*/}
+selinux_rpm_name=spaces-selinux.rpm
 
-rpm_paths=("$spaces_rpm_path")
+cp -- "$spaces_rpm_path" "$build_dir/$spaces_rpm_name"
+rpm_paths=("$build_dir/$spaces_rpm_name")
 rpm_names=("$spaces_rpm_name")
 remote_rpms="~/$spaces_rpm_name"
 if [[ $install_selinux == true ]]; then
-    rpm_paths+=("$selinux_rpm_path")
+    cp -- "$selinux_rpm_path" "$build_dir/$selinux_rpm_name"
+    rpm_paths+=("$build_dir/$selinux_rpm_name")
     rpm_names+=("$selinux_rpm_name")
     remote_rpms+=" ~/$selinux_rpm_name"
 fi
@@ -146,6 +148,7 @@ echo "Installing ${rpm_names[*]} on $remote_host..."
 ssh -t "$remote_host" "sudo rpm-ostree usroverlay || true
 sudo systemctl stop 'spaces@*' &&
 sudo dnf5 install -y $remote_rpms &&
+rm -f -- $remote_rpms &&
 sudo systemctl try-reload-or-restart polkit.service"
 
 echo "Spaces is ready on $remote_host."
