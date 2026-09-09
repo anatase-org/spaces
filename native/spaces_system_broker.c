@@ -318,7 +318,8 @@ static void open_client(Client *client, GDBusMessage *request)
             "Host system bus unavailable");
         return;
     }
-    client->admin = client->app->admin && uid == 0 && !client->observer;
+    /* Network Admin is granted to the space, independent of guest UID. */
+    client->admin = client->app->admin && !client->observer;
     client->opened = TRUE;
     initialize_host(client);
     reply_success(client->peer, request, g_variant_new("(b)", client->admin));
@@ -373,8 +374,6 @@ static Client *relay_client(App *app, const char *sender, gboolean observer)
     client->observer = observer;
     g_variant_get(reply, "(b)", &client->admin);
     g_variant_unref(reply);
-    /* Broker authority can never turn a non-root guest caller into an admin. */
-    client->admin = client->admin && uid == 0;
     client->filters[0]
         = g_dbus_connection_add_filter(peer, client_filter, client_ref(client), client_unref);
     g_signal_connect(peer, "closed", G_CALLBACK(connection_closed), client);

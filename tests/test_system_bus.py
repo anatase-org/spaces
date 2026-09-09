@@ -346,6 +346,7 @@ class SystemBusIntegrationTests(unittest.TestCase):
 <method name="Enable"><arg type="b" direction="in"/></method>
 <method name="GetPermissions"><arg type="a{ss}" direction="out"/></method>
 <property name="WirelessEnabled" type="b" access="readwrite"/>
+<property name="ConnectivityCheckEnabled" type="b" access="readwrite"/>
 <signal name="StateChanged"><arg type="u"/></signal>""",
             ),
             (
@@ -410,6 +411,7 @@ class SystemBusIntegrationTests(unittest.TestCase):
         values = {
             "DNS": GLib.Variant("s", "host-dns"),
             "WirelessEnabled": GLib.Variant("b", True),
+            "ConnectivityCheckEnabled": GLib.Variant("b", True),
             "OnBattery": GLib.Variant("b", True),
             "Percentage": GLib.Variant("d", 75.0),
         }
@@ -658,7 +660,12 @@ class SystemBusIntegrationTests(unittest.TestCase):
             self.assertFalse(service.socket.exists())
 
     def test_readonly_broker_policy_matrix(self):
-        # Root-only transport carries the UID authenticated by the guest relay.
+        # Read-only authority comes from the space, not the guest caller's UID.
+        self.broker.terminate()
+        self.broker.wait(timeout=5)
+        self.socket.unlink(missing_ok=True)
+        self.broker = self.start_bridge("--broker", self.host_address, admin=False)
+        self.wait_for(lambda: self.socket.exists())
         peer = Gio.DBusConnection.new_for_address_sync(
             "unix:path=" + str(self.socket),
             Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT,
@@ -822,15 +829,39 @@ class SystemBusIntegrationTests(unittest.TestCase):
         self.assertEqual(set(permissions.values()), {"no"})
         self.call(NM, "/org/freedesktop/NetworkManager", NM, "GetDevices")
 
-    def test_nonroot_status_and_denials(self):
+    def test_nonroot_network_admin(self):
+        self.check_nonroot_network_permissions(admin=True)
+
+    def test_nonroot_without_network_admin(self):
+        self.broker.terminate()
+        self.broker.wait(timeout=5)
+        self.socket.unlink(missing_ok=True)
+        self.broker = self.start_bridge("--broker", self.host_address, admin=False)
+        self.wait_for(lambda: self.socket.exists())
+        time.sleep(0.3)
+        self.check_nonroot_network_permissions(admin=False)
+
+    def check_nonroot_network_permissions(self, admin):
         script = """import gi,sys
 from gi.repository import Gio,GLib
 bus=Gio.DBusConnection.new_for_address_sync(sys.argv[1], Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT|Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION,None,None)
-for method,body in [("GetDevices",None),("Enable",GLib.Variant("(b)",(True,)))]:
+nm="org.freedesktop.NetworkManager"
+path="/org/freedesktop/NetworkManager"
+calls=[
+ ("GetDevices",nm,path,nm,"GetDevices",None),
+ ("Enable",nm,path,nm,"Enable",GLib.Variant("(b)",(True,))),
+ ("Set",nm,path,"org.freedesktop.DBus.Properties","Set",GLib.Variant("(ssv)",(nm,"ConnectivityCheckEnabled",GLib.Variant("b",False)))),
+ ("GetSecrets",nm,path+"/Settings/1",nm+".Settings.Connection","GetSecrets",GLib.Variant("(s)",("vpn",))),
+ ("Register",nm,path+"/AgentManager",nm+".AgentManager","Register",GLib.Variant("(s)",("test-agent",))),
+ ("SetLinkDNS","org.freedesktop.resolve1","/org/freedesktop/resolve1","org.freedesktop.resolve1.Manager","SetLinkDNS",GLib.Variant("(ia(iay))",(1,[]))),
+]
+for label,destination,path,interface,method,body in calls:
  try:
-  bus.call_sync("org.freedesktop.NetworkManager","/org/freedesktop/NetworkManager","org.freedesktop.NetworkManager",method,body,None,Gio.DBusCallFlags.NONE,5000,None)
-  print(method+":ok")
- except GLib.Error as e: print(method+":"+Gio.DBusError.get_remote_error(e))
+  bus.call_sync(destination,path,interface,method,body,None,Gio.DBusCallFlags.NONE,5000,None)
+  print(label+":ok")
+ except GLib.Error as e: print(label+":"+Gio.DBusError.get_remote_error(e))
+permissions=bus.call_sync(nm,"/org/freedesktop/NetworkManager",nm,"GetPermissions",None,None,Gio.DBusCallFlags.NONE,5000,None).unpack()[0]
+print("permissions:"+",".join(sorted(set(permissions.values()))))
 """
         result = subprocess.run(
             [
@@ -849,7 +880,10 @@ for method,body in [("GetDevices",None),("Enable",GLib.Variant("(b)",(True,)))]:
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("GetDevices:ok", result.stdout)
-        self.assertIn("Enable:org.freedesktop.DBus.Error.AccessDenied", result.stdout)
+        expected = "ok" if admin else "org.freedesktop.DBus.Error.AccessDenied"
+        for method in ("Enable", "Set", "GetSecrets", "Register", "SetLinkDNS"):
+            self.assertIn(f"{method}:{expected}", result.stdout)
+        self.assertIn("permissions:" + ("yes" if admin else "no"), result.stdout)
 
     def test_signals_forward_once_and_reconnect_after_service_restart(self):
         signals = []

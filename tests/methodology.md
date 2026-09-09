@@ -337,8 +337,12 @@ reports the guest resolver inactive after a start attempt, and that
 | UPower properties, enumeration, history and refresh | Allowed | Allowed |
 | UPower configuration | Denied | Denied |
 | Resolver and NetworkManager status | Allowed | Allowed |
-| Host DNS or NetworkManager changes | Denied | Only Network Admin |
-| NetworkManager secrets and credential-agent registration | Denied | Only Network Admin |
+| Host DNS or NetworkManager changes | Only Network Admin | Only Network Admin |
+| NetworkManager secrets and credential-agent registration | Only Network Admin | Only Network Admin |
+
+Network Admin authorizes all guest users, without requiring guest root. Forwarded
+calls use the root broker’s host identity, so this grants authority directly rather
+than reproducing host per-user polkit authorization.
 
 The Develop preset already grants Network Admin. Guest sudo uses the existing
 administrator permission; desktop and host-authentication permissions do not gate
