@@ -205,9 +205,9 @@ optional_policy(`
 # Spaces container payload
 #
 
-# Persistent state is relabeled only by the host.  The guest may manage and
-# execute the restored spaces_file_t tree, but it cannot change SELinux
-# labels or create that type on unrelated tmpfs mounts.
+# The guest may manage and execute the restored spaces_file_t tree.
+# Regular-file relabeling for copies and moves is allowed below alongside
+# access to user-selected host-home paths.
 allow spaces_container_t spaces_file_t:dir_file_class_set map;
 manage_dirs_pattern(spaces_container_t, spaces_file_t, spaces_file_t)
 manage_files_pattern(spaces_container_t, spaces_file_t, spaces_file_t)
@@ -509,6 +509,10 @@ gen_require(`
 	type user_home_t;
 ')
 allow spaces_container_t user_home_t:dir mounton;
+
+# Copies and moves between host-home and space directories may preserve or
+# reset file contexts. Permit both sides of those regular-file relabels.
+allow spaces_container_t { user_home_t spaces_file_t }:file { relabelfrom relabelto };
 
 # A user's selected /run/media directory is bind-mounted read-write. Native
 # Linux filesystems without host labels appear as unlabeled_t, while removable
