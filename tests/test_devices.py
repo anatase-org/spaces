@@ -231,6 +231,32 @@ class DeviceDiscoveryTests(unittest.TestCase):
             with self.subTest(level=level):
                 self.assertEqual(self._discover(level, definitions), ())
 
+    def test_all_levels_exclude_watchdogs_and_aliases(self) -> None:
+        accessible = metadata(tags=("uaccess",))
+        definitions = {
+            "watchdog": ("c", 10, 130, 0, accessible),
+            "watchdog0": ("c", 245, 0, 0, accessible),
+            "renamed-legacy": ("c", 10, 130, 0, accessible),
+            "renamed-watchdog": (
+                "c", 245, 1, 0,
+                metadata(tags=("uaccess",), subsystems=("watchdog",)),
+            ),
+            "safe": ("c", 240, 0, 100, accessible),
+        }
+        for level in ("disabled", "basic", "admin", "full"):
+            with self.subTest(level=level):
+                found = {
+                    str(item.destination)
+                    for item in self._discover(
+                        level,
+                        definitions,
+                        aliases={"alias": "watchdog0"} if level == "full" else None,
+                    )
+                }
+                self.assertEqual(
+                    found, set() if level == "disabled" else {"/dev/safe"}
+                )
+
     def test_admin_includes_input_storage_and_unclassifiable_nodes(self) -> None:
         definitions = {
             "input/event0": (

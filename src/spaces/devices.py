@@ -320,7 +320,7 @@ def discover(
         return ()
     resolved_device_root = device_root.resolve(strict=True)
     owned_udev: Udev | None = None
-    if metadata_reader is None and level != "full":
+    if metadata_reader is None:
         owned_udev = Udev()
         metadata_reader = owned_udev.metadata
     try:
@@ -382,9 +382,18 @@ def discover(
                 destination = PurePosixPath("/dev", *relative.parts)
                 if destination in NSPAWN_MANAGED_DEVICES:
                     continue
+                assert metadata_reader is not None
+                metadata = metadata_reader(kind, metadata_stat.st_rdev)
+                # Watchdogs control host-wide resets and must never be
+                # exposed, even with full device access or through aliases.
+                if kind == "c" and (
+                    "watchdog" in metadata.subsystems
+                    or (major, minor) == (10, 130)
+                    or re.fullmatch(r"watchdog\d*", destination.name)
+                    or re.fullmatch(r"watchdog\d*", bind_source.name)
+                ):
+                    continue
                 if level != "full":
-                    assert metadata_reader is not None
-                    metadata = metadata_reader(kind, metadata_stat.st_rdev)
                     if _is_security_device(destination, metadata):
                         continue
                     if level == "basic" and (
