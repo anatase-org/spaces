@@ -751,8 +751,12 @@ class PortalNativeTests(unittest.TestCase):
           <method name='Activate'>
             <arg type='i' direction='in'/><arg type='i' direction='in'/>
           </method>
-          <property name='Id' type='s' access='read'/>
-          <property name='Menu' type='o' access='read'/>
+        </interface>
+        <interface name='org.freedesktop.DBus.Properties'>
+          <method name='Get'><arg type='s' direction='in'/><arg type='s' direction='in'/>
+            <arg type='v' direction='out'/></method>
+          <method name='GetAll'><arg type='s' direction='in'/>
+            <arg type='a{sv}' direction='out'/></method>
         </interface></node>
         """
         with tempfile.TemporaryDirectory() as temporary:
@@ -833,7 +837,19 @@ class PortalNativeTests(unittest.TestCase):
                     _parameters: object,
                     invocation: object,
                 ) -> None:
-                    invocation.return_value(None)
+                    properties = {
+                        "Id": GLib.Variant("s", "Flameshot"),
+                        "Menu": GLib.Variant("o", "/"),
+                        "IconName": GLib.Variant("s", "test-themed-icon"),
+                    }
+                    if _method == "Get":
+                        invocation.return_value(
+                            GLib.Variant("(v)", (properties[_parameters.unpack()[1]],))
+                        )
+                    elif _method == "GetAll":
+                        invocation.return_value(GLib.Variant("(a{sv})", (properties,)))
+                    else:
+                        invocation.return_value(None)
 
                 def item_property(
                     _connection: object,
@@ -856,7 +872,10 @@ class PortalNativeTests(unittest.TestCase):
                     item_property,
                     None,
                 )
-                loop_thread.start()
+
+                item.register_object(
+                    "/StatusNotifierItem", node.interfaces[1], item_call, None, None
+                )
 
                 watcher_name = "org.kde.StatusNotifierWatcher"
                 watcher_path = "/StatusNotifierWatcher"
@@ -888,6 +907,7 @@ class PortalNativeTests(unittest.TestCase):
                     None,
                 )
                 self.assertEqual(reply.unpack(), ())
+                loop_thread.start()
                 registered = caller.call_sync(
                     watcher_name,
                     watcher_path,
@@ -911,6 +931,17 @@ class PortalNativeTests(unittest.TestCase):
                         "work-flameshot.item.i1",
                     )
                 )
+                host_reader = Gio.DBusConnection.new_for_address_sync(
+                    host_address, flags, None, None
+                )
+                connections.insert(0, host_reader)
+                icon = host_reader.call_sync(
+                    "org.kde.StatusNotifierItem.spaces.space.work-flameshot.item.i1",
+                    "/StatusNotifierItem", "org.freedesktop.DBus.Properties", "Get",
+                    GLib.Variant("(ss)", ("org.kde.StatusNotifierItem", "IconName")),
+                    GLib.VariantType.new("(v)"), Gio.DBusCallFlags.NONE, 3000, None,
+                )
+                self.assertEqual(icon.unpack(), ("test-themed-icon",))
             finally:
                 if registration and connections:
                     connections[-1].unregister_object(registration)
@@ -992,6 +1023,9 @@ class PortalNativeTests(unittest.TestCase):
             host_home.mkdir()
             host_screenshot = host_home / "capture.png"
             guest_screenshot = guest_home / "capture.png"
+            themed_icon = root / "guest-data/icons/hicolor/scalable/apps/spaces-test-icon.svg"
+            themed_icon.parent.mkdir(parents=True)
+            themed_icon.write_bytes(b"guest themed icon")
             host_screenshot.write_bytes(b"guest screenshot")
             os.link(host_screenshot, guest_screenshot)
             host_address, host_pid = self._bus(root / "host-bus")
@@ -1160,6 +1194,7 @@ class PortalNativeTests(unittest.TestCase):
                 env={
                     **os.environ,
                     "DBUS_SESSION_BUS_ADDRESS": guest_address,
+                    "XDG_DATA_HOME": str(root / "guest-data"),
                     "SPACES_NAME": "work",
                     "SPACES_PORTAL_TEST_ADDRESS": host_address,
                     "SPACES_INTEGRATION_BROKER": broker_name,
@@ -1241,12 +1276,13 @@ class PortalNativeTests(unittest.TestCase):
                             (
                                 "Guest app",
                                 0,
-                                "guest-icon",
+                                str(guest_screenshot),
                                 "Summary",
                                 "Body",
                                 ["default", "Open"],
                                 {
                                     "urgency": GLib.Variant("y", 1),
+                                    "image-path": GLib.Variant("s", guest_screenshot.as_uri()),
                                     "x-kde-urls": GLib.Variant(
                                         "as", (guest_screenshot.as_uri(),)
                                     ),
@@ -1263,11 +1299,41 @@ class PortalNativeTests(unittest.TestCase):
                     for method, parameters in events
                     if method == "Notify"
                 )
+                icon_path = Path(notification_event[2])
+                self.assertNotEqual(icon_path, guest_screenshot)
+                self.assertEqual(icon_path.read_bytes(), guest_screenshot.read_bytes())
+                image_path = notification_event[6]["image-path"]
+                if isinstance(image_path, GLib.Variant):
+                    image_path = image_path.unpack()
+                self.assertEqual(image_path, str(icon_path))
                 mapped_urls = notification_event[6]["x-kde-urls"]
                 if isinstance(mapped_urls, GLib.Variant):
                     mapped_urls = mapped_urls.unpack()
                 self.assertEqual(mapped_urls, [host_screenshot.as_uri()])
                 self.assertTrue(host_screenshot.samefile(guest_screenshot))
+                # Notifications generally have no x-kde-urls hint. Their icons
+                # must still be translated, including guest-only theme names.
+                call(
+                    notification_client, "org.freedesktop.Notifications",
+                    notification_path, "Notify",
+                    GLib.Variant(
+                        "(susssasa{sv}i)",
+                        ("Guest app", 73, "spaces-test-icon", "Second", "Body", [],
+                         {"image-path": GLib.Variant("s", str(guest_screenshot))}, -1),
+                    ),
+                    "(u)",
+                )
+                second_notification = [
+                    parameters for method, parameters in events if method == "Notify"
+                ][-1]
+                self.assertEqual(
+                    Path(second_notification[2]).read_bytes(), themed_icon.read_bytes()
+                )
+                image_path = second_notification[6]["image-path"]
+                if isinstance(image_path, GLib.Variant):
+                    image_path = image_path.unpack()
+                self.assertEqual(image_path, str(icon_path))
+
                 notification_client.close_sync(None)
                 clients.remove(notification_client)
                 time.sleep(0.05)

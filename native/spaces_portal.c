@@ -246,6 +246,7 @@ struct Portal {
     GHashTable *sessions_host;
     GHashTable *mirrors;
     GHashTable *inhibitors;
+    GHashTable *icon_files;
     char *space_name;
     char *app_id;
     char *file_chooser_backend;
@@ -2047,6 +2048,110 @@ static char *resolve_host_file_uri(Portal *portal, const char *uri,
     return host_uri;
 }
 
+static char *find_icon_file(const char *directory, const char *name, guint depth)
+{
+    const char *extensions[] = { "", ".svg", ".png", ".xpm", NULL };
+    for (int i = 0; extensions[i]; i++) {
+        char *filename = g_strconcat(name, extensions[i], NULL);
+        char *path = g_build_filename(directory, filename, NULL);
+        g_free(filename);
+        if (g_file_test(path, G_FILE_TEST_IS_REGULAR)) return path;
+        g_free(path);
+    }
+    if (!depth) return NULL;
+    GDir *dir = g_dir_open(directory, 0, NULL);
+    if (!dir) return NULL;
+    const char *entry;
+    char *result = NULL;
+    while (!result && (entry = g_dir_read_name(dir))) {
+        char *path = g_build_filename(directory, entry, NULL);
+        if (!g_file_test(path, G_FILE_TEST_IS_SYMLINK)
+            && g_file_test(path, G_FILE_TEST_IS_DIR))
+            result = find_icon_file(path, name, depth - 1);
+        g_free(path);
+    }
+    g_dir_close(dir);
+    return result;
+}
+
+static char *guest_icon_path(const char *icon)
+{
+    if (g_path_is_absolute(icon)) return g_strdup(icon);
+    if (g_str_has_prefix(icon, "file:")) return g_filename_from_uri(icon, NULL, NULL);
+    /* Theme identifiers must remain simple filenames. Prefer the app icons
+     * installed in the guest's standard fallback theme; leave unknown names
+     * for the host theme to resolve. */
+    if (!*icon || strchr(icon, '/') || g_str_equal(icon, ".") || g_str_equal(icon, ".."))
+        return NULL;
+    const char * const *dirs = g_get_system_data_dirs();
+    for (int i = -1; i < 64; i++) {
+        const char *base = i < 0 ? g_get_user_data_dir() : dirs[i];
+        if (!base) break;
+        char *directory = g_build_filename(base, "icons", "hicolor", NULL);
+        char *path = find_icon_file(directory, icon, 2);
+        g_free(directory);
+        if (path) return path;
+        directory = g_build_filename(base, "pixmaps", NULL);
+        path = find_icon_file(directory, icon, 0);
+        g_free(directory);
+        if (path) return path;
+    }
+    return NULL;
+}
+
+/* Icons under /usr and /opt are not shared host paths. Copy through the
+ * existing bounded FD staging API; never ask the host to open a guest path. */
+static char *host_icon(Portal *portal, const char *icon)
+{
+    const char *broker = g_getenv("SPACES_INTEGRATION_BROKER");
+    if (!broker || !icon || !*icon) return g_strdup(icon ? icon : "");
+    char *path = guest_icon_path(icon);
+    if (!path) return g_strdup(icon);
+    GFile *file = g_file_new_for_path(path);
+    GFileInfo *info = g_file_query_info(file,
+        "standard::type,standard::size,time::modified,time::modified-usec",
+        G_FILE_QUERY_INFO_NONE, NULL, NULL);
+    g_object_unref(file);
+    if (!info || g_file_info_get_file_type(info) != G_FILE_TYPE_REGULAR) {
+        g_clear_object(&info);
+        g_free(path);
+        return g_strdup("");
+    }
+    char *key = g_strdup_printf("%s:%" G_GUINT64_FORMAT ":%u:%" G_GINT64_FORMAT,
+        path, g_file_info_get_attribute_uint64(info, "time::modified"),
+        g_file_info_get_attribute_uint32(info, "time::modified-usec"),
+        (gint64)g_file_info_get_size(info));
+    g_object_unref(info);
+    const char *cached = g_hash_table_lookup(portal->icon_files, key);
+    if (cached) {
+        char *result = g_strdup(cached);
+        g_free(key); g_free(path);
+        return result;
+    }
+    char *result = NULL;
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+    if (fd >= 0) {
+        GUnixFDList *fds = g_unix_fd_list_new();
+        gint handle = g_unix_fd_list_append(fds, fd, NULL);
+        GVariant *reply = handle < 0 ? NULL
+            : g_dbus_connection_call_with_unix_fd_list_sync(portal->host,
+                broker, INTEGRATION_PATH, INTEGRATION_INTERFACE, "StageFile",
+                g_variant_new("(h)", handle), G_VARIANT_TYPE("(s)"),
+                G_DBUS_CALL_FLAGS_NONE, 5000, fds, NULL, NULL, NULL);
+        if (reply) {
+            const char *uri;
+            g_variant_get(reply, "(&s)", &uri);
+            result = g_filename_from_uri(uri, NULL, NULL);
+            g_variant_unref(reply);
+        }
+        g_object_unref(fds); close(fd);
+    }
+    if (result) g_hash_table_insert(portal->icon_files, key, g_strdup(result));
+    else g_free(key);
+    g_free(path);
+    return result ? result : g_strdup("");
+}
+
 static GVariant *rewrite_notification_paths(Portal *portal,
     GVariant *parameters)
 {
@@ -2058,50 +2163,48 @@ static GVariant *rewrite_notification_paths(Portal *portal,
     GVariantBuilder mapped_urls;
     GVariantDict dictionary;
     const char *uri;
-    gboolean changed = FALSE;
 
     g_variant_get(parameters, "(&su&s&s&s@as@a{sv}i)", &app_name,
         &replaces, &app_icon, &summary, &body, &actions, &hints, &timeout);
-    urls = g_variant_lookup_value(hints, "x-kde-urls",
-        G_VARIANT_TYPE_STRING_ARRAY);
-    if (urls == NULL) {
-        g_variant_unref(actions);
-        g_variant_unref(hints);
-        return g_variant_ref(parameters);
-    }
-    g_variant_builder_init(&mapped_urls, G_VARIANT_TYPE_STRING_ARRAY);
-    g_variant_iter_init(&iterator, urls);
-    while (g_variant_iter_next(&iterator, "&s", &uri)) {
-        char *host_uri = NULL;
-        if (g_str_has_prefix(uri, "file:")) {
-            GError *error = NULL;
-            changed = TRUE;
-            host_uri = resolve_host_file_uri(portal, uri, &error);
-            if (host_uri == NULL) {
-                g_warning("Could not map notification file URI: %s",
-                    error == NULL ? "unknown error" : error->message);
-            }
-            g_clear_error(&error);
-        }
-        if (host_uri != NULL || !g_str_has_prefix(uri, "file:"))
-            g_variant_builder_add(&mapped_urls, "s",
-                host_uri == NULL ? uri : host_uri);
-        g_free(host_uri);
-    }
-    g_variant_unref(urls);
-    if (!changed) {
-        g_variant_builder_clear(&mapped_urls);
-        g_variant_unref(actions);
-        g_variant_unref(hints);
-        return g_variant_ref(parameters);
-    }
+    char *mapped_icon = host_icon(portal, app_icon);
     g_variant_dict_init(&dictionary, hints);
-    g_variant_dict_insert_value(&dictionary, "x-kde-urls",
-        g_variant_builder_end(&mapped_urls));
+    const char *image_keys[] = { "image-path", "image_path", NULL };
+    for (int index = 0; image_keys[index]; index++) {
+        const char *image_path;
+        if (g_variant_lookup(hints, image_keys[index], "&s", &image_path)) {
+            char *mapped = host_icon(portal, image_path);
+            g_variant_dict_insert(&dictionary, image_keys[index], "s", mapped);
+            g_free(mapped);
+        }
+    }
+    urls = g_variant_lookup_value(hints, "x-kde-urls", G_VARIANT_TYPE_STRING_ARRAY);
+    if (urls) {
+        g_variant_builder_init(&mapped_urls, G_VARIANT_TYPE_STRING_ARRAY);
+        g_variant_iter_init(&iterator, urls);
+        while (g_variant_iter_next(&iterator, "&s", &uri)) {
+            char *host_uri = NULL;
+            if (g_str_has_prefix(uri, "file:")) {
+                GError *error = NULL;
+                host_uri = resolve_host_file_uri(portal, uri, &error);
+                if (!host_uri)
+                    g_warning("Could not map notification file URI: %s",
+                        error ? error->message : "unknown error");
+                g_clear_error(&error);
+            }
+            if (host_uri || !g_str_has_prefix(uri, "file:"))
+                g_variant_builder_add(&mapped_urls, "s", host_uri ? host_uri : uri);
+            g_free(host_uri);
+        }
+        g_variant_dict_insert_value(&dictionary, "x-kde-urls",
+            g_variant_builder_end(&mapped_urls));
+        g_variant_unref(urls);
+    }
     g_variant_unref(hints);
-    return g_variant_ref_sink(g_variant_new("(susss@as@a{sv}i)",
-        app_name, replaces, app_icon, summary, body, actions,
+    GVariant *result = g_variant_ref_sink(g_variant_new("(susss@as@a{sv}i)",
+        app_name, replaces, mapped_icon, summary, body, actions,
         g_variant_dict_end(&dictionary), timeout));
+    g_free(mapped_icon);
+    return result;
 }
 
 typedef struct {
@@ -2409,6 +2512,16 @@ static GVariant *mirror_get_property(GDBusConnection *connection,
     if (g_str_equal(interface_name, "org.mpris.MediaPlayer2.Player")
         && g_str_equal(property_name, "Metadata"))
         value = stage_artwork(mirror, value);
+    if (mirror->status_item && g_str_equal(interface_name, STATUS_ITEM_INTERFACE)
+        && (g_str_equal(property_name, "IconName")
+            || g_str_equal(property_name, "AttentionIconName")
+            || g_str_equal(property_name, "OverlayIconName"))
+        && g_variant_is_of_type(value, G_VARIANT_TYPE_STRING)) {
+        char *icon = host_icon(mirror->portal, g_variant_get_string(value, NULL));
+        g_variant_unref(value);
+        value = g_variant_ref_sink(g_variant_new_string(icon));
+        g_free(icon);
+    }
     return value;
 }
 
@@ -2472,6 +2585,21 @@ static void mirror_guest_signal(GDBusConnection *connection, const char *sender,
                 changed = g_variant_ref_sink(g_variant_dict_end(&dictionary));
             }
         }
+        if (mirror->status_item && g_str_equal(changed_interface, STATUS_ITEM_INTERFACE)) {
+            GVariantDict dictionary;
+            const char *names[] = { "IconName", "AttentionIconName", "OverlayIconName", NULL };
+            g_variant_dict_init(&dictionary, changed);
+            for (int i = 0; names[i]; i++) {
+                const char *icon;
+                if (g_variant_lookup(changed, names[i], "&s", &icon)) {
+                    char *mapped = host_icon(mirror->portal, icon);
+                    g_variant_dict_insert(&dictionary, names[i], "s", mapped);
+                    g_free(mapped);
+                }
+            }
+            g_variant_unref(changed);
+            changed = g_variant_ref_sink(g_variant_dict_end(&dictionary));
+        }
         forwarded = g_variant_ref_sink(g_variant_new("(s@a{sv}@as)",
             changed_interface, changed, invalidated));
     }
@@ -2517,6 +2645,41 @@ static gboolean mirror_add_path(Mirror *mirror, const char *path, GError **error
         GDBusInterfaceInfo *info = node->interfaces[index];
         guint registration;
         if (g_str_has_prefix(info->name, "org.freedesktop.DBus.")) continue;
+        if (mirror->status_item && g_str_equal(info->name, STATUS_ITEM_INTERFACE)) {
+            /* dbus-python items implement Properties.GetAll without listing
+             * properties in their introspection XML. Publish those properties
+             * too, otherwise the host sees an empty status item. */
+            GVariant *all = g_dbus_connection_call_sync(mirror->portal->guest,
+                mirror->guest_name, path, "org.freedesktop.DBus.Properties", "GetAll",
+                g_variant_new("(s)", info->name), G_VARIANT_TYPE("(a{sv})"),
+                G_DBUS_CALL_FLAGS_NONE, 3000, NULL, NULL);
+            if (all) {
+                GVariant *properties;
+                GVariantIter iter;
+                const char *name;
+                GVariant *value;
+                guint count = 0;
+                while (info->properties && info->properties[count]) count++;
+                g_variant_get(all, "(@a{sv})", &properties);
+                g_variant_iter_init(&iter, properties);
+                while (g_variant_iter_next(&iter, "{&sv}", &name, &value)) {
+                    if (count < 128 && g_dbus_is_member_name(name)
+                        && !g_dbus_interface_info_lookup_property(info, name)) {
+                        GDBusPropertyInfo *property = g_new0(GDBusPropertyInfo, 1);
+                        property->ref_count = 1;
+                        property->name = g_strdup(name);
+                        property->signature = g_strdup(g_variant_get_type_string(value));
+                        property->flags = G_DBUS_PROPERTY_INFO_FLAGS_READABLE;
+                        info->properties = g_renew(GDBusPropertyInfo *, info->properties, count + 2);
+                        info->properties[count++] = property;
+                        info->properties[count] = NULL;
+                    }
+                    g_variant_unref(value);
+                }
+                g_variant_unref(properties);
+                g_variant_unref(all);
+            }
+        }
         registration = g_dbus_connection_register_object(mirror->portal->host,
             path, info, &mirror_vtable, mirror, NULL, error);
         if (registration == 0) return FALSE;
@@ -2737,6 +2900,37 @@ static gboolean create_mirror(Portal *portal, const char *key,
     return TRUE;
 }
 
+typedef struct {
+    Portal *portal;
+    char *service, *owner, *path, *key;
+} PendingStatusItem;
+
+static gboolean publish_status_item(gpointer data)
+{
+    PendingStatusItem *item = data;
+    GError *error = NULL;
+    char *owner = NULL;
+    if (name_owner(item->portal, item->service, &owner, &error)
+        && g_strcmp0(owner, item->owner) == 0
+        && create_mirror(item->portal, item->key, item->service, item->path, TRUE, &error)) {
+        g_dbus_connection_emit_signal(item->portal->guest, NULL, STATUS_WATCHER_PATH,
+            STATUS_WATCHER_INTERFACE, "StatusNotifierItemRegistered",
+            g_variant_new("(s)", item->service), NULL);
+    } else if (error) {
+        g_warning("Could not publish tray item: %s", error->message);
+    }
+    g_clear_error(&error);
+    g_free(owner);
+    return G_SOURCE_REMOVE;
+}
+
+static void pending_status_item_free(gpointer data)
+{
+    PendingStatusItem *item = data;
+    g_free(item->service); g_free(item->owner); g_free(item->path);
+    g_free(item->key); g_free(item);
+}
+
 static void status_watcher_call(GDBusConnection *connection, const char *sender,
     const char *object_path, const char *interface_name, const char *method_name,
     GVariant *parameters, GDBusMethodInvocation *invocation, gpointer user_data)
@@ -2765,15 +2959,17 @@ static void status_watcher_call(GDBusConnection *connection, const char *sender,
             "The notifier item name belongs to another process"); return;
     }
     key = g_strdup_printf("sni:%s:%s", service, path);
-    if (!create_mirror(portal, key, service, path, TRUE, &error)) {
-        g_dbus_method_invocation_return_gerror(invocation, error); g_clear_error(&error);
-    } else {
-        g_dbus_method_invocation_return_value(invocation, NULL);
-        g_dbus_connection_emit_signal(portal->guest, NULL, STATUS_WATCHER_PATH,
-            STATUS_WATCHER_INTERFACE, "StatusNotifierItemRegistered",
-            g_variant_new("(s)", service), NULL);
-    }
-    g_free(key); g_free(owner); g_free(service);
+    PendingStatusItem *item = g_new0(PendingStatusItem, 1);
+    item->portal = portal;
+    item->service = service;
+    item->owner = owner;
+    item->path = g_strdup(path);
+    item->key = key;
+    /* A synchronous registrant cannot answer property/introspection calls until
+     * this reply arrives. Validate ownership first, then publish asynchronously. */
+    g_dbus_method_invocation_return_value(invocation, NULL);
+    g_idle_add_full(G_PRIORITY_DEFAULT_IDLE, publish_status_item, item,
+        pending_status_item_free);
 }
 
 static GVariant *status_watcher_property(GDBusConnection *connection,
@@ -3257,6 +3453,7 @@ int main(void)
     portal.sessions_guest = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, session_free);
     portal.sessions_host = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     portal.mirrors = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, mirror_free);
+    portal.icon_files = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
     portal.inhibitors = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
         inhibitor_free);
     portal.file_chooser_backend = choose_file_chooser_backend();
@@ -3306,6 +3503,7 @@ int main(void)
     g_bus_unwatch_name(screen_saver_watcher);
     g_bus_unwatch_name(host_portal_watcher);
     g_dbus_connection_signal_unsubscribe(portal.guest, guest_names);
+    g_hash_table_unref(portal.icon_files);
     g_hash_table_unref(portal.inhibitors);
     g_hash_table_unref(portal.mirrors);
     g_hash_table_unref(portal.sessions_host); g_hash_table_unref(portal.sessions_guest);
