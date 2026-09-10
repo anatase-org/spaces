@@ -32,6 +32,7 @@ struct App {
     GMainLoop *loop;
     GDBusConnection *bus;
     GHashTable *clients;
+    GHashTable *guest_names;
     guint names[3];
     gint queued;
 };
@@ -44,6 +45,7 @@ struct Client {
     guint filters[2], watches[3], subscriptions[3];
     char *owners[3];
     guint outstanding;
+    GList *pending_calls;
 };
 
 typedef struct {
@@ -51,6 +53,9 @@ typedef struct {
     GDBusConnection *origin;
     GDBusMessage *request;
     gboolean permissions, register_agent, unregister_agent;
+    gboolean delivered;
+    GDBusConnection *target;
+    guint32 serial;
 } Call;
 
 typedef struct {
@@ -163,13 +168,12 @@ static GDBusConnection *connect_bus(App *app, GError **error)
         NULL, NULL, error);
 }
 
-static void forward_finished(GObject *source, GAsyncResult *result, gpointer data)
+/* Called in receive order from process_event, before later signals are relayed.
+ * The async completion callback still owns timeout handling and Call cleanup. */
+static void deliver_reply(Call *call, GDBusMessage *reply)
 {
-    Call *call = data;
     Client *client = call->client;
-    GError *error = NULL;
-    GDBusMessage *reply = g_dbus_connection_send_message_with_reply_finish(
-        G_DBUS_CONNECTION(source), result, &error);
+    call->delivered = TRUE;
     if (!reply || !spaces_message_bounded(reply)) {
         reply_error(call->origin, call->request, "org.freedesktop.DBus.Error.NoReply",
             "System service unavailable or reply limit exceeded");
@@ -201,6 +205,19 @@ static void forward_finished(GObject *source, GAsyncResult *result, gpointer dat
         }
         send_message(call->origin, copy);
     }
+}
+
+static void forward_finished(GObject *source, GAsyncResult *result, gpointer data)
+{
+    Call *call = data;
+    Client *client = call->client;
+    GError *error = NULL;
+    GDBusMessage *reply = g_dbus_connection_send_message_with_reply_finish(
+        G_DBUS_CONNECTION(source), result, &error);
+    if (!call->delivered) {
+        deliver_reply(call, reply);
+    }
+    client->pending_calls = g_list_remove(client->pending_calls, call);
     g_clear_object(&reply);
     g_clear_error(&error);
     client->outstanding--;
@@ -222,6 +239,8 @@ static void forward(Client *client, GDBusConnection *origin, GDBusConnection *ta
     call->client = client_ref(client);
     call->origin = g_object_ref(origin);
     call->request = g_object_ref(request);
+    call->target = target;
+    client->pending_calls = g_list_prepend(client->pending_calls, call);
     call->permissions = g_strcmp0(g_dbus_message_get_interface(request), NM) == 0
         && g_strcmp0(g_dbus_message_get_member(request), "GetPermissions") == 0;
     gboolean agent = client->app->broker && origin == client->peer
@@ -237,7 +256,8 @@ static void forward(Client *client, GDBusConnection *origin, GDBusConnection *ta
         copy, g_dbus_message_get_flags(copy) & ~G_DBUS_MESSAGE_FLAGS_NO_REPLY_EXPECTED);
     client->outstanding++;
     g_dbus_connection_send_message_with_reply(
-        target, copy, G_DBUS_SEND_MESSAGE_FLAGS_NONE, 120000, NULL, NULL, forward_finished, call);
+        target, copy, G_DBUS_SEND_MESSAGE_FLAGS_NONE, 120000,
+        &call->serial, NULL, forward_finished, call);
     g_object_unref(copy);
 }
 
@@ -292,11 +312,10 @@ static void initialize_host(Client *client)
     for (int index = 0; index < 3; index++) {
         client->watches[index] = g_bus_watch_name_on_connection(client->host, services[index],
             G_BUS_NAME_WATCHER_FLAGS_AUTO_START, appeared, vanished, client, NULL);
-        if (client->observer) {
-            client->subscriptions[index]
-                = g_dbus_connection_signal_subscribe(client->host, services[index], NULL, NULL,
-                    NULL, NULL, G_DBUS_SIGNAL_FLAGS_NONE, ignore_signal, NULL, NULL);
-        }
+        /* Receive object announcements on the same connection as replies. */
+        client->subscriptions[index]
+            = g_dbus_connection_signal_subscribe(client->host, services[index], NULL, NULL,
+                NULL, NULL, G_DBUS_SIGNAL_FLAGS_NONE, ignore_signal, NULL, NULL);
     }
 }
 
@@ -453,10 +472,10 @@ static void forward_host_signal(Event *event)
             continue;
         }
 
-        /* One observer forwards broadcasts. Caller connections forward only
-         * signals explicitly addressed to that caller. */
+        /* Callers receive broadcasts and their own unicast signals in order.
+         * The observer serves only guests without a dedicated connection. */
         gboolean unicast = g_dbus_message_get_destination(message) != NULL;
-        if (unicast == client->observer) {
+        if (unicast && client->observer) {
             return;
         }
 
@@ -497,8 +516,18 @@ static void forward_peer_signal(Event *event)
 
     int index = service_index(g_dbus_message_get_sender(message));
     if (index >= 0 && service_path(index, g_dbus_message_get_path(message))) {
-        const char *destination = client->observer ? NULL : client->name;
-        send_message(app->bus, spaces_message_copy(message, destination));
+        if (client->observer) {
+            GHashTableIter iter;
+            gpointer name;
+            g_hash_table_iter_init(&iter, app->guest_names);
+            while (g_hash_table_iter_next(&iter, &name, NULL)) {
+                if (!g_hash_table_contains(app->clients, name)) {
+                    send_message(app->bus, spaces_message_copy(message, name));
+                }
+            }
+        } else {
+            send_message(app->bus, spaces_message_copy(message, client->name));
+        }
     }
 }
 
@@ -540,6 +569,18 @@ static gboolean process_event(gpointer data)
     GDBusMessageType type = g_dbus_message_get_message_type(event->message);
 
     if (client && client->closed) {
+        goto out;
+    }
+    if (client && (type == G_DBUS_MESSAGE_TYPE_METHOD_RETURN
+            || type == G_DBUS_MESSAGE_TYPE_ERROR)) {
+        for (GList *item = client->pending_calls; item; item = item->next) {
+            Call *call = item->data;
+            if (!call->delivered && call->target == event->bus
+                && call->serial == g_dbus_message_get_reply_serial(event->message)) {
+                deliver_reply(call, event->message);
+                break;
+            }
+        }
         goto out;
     }
     if (!spaces_message_bounded(event->message)) {
@@ -592,7 +633,10 @@ static GDBusMessage *queue_message(
     event->client = client ? client_ref(client) : NULL;
     event->bus = g_object_ref(bus);
     event->message = message;
-    g_idle_add(process_event, event);
+    /* Queue replies alongside signals in filter receive order. High priority
+     * runs their forwarding before GDBus completion callbacks free pending calls;
+     * it must not give later signals priority over earlier replies. */
+    g_idle_add_full(G_PRIORITY_HIGH, process_event, event, NULL);
     return NULL;
 }
 
@@ -604,7 +648,9 @@ static GDBusMessage *client_filter(
     if (incoming && type == G_DBUS_MESSAGE_TYPE_METHOD_CALL) {
         return queue_message(client->app, client, bus, message);
     }
-    if (incoming && type == G_DBUS_MESSAGE_TYPE_SIGNAL) {
+    if (incoming && (type == G_DBUS_MESSAGE_TYPE_SIGNAL
+            || type == G_DBUS_MESSAGE_TYPE_METHOD_RETURN
+            || type == G_DBUS_MESSAGE_TYPE_ERROR)) {
         queue_message(client->app, client, bus, g_object_ref(message));
     }
     return message;
@@ -630,8 +676,13 @@ static void guest_names(GDBusConnection *bus, const gchar *sender, const gchar *
     App *app = data;
     const char *name, *old, *now;
     g_variant_get(body, "(&s&s&s)", &name, &old, &now);
-    if (name[0] == ':' && !*now) {
-        g_hash_table_remove(app->clients, name);
+    if (name[0] == ':') {
+        if (!*now) {
+            g_hash_table_remove(app->guest_names, name);
+            g_hash_table_remove(app->clients, name);
+        } else if (g_strcmp0(name, g_dbus_connection_get_unique_name(app->bus)) != 0) {
+            g_hash_table_add(app->guest_names, g_strdup(name));
+        }
     }
 }
 
@@ -729,10 +780,27 @@ int main(int argc, char **argv)
             goto failed;
         }
         g_dbus_connection_set_exit_on_close(app.bus, TRUE);
+        app.guest_names = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
         g_dbus_connection_add_filter(app.bus, guest_filter, &app, NULL);
         g_dbus_connection_signal_subscribe(app.bus, "org.freedesktop.DBus", "org.freedesktop.DBus",
             "NameOwnerChanged", "/org/freedesktop/DBus", NULL, G_DBUS_SIGNAL_FLAGS_NONE,
             guest_names, &app, NULL);
+        GVariant *names = g_dbus_connection_call_sync(app.bus, "org.freedesktop.DBus",
+            "/org/freedesktop/DBus", "org.freedesktop.DBus", "ListNames", NULL,
+            G_VARIANT_TYPE("(as)"), G_DBUS_CALL_FLAGS_NONE, 5000, NULL, &error);
+        if (!names) {
+            goto failed;
+        }
+        GVariantIter *iter;
+        const char *name;
+        g_variant_get(names, "(as)", &iter);
+        while (g_variant_iter_loop(iter, "&s", &name)) {
+            if (name[0] == ':' && g_strcmp0(name, g_dbus_connection_get_unique_name(app.bus)) != 0) {
+                g_hash_table_add(app.guest_names, g_strdup(name));
+            }
+        }
+        g_variant_iter_free(iter);
+        g_variant_unref(names);
         observer_tick(&app);
         for (int index = 0; index < 3; index++) {
             app.names[index] = g_bus_own_name_on_connection(

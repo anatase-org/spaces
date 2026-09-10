@@ -344,6 +344,7 @@ class SystemBusIntegrationTests(unittest.TestCase):
                 """
 <method name="GetDevices"><arg type="ao" direction="out"/></method>
 <method name="Enable"><arg type="b" direction="in"/></method>
+<method name="ActivateConnection"><arg type="o" direction="in"/><arg type="o" direction="in"/><arg type="o" direction="in"/><arg type="o" direction="out"/></method>
 <method name="GetPermissions"><arg type="a{ss}" direction="out"/></method>
 <property name="WirelessEnabled" type="b" access="readwrite"/>
 <property name="ConnectivityCheckEnabled" type="b" access="readwrite"/>
@@ -435,6 +436,27 @@ class SystemBusIntegrationTests(unittest.TestCase):
                         },
                     ),
                 )
+            )
+        elif method == "ActivateConnection":
+            active_path = body.unpack()[0]
+            connection.emit_signal(
+                None,
+                "/org/freedesktop",
+                "org.freedesktop.DBus.ObjectManager",
+                "InterfacesAdded",
+                GLib.Variant(
+                    "(oa{sa{sv}})",
+                    (active_path, {NM + ".Connection.Active": {}}),
+                ),
+            )
+            invocation.return_value(GLib.Variant("(o)", (active_path,)))
+            connection.emit_signal(
+                None, "/org/freedesktop", "org.freedesktop.DBus.ObjectManager",
+                "InterfacesAdded",
+                GLib.Variant(
+                    "(oa{sa{sv}})",
+                    (active_path + "/after", {NM + ".Connection.Active": {}}),
+                ),
             )
         elif method == "GetLink":
             invocation.return_value(
@@ -942,6 +964,45 @@ print("permissions:"+",".join(sorted(set(permissions.values()))))
             None,
         )
         self.call(UPOWER, "/org/freedesktop/UPower", UPOWER, "EnumerateDevices")
+
+    def test_activation_signals_preserve_order_on_both_sides_of_reply(self):
+        received = []
+
+        def record(connection, message, incoming, data):
+            if incoming:
+                body = message.get_body()
+                if message.get_member() == "InterfacesAdded":
+                    received.append(("object", body.unpack()[0]))
+                elif (
+                    message.get_message_type() == Gio.DBusMessageType.METHOD_RETURN
+                    and body is not None
+                    and body.get_type_string() == "(o)"
+                ):
+                    received.append(("reply", body.unpack()[0]))
+            return message
+
+        filter_id = self.guest.add_filter(record, None)
+        subscription = self.guest.signal_subscribe(
+            NM, "org.freedesktop.DBus.ObjectManager", "InterfacesAdded",
+            "/org/freedesktop", None, Gio.DBusSignalFlags.NONE, lambda *args: None,
+        )
+        try:
+            for index in range(30):
+                path = f"/org/freedesktop/NetworkManager/ActiveConnection/{index}"
+                self.call(
+                    NM, "/org/freedesktop/NetworkManager", NM,
+                    "ActivateConnection", GLib.Variant("(ooo)", (path, "/", "/")),
+                )
+                self.wait_for(lambda: len(received) >= (index + 1) * 3)
+                self.assertEqual(
+                    received[-3:],
+                    [("object", path), ("reply", path), ("object", path + "/after")],
+                )
+            time.sleep(0.1)
+            self.assertEqual(len(received), 90)
+        finally:
+            self.guest.signal_unsubscribe(subscription)
+            self.guest.remove_filter(filter_id)
 
     def test_unicast_signal_stays_with_its_guest_caller(self):
         first = self.connect(self.guest_address)
