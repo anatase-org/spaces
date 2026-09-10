@@ -73,6 +73,7 @@ DESKTOP_ENVIRONMENT = frozenset(
         "GDK_SCALE",
         "GTK_IM_MODULE",
         "GTK_THEME",
+        "GTK_USE_PORTAL",
         "KDE_APPLICATIONS_AS_SCOPE",
         "KDE_SESSION_UID",
         "KDE_SESSION_VERSION",
@@ -1460,6 +1461,7 @@ def _plan(
         "DBUS_SESSION_BUS_ADDRESS",
         "DCONF_PROFILE",
         "FONTCONFIG_FILE",
+        "GTK_USE_PORTAL",
         "PIPEWIRE_RUNTIME_DIR",
         "SSH_AUTH_SOCK",
         "XCURSOR_PATH",
@@ -2130,6 +2132,8 @@ class DesktopController:
                 plan.environment["SPACES_INTEGRATION_BROKER"] = _broker_name(
                     self.space_name, user.uid, selected.session_id
                 )
+                if self.portals_enabled:
+                    plan.environment["GTK_USE_PORTAL"] = "1"
             else:
                 plan = DesktopPlan(
                     "credentials", (), {}, desktop=False
