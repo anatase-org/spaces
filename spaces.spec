@@ -31,7 +31,9 @@ Requires:       polkit
 Requires:       pam
 Requires:       debootstrap
 Requires:       dnf5
+%ifarch x86_64
 Requires:       arch-install-scripts
+%endif
 Requires:       systemd
 Requires:       systemd-container
 Requires:       glib2
@@ -74,7 +76,11 @@ install -d -m0755 \
   %{buildroot}%{_sysconfdir}/spaces \
   %{buildroot}%{_localstatedir}/lib/spaces \
   %{buildroot}%{_prefix}/local/share/applications/spaces-icons
-for distro in arch fedora ubuntu; do
+distros="fedora ubuntu"
+%ifarch x86_64
+distros="arch ${distros}"
+%endif
+for distro in ${distros}; do
   install -Dm644 "data/applications/spaces-${distro}.desktop" \
     "%{buildroot}%{_datadir}/applications/spaces-${distro}.desktop"
   install -Dm644 \

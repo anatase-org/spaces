@@ -17,11 +17,13 @@ depends=(
   'pam'
   'debootstrap'
   'dnf5'
-  'arch-install-scripts'
   'systemd'
   'glib2'
   'xdg-dbus-proxy'
 )
+if [[ $CARCH == x86_64 ]]; then
+  depends+=('arch-install-scripts')
+fi
 makedepends=(
   'python-build'
   'python-installer'
@@ -53,7 +55,11 @@ package() {
   /usr/bin/python -m installer --destdir="$pkgdir" dist/*.whl
   make -C native DESTDIR="$pkgdir" install
   install -Dm644 data/pam/spaces.system-auth "$pkgdir/etc/pam.d/spaces"
-  for distro in arch fedora ubuntu; do
+  local distros=(fedora ubuntu)
+  if [[ $CARCH == x86_64 ]]; then
+    distros=(arch "${distros[@]}")
+  fi
+  for distro in "${distros[@]}"; do
     install -Dm644 "data/applications/spaces-$distro.desktop" \
       "$pkgdir/usr/share/applications/spaces-$distro.desktop"
     install -Dm644 \

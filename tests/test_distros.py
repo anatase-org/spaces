@@ -8,7 +8,15 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from spaces.distro import arch, fedora, get_driver, kali, mounts, ubuntu
+from spaces.distro import (
+    arch,
+    fedora,
+    get_driver,
+    kali,
+    mounts,
+    supported_ids,
+    ubuntu,
+)
 from spaces.distro.model import DistributionError
 from spaces.distro.pam import SPACES_PAM_BLOCK
 
@@ -83,6 +91,12 @@ class DistributionDriverTests(unittest.TestCase):
             "Fedora 44",
         )
         self.assertEqual(kali.DISTRIBUTION.describe({"id": "kali"}), "Kali Linux")
+
+    def test_arch_is_not_supported_on_aarch64(self) -> None:
+        self.assertNotIn("arch", supported_ids("aarch64"))
+        self.assertIsNone(get_driver("arch", machine="aarch64"))
+        self.assertIn("arch", supported_ids("x86_64"))
+        self.assertIs(get_driver("arch", machine="x86_64"), arch.DISTRIBUTION)
 
     def test_fedora_configuration_and_command(self) -> None:
         driver = fedora.DISTRIBUTION

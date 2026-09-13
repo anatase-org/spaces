@@ -31,6 +31,23 @@ class CliTests(unittest.TestCase):
             check=True,
         )
 
+    def test_aarch64_install_does_not_register_arch(self) -> None:
+        source_root = Path(cli.__file__).resolve().parents[1]
+        script = (
+            "import platform, sys\n"
+            f"sys.path.insert(0, {str(source_root)!r})\n"
+            "platform.machine = lambda: 'aarch64'\n"
+            "from spaces import core, host_config\n"
+            "from spaces.distro import get_driver\n"
+            "assert 'arch' not in core.KNOWN_DISTRIBUTIONS\n"
+            "assert 'arch' not in host_config.DISTRO_IDS\n"
+            "assert get_driver('arch') is None\n"
+        )
+        subprocess.run(
+            [sys.executable, "-I", "-c", script],
+            check=True,
+        )
+
     def test_helper_output_is_streamed_after_privilege_handoff(self) -> None:
         command = ["pkexec", "/usr/bin/spaces.priv", "create", "{}"]
         completed = subprocess.CompletedProcess(command, 42)

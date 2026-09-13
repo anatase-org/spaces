@@ -667,7 +667,8 @@ class PackagingTests(unittest.TestCase):
         self.assertNotIn("'ubuntu-keyring'", pkgbuild)
         self.assertIn("'debootstrap'", pkgbuild)
         self.assertIn("'dnf5'", pkgbuild)
-        self.assertIn("'arch-install-scripts'", pkgbuild)
+        self.assertIn("if [[ $CARCH == x86_64 ]]", pkgbuild)
+        self.assertIn("depends+=('arch-install-scripts')", pkgbuild)
         self.assertIn("'systemd'", pkgbuild)
         self.assertIn(
             "/usr/bin/python -m unittest discover -s tests -v", pkgbuild
@@ -703,6 +704,12 @@ class PackagingTests(unittest.TestCase):
             "data/icons/hicolor/256x256/apps/spaces-$distro.png",
             pkgbuild,
         )
+        self.assertIn("local distros=(fedora ubuntu)", pkgbuild)
+        self.assertIn('distros=(arch "${distros[@]}")', pkgbuild)
+        for rpm_spec in (spec, (ROOT / "spaces-git.spec").read_text()):
+            self.assertIn("%ifarch x86_64", rpm_spec)
+            self.assertIn('distros="fedora ubuntu"', rpm_spec)
+            self.assertIn('distros="arch ${distros}"', rpm_spec)
 
         expected_names = {
             "arch": "Space (Arch)",
@@ -785,7 +792,12 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("Requires:       dnf5", spec)
         self.assertIn("Requires:       debootstrap", spec)
         self.assertNotIn("ubuntu-keyring", spec)
-        self.assertIn("Requires:       arch-install-scripts", spec)
+        arch_dependency = (
+            "%ifarch x86_64\n"
+            "Requires:       arch-install-scripts\n"
+            "%endif"
+        )
+        self.assertIn(arch_dependency, spec)
 
         makefile = (ROOT / "native" / "Makefile").read_text(encoding="utf-8")
         self.assertIn("install: check-guest-abi", makefile)

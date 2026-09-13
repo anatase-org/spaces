@@ -11,13 +11,14 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
 from . import _
+from .distro import KNOWN_IDS
 
 
 logger = logging.getLogger(__name__)
 
 CONFIG_PATH = Path("/etc/spaces/config.json")
 SUPPORTED_VERSION = 1
-DISTRO_IDS = frozenset({"arch", "fedora", "ubuntu", "kali"})
+DISTRO_IDS = frozenset(KNOWN_IDS) - {"custom"}
 PACKAGE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9+_.:@-]*$")
 UNSAFE_DESTINATIONS = (
     PurePosixPath("/dev"),
