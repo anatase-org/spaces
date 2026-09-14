@@ -135,7 +135,7 @@ class DistributionDriverTests(unittest.TestCase):
         self.assertEqual(
             driver.choices(),
             [
-                ("Rank Arch Mirrors", "rankmirrors"),
+                ("Fetch top Arch mirrors and rank them", "rankmirrors"),
                 ("yay — AUR helper (built from community source)", "yay"),
                 ("Shelly — graphical package manager", "shelly"),
             ],

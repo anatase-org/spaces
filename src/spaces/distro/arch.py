@@ -60,7 +60,7 @@ AUR_SUDOERS_CONTENT = (
     f"{BUILDER} ALL=(root) NOPASSWD: /usr/bin/pacman\n"
 ).encode()
 OPTIONS = {
-    "rankmirrors": _("Rank Arch Mirrors"),
+    "rankmirrors": _("Fetch top Arch mirrors and rank them"),
     "yay": _("yay — AUR helper (built from community source)"),
     "shelly": _("Shelly — graphical package manager"),
 }
