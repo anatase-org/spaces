@@ -102,6 +102,11 @@ podman run --rm \
 
         cp "/work/v${RPM_VERSION}.tar.gz" /work/rpmbuild/SOURCES/
         cp /work/source/spaces.spec /work/rpmbuild/SPECS/
+        # Consume all output so rpmspec does not fail with SIGPIPE under pipefail.
+        rankmirrors_url=$(rpmspec --parse /work/rpmbuild/SPECS/spaces.spec |
+            awk '\''$1 == "Source1:" && !found { print $2; found = 1 }'\'')
+        curl --fail --location --retry 3 "$rankmirrors_url" \
+            --output /work/rpmbuild/SOURCES/rankmirrors.sh.in
         rpmbuild \
             --define "_topdir /work/rpmbuild" \
             --define "dist .fc44.sync${SYNC_ID}" \

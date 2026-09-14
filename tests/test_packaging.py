@@ -40,7 +40,7 @@ class PackagingTests(unittest.TestCase):
         )
         self.assertIn("-name 'spaces-selinux-*.rpm'", sync)
         self.assertIn(
-            'rpm_paths+=("$selinux_rpm_path")',
+            'rpm_paths+=("$build_dir/$selinux_rpm_name")',
             sync,
         )
         self.assertIn(
@@ -652,7 +652,7 @@ class PackagingTests(unittest.TestCase):
 
     def test_pkgbuild_uses_current_checkout(self) -> None:
         pkgbuild = (ROOT / "pkg" / "PKGBUILD").read_text(encoding="utf-8")
-        self.assertIn("source=()", pkgbuild)
+        self.assertIn("${_rankmirrors_commit}/src/rankmirrors.sh.in", pkgbuild)
         self.assertIn('_project_dir="$PWD/.."', pkgbuild)
         self.assertNotIn("archive/refs/tags", pkgbuild)
         self.assertIn("arch=('x86_64' 'aarch64')", pkgbuild)

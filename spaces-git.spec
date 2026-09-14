@@ -1,3 +1,6 @@
+%global rankmirrors_commit 75d4a70517c649155959d28260198630fcb8fe51
+%global rankmirrors_version 1.13.1
+
 %global commit %(git rev-parse --verify HEAD)
 %global shortcommit %(git rev-parse --short=12 %{commit})
 %global gitversion %(tag=$(git describe --tags --abbrev=0 --match 'v[0-9]*' %{commit} 2>/dev/null || :); if test -n "$tag"; then version=${tag#v}; distance=$(git rev-list --count "$tag"..%{commit}); if test "$distance" -eq 0; then printf '%s' "$version"; else printf '%s^%s.g%s' "$version" "$distance" "%{shortcommit}"; fi; else printf '0.0.0^git%s.g%s' "$(git rev-list --count %{commit})" "%{shortcommit}"; fi)
@@ -7,11 +10,12 @@ Version:        %{gitversion}
 Release:        1%{?dist}
 Summary:        Spaces. Develop on the distribution of your choice, securely.
 
-License:        AGPL-3.0-or-later
+License:        AGPL-3.0-or-later AND GPL-3.0-or-later
 URL:            https://github.com/anatase-org/spaces
 Source:         %{url}/archive/%{commit}/%{name}-%{commit}.tar.gz
 
 ExclusiveArch:  x86_64 aarch64
+Source1:        https://gitlab.archlinux.org/pacman/pacman-contrib/-/raw/%{rankmirrors_commit}/src/rankmirrors.sh.in
 BuildRequires:  gcc
 BuildRequires:  binutils
 BuildRequires:  container-selinux
@@ -27,6 +31,9 @@ BuildRequires:  python3-setuptools
 BuildRequires:  python3-wheel
 
 Requires:       python3
+Requires:       bash
+Requires:       curl
+Requires:       coreutils
 Requires:       python3-pillow
 Requires:       python3-rich
 Requires:       python3-textual
@@ -64,6 +71,10 @@ do not include the Spaces application.
 %autosetup -n %{name}-%{commit}
 
 %build
+sed -e 's/@PACKAGE_VERSION@/%{rankmirrors_version}/g' \
+    -e 's|@sysconfdir@|%{_sysconfdir}|g' \
+    %{SOURCE1} > rankmirrors
+bash -n rankmirrors
 %{python3} -m build --wheel --no-isolation
 %make_build -C native
 %{__make} -C native check-guest-abi
@@ -72,6 +83,7 @@ do not include the Spaces application.
 %install
 %{python3} -m installer --destdir="%{buildroot}" dist/*.whl
 %make_install -C native LIBEXECDIR=/usr/lib/spaces
+install -Dm755 rankmirrors %{buildroot}/usr/lib/spaces/rankmirrors
 install -Dm644 data/pam/spaces.system-auth \
   %{buildroot}%{_sysconfdir}/pam.d/spaces
 install -Dm644 selinux/spaces.pp \
@@ -122,6 +134,7 @@ fi
 %files
 %doc readme.md
 %license LICENSE
+%license data/licenses/rankmirrors.GPL-3.0
 %{_bindir}/%{name}*
 %{python3_sitelib}/%{name}*
 %{_datadir}/polkit-1/actions/org.anatase.spaces.policy
@@ -142,6 +155,7 @@ fi
 %dir %{_localstatedir}/lib/spaces
 %dir /usr/lib/spaces
 /usr/lib/spaces/spaces-pam
+/usr/lib/spaces/rankmirrors
 /usr/lib/spaces/spaces-broker
 /usr/lib/spaces/spaces-system-broker
 %dir /usr/lib/spaces/guest

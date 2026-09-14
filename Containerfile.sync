@@ -2,6 +2,7 @@ FROM quay.io/fedora/fedora:44
 
 RUN dnf -y install \
         rpm-build \
+        curl \
         gcc \
         binutils \
         container-selinux \

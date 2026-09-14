@@ -128,19 +128,20 @@ class DistributionDriverTests(unittest.TestCase):
         with self.assertRaises(DistributionError):
             driver.validate({"id": "fedora", "version": "45"})
 
-    def test_arch_options_are_plural_optional_and_default_to_yay(self) -> None:
+    def test_arch_options_default_to_ranking_and_yay(self) -> None:
         driver = arch.DISTRIBUTION
         self.assertTrue(driver.multiple_options)
         self.assertEqual(driver.option_key, "options")
         self.assertEqual(
             driver.choices(),
             [
+                ("Rank Arch Mirrors", "rankmirrors"),
                 ("yay — AUR helper (built from community source)", "yay"),
                 ("Shelly — graphical package manager", "shelly"),
             ],
         )
-        self.assertEqual(driver.default_options, ("yay",))
-        self.assertEqual(driver.selected_options(None), ["yay"])
+        self.assertEqual(driver.default_options, ("rankmirrors", "yay"))
+        self.assertEqual(driver.selected_options(None), ["rankmirrors", "yay"])
         self.assertEqual(
             driver.metadata(["yay", "shelly"]),
             {"id": "arch", "options": ["yay", "shelly"]},
@@ -426,6 +427,7 @@ class DistributionDriverTests(unittest.TestCase):
     def test_arch_bootstrap_honors_aur_package_opt_out(self) -> None:
         with (
             mock.patch.object(arch.subprocess, "run") as run,
+            mock.patch.object(arch, "_rank_mirrors") as rank,
             mock.patch.object(arch, "_install_aur_package") as install,
         ):
             arch.DISTRIBUTION.bootstrap(
@@ -433,7 +435,95 @@ class DistributionDriverTests(unittest.TestCase):
                 Path("/rootfs"),
             )
         run.assert_called_once()
+        rank.assert_not_called()
         install.assert_not_called()
+
+    def test_arch_ranking_precedes_bootstrap_and_aur_operations(self) -> None:
+        for options in (["rankmirrors"], ["yay", "rankmirrors", "shelly"]):
+            with self.subTest(options=options), tempfile.TemporaryDirectory() as temporary:
+                mirrorlist = Path(temporary) / "mirrorlist"
+                mirrorlist.write_text("original mirrors\n")
+                rootfs = Path(temporary) / "rootfs"
+                servers = [
+                    f"Server = https://mirror{number}.example/$repo/os/$arch"
+                    for number in range(25)
+                ]
+                ranked = "\n".join(reversed(servers[:5])) + "\n"
+                events = []
+
+                def run(command, **kwargs):
+                    if command[0] == str(arch.RANKMIRRORS):
+                        events.append("rank")
+                        self.assertEqual(mirrorlist.read_text(), "original mirrors\n")
+                        self.assertEqual(kwargs["input"].splitlines(), servers[:20])
+                        self.assertIn("-w", command)
+                        return subprocess.CompletedProcess(command, 0, stdout=ranked)
+                    events.append("pacstrap")
+                    self.assertEqual(command[0], "pacstrap")
+                    self.assertEqual(mirrorlist.read_text(), "# Ranked by Spaces\n" + ranked)
+                    # pacstrap copies the host mirrorlist for subsequent guest pacman use.
+                    destination = rootfs / "etc/pacman.d/mirrorlist"
+                    destination.parent.mkdir(parents=True)
+                    destination.write_bytes(mirrorlist.read_bytes())
+                    if options == ["rankmirrors"]:
+                        self.assertTrue(set(arch.AUR_BUILD_PACKAGES).isdisjoint(command))
+                    return subprocess.CompletedProcess(command, 0)
+
+                def install(rootfs, package, repository):
+                    events.append(package)
+                    self.assertEqual(
+                        (rootfs / "etc/pacman.d/mirrorlist").read_text(),
+                        "# Ranked by Spaces\n" + ranked,
+                    )
+
+                with (
+                    mock.patch.object(arch, "MIRRORLIST", mirrorlist),
+                    mock.patch.object(arch, "urlopen") as fetch,
+                    mock.patch.object(arch.subprocess, "run", side_effect=run),
+                    mock.patch.object(arch, "_install_aur_package", side_effect=install),
+                    mock.patch.object(arch, "mounted_rootfs") as mounts,
+                ):
+                    fetch.return_value.__enter__.return_value.read.return_value = (
+                        "## Mirrors\n" + "\n".join("#" + server for server in servers)
+                    ).encode()
+                    arch.DISTRIBUTION.bootstrap({"id": "arch", "options": options}, rootfs)
+                self.assertEqual(events, ["rank", "pacstrap"] + [
+                    option for option in options if option in arch.AUR_REPOSITORIES
+                ])
+                if options == ["rankmirrors"]:
+                    mounts.assert_not_called()
+
+    def test_arch_ranking_failure_preserves_mirrors_and_stops_bootstrap(self) -> None:
+        for failure in ("fetch", "candidates", "rank", "empty"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                mirrorlist = Path(temporary) / "mirrorlist"
+                mirrorlist.write_text("original mirrors\n")
+                with (
+                    mock.patch.object(arch, "MIRRORLIST", mirrorlist),
+                    mock.patch.object(arch, "urlopen") as fetch,
+                    mock.patch.object(arch.subprocess, "run") as run,
+                    mock.patch.object(arch, "_install_aur_package") as install,
+                ):
+                    fetch.return_value.__enter__.return_value.read.return_value = (
+                        b"<html>Unavailable</html>" if failure == "candidates" else
+                        b"#Server = https://mirror.example/$repo/os/$arch\n"
+                    )
+                    if failure == "fetch":
+                        fetch.side_effect = OSError("offline")
+                    if failure == "rank":
+                        run.side_effect = subprocess.CalledProcessError(1, [str(arch.RANKMIRRORS)])
+                    run.return_value.stdout = "Server = \n"
+                    with self.assertRaises(DistributionError):
+                        arch.DISTRIBUTION.bootstrap(
+                            {"id": "arch", "options": ["rankmirrors", "yay"]},
+                            Path(temporary) / "rootfs",
+                        )
+                    self.assertEqual(mirrorlist.read_text(), "original mirrors\n")
+                    self.assertTrue(all(
+                        call.args[0][0] == str(arch.RANKMIRRORS)
+                        for call in run.call_args_list
+                    ))
+                    install.assert_not_called()
 
     def test_arch_bootstrap_builds_each_selected_aur_package(self) -> None:
         with (

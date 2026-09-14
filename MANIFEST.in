@@ -5,6 +5,7 @@ include data/systemd/user/spaces@.service
 recursive-include selinux *.fc *.if *.te
 recursive-include data/pam *
 recursive-include data/keys *
+recursive-include data/licenses *
 recursive-include data/repos *
 recursive-include data/portal *
 recursive-include data/applications *.desktop

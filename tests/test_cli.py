@@ -458,7 +458,9 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(cli.main(["create", "arch"]), 0)
 
         self.assertTrue(wizard.call_args.kwargs["distribution_multiple"])
-        self.assertEqual(wizard.call_args.kwargs["distribution_values"], ["yay"])
+        self.assertEqual(
+            wizard.call_args.kwargs["distribution_values"], ["rankmirrors", "yay"]
+        )
         self.assertEqual(
             invoke.call_args.args[1]["distribution"],
             {"id": "arch", "options": []},

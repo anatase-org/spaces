@@ -1,13 +1,19 @@
 # Maintainer: Antheas Kapenekakis <git@antheas.dev>
 
+_rankmirrors_commit=75d4a70517c649155959d28260198630fcb8fe51
+_rankmirrors_version=1.13.1
+
 pkgname=spaces
 pkgver=0.0.1
 pkgrel=1
 pkgdesc="Develop on the distribution of your choice, securely"
 arch=('x86_64' 'aarch64')
 url="https://github.com/anatase-org/spaces"
-license=('AGPL-3.0-or-later')
+license=('AGPL-3.0-or-later' 'GPL-3.0-or-later')
 depends=(
+  'bash'
+  'curl'
+  'coreutils'
   'python'
   'python-pillow'
   'python-rich'
@@ -33,12 +39,16 @@ makedepends=(
   'binutils'
   'pkgconf'
 )
-source=()
-sha256sums=()
+source=("https://gitlab.archlinux.org/pacman/pacman-contrib/-/raw/${_rankmirrors_commit}/src/rankmirrors.sh.in")
+sha256sums=('b67902d26a8b193cc096421c8d780f795a253d0742cd31d592254059af15cc27')
 
 _project_dir="$PWD/.."
 
 build() {
+  sed -e "s/@PACKAGE_VERSION@/${_rankmirrors_version}/g" \
+      -e 's|@sysconfdir@|/etc|g' \
+      "$srcdir/rankmirrors.sh.in" > "$srcdir/rankmirrors"
+  bash -n "$srcdir/rankmirrors"
   cd "$_project_dir"
   /usr/bin/python -m build --wheel --no-isolation
   make -C native
@@ -54,6 +64,7 @@ package() {
   cd "$_project_dir"
   /usr/bin/python -m installer --destdir="$pkgdir" dist/*.whl
   make -C native DESTDIR="$pkgdir" install
+  install -Dm755 "$srcdir/rankmirrors" "$pkgdir/usr/lib/spaces/rankmirrors"
   install -Dm644 data/pam/spaces.system-auth "$pkgdir/etc/pam.d/spaces"
   local distros=(fedora ubuntu)
   if [[ $CARCH == x86_64 ]]; then
@@ -67,5 +78,7 @@ package() {
       "$pkgdir/usr/share/icons/hicolor/256x256/apps/spaces-$distro.png"
   done
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 data/licenses/rankmirrors.GPL-3.0 \
+    "$pkgdir/usr/share/licenses/$pkgname/rankmirrors.GPL-3.0"
   install -Dm644 readme.md "$pkgdir/usr/share/doc/$pkgname/readme.md"
 }

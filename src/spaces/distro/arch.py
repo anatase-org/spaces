@@ -6,6 +6,7 @@ import shutil
 import subprocess
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+from urllib.request import urlopen
 
 from .. import _
 from .model import Distribution, DistributionError
@@ -59,9 +60,52 @@ AUR_SUDOERS_CONTENT = (
     f"{BUILDER} ALL=(root) NOPASSWD: /usr/bin/pacman\n"
 ).encode()
 OPTIONS = {
+    "rankmirrors": _("Rank Arch Mirrors"),
     "yay": _("yay — AUR helper (built from community source)"),
     "shelly": _("Shelly — graphical package manager"),
 }
+RANKMIRRORS = Path("/usr/lib/spaces/rankmirrors")
+MIRRORLIST = Path("/etc/pacman.d/mirrorlist")
+MIRRORLIST_URL = (
+    "https://archlinux.org/mirrorlist/"
+    "?country=all&protocol=https&use_mirror_status=on"
+)
+
+
+def _rank_mirrors() -> None:
+    print(_("Ranking Arch mirrors..."), flush=True)
+    try:
+        with urlopen(MIRRORLIST_URL, timeout=30) as response:
+            mirrorlist = response.read().decode("utf-8")
+        # The generator sorts by mirror status. Bound the number of local
+        # probes while retaining candidates from multiple countries.
+        candidates = [
+            line.removeprefix("#")
+            for line in mirrorlist.splitlines()
+            if line.startswith(("#Server = https://", "Server = https://"))
+        ][:20]
+        if not candidates:
+            raise DistributionError(_("No Arch mirror candidates were returned."))
+        ranked = subprocess.run(
+            [str(RANKMIRRORS), "-n", "5", "-m", "5", "-w", "-"],
+            input="\n".join(candidates) + "\n",
+            stdout=subprocess.PIPE,
+            text=True,
+            check=True,
+        ).stdout
+        # rankmirrors can exit successfully even when no mirror responds.
+        servers = [
+            line for line in ranked.splitlines()
+            if line in candidates
+        ]
+        if not servers:
+            raise DistributionError(_("No working Arch mirrors were found."))
+        atomic_write(
+            MIRRORLIST,
+            ("# Ranked by Spaces\n" + "\n".join(servers) + "\n").encode(),
+        )
+    except (OSError, UnicodeError, subprocess.CalledProcessError) as error:
+        raise DistributionError(_("Could not rank Arch mirrors.")) from error
 
 
 def _configure_sudoers(rootfs: Path) -> None:
@@ -285,15 +329,18 @@ class ArchDistribution(Distribution):
         additional_packages: Sequence[str] = (),
     ) -> None:
         self.validate(metadata)
+        options = metadata["options"]
+        if "rankmirrors" in options:
+            _rank_mirrors()
         print(_("Bootstrapping Arch Linux..."), flush=True)
         subprocess.run(
             self.command(metadata, rootfs, additional_packages),
             check=True,
         )
-        options = metadata["options"]
-        if options:
+        aur_packages = [option for option in options if option in AUR_REPOSITORIES]
+        if aur_packages:
             with mounted_rootfs(rootfs, "Arch"):
-                for package in options:
+                for package in aur_packages:
                     package_name = AUR_PACKAGE_NAMES[package]
                     print(
                         _(
@@ -339,10 +386,10 @@ DISTRIBUTION = ArchDistribution(
     default_name="arch",
     configuration_title=_("Arch options"),
     configuration_description=_(
-        "Choose optional software to install while bootstrapping Arch Linux."
+        "Choose mirror ranking and optional software for Arch Linux."
     ),
     option_key="options",
     configuration_options=OPTIONS,
     multiple_options=True,
-    default_options=("yay",),
+    default_options=("rankmirrors", "yay"),
 )
