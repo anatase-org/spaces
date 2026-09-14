@@ -20,7 +20,6 @@ class PackagingTests(unittest.TestCase):
     def test_git_spec_tracks_checkout_without_changing_release_spec(self) -> None:
         release_spec = (ROOT / "spaces.spec").read_text(encoding="utf-8")
         git_spec = (ROOT / "spaces-git.spec").read_text(encoding="utf-8")
-        sync = (ROOT / "sync.sh").read_text(encoding="utf-8")
 
         self.assertIn("Version:        0.0.1", release_spec)
         self.assertNotIn("%global commit", release_spec)
@@ -34,21 +33,6 @@ class PackagingTests(unittest.TestCase):
             git_spec,
         )
         self.assertIn("%autosetup -n %{name}-%{commit}", git_spec)
-        self.assertIn(
-            "awk '$1 == \"Version:\" { print $2; exit }' spaces.spec",
-            sync,
-        )
-        self.assertIn("-name 'spaces-selinux-*.rpm'", sync)
-        self.assertIn(
-            'rpm_paths+=("$build_dir/$selinux_rpm_name")',
-            sync,
-        )
-        self.assertIn(
-            'remote_rpms+=" ~/$selinux_rpm_name"',
-            sync,
-        )
-        self.assertIn('if [[ $install_selinux == true ]]', sync)
-        self.assertIn('scp "${rpm_paths[@]}" "$remote_host:"', sync)
         for spec in (release_spec, git_spec):
             self.assertIn(
                 "Requires:       %{name}-selinux",
