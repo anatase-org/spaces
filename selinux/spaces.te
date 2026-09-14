@@ -207,7 +207,9 @@ optional_policy(`
 
 # The guest may manage and execute the restored spaces_file_t tree.
 # Regular-file relabeling for copies and moves is allowed below alongside
-# access to user-selected host-home paths.
+# access to user-selected host-home paths. Recursive copies also preserve or
+# reset directory contexts within the guest's persistent tree.
+allow spaces_container_t spaces_file_t:dir { relabelfrom relabelto };
 allow spaces_container_t spaces_file_t:dir_file_class_set map;
 manage_dirs_pattern(spaces_container_t, spaces_file_t, spaces_file_t)
 manage_files_pattern(spaces_container_t, spaces_file_t, spaces_file_t)
@@ -269,16 +271,20 @@ kernel_mounton_all_proc(spaces_container_t)
 kernel_mounton_all_sysctls(spaces_container_t)
 kernel_mounton_kernel_sysctl(spaces_container_t)
 term_mount_pty_fs(spaces_container_t)
-# Podman/Buildah's crun remounts devpts and bind-mounts an admitted FUSE
-# device into the nested container. It also mounts over /sys/fs/selinux,
+# Podman/Buildah's crun remounts devpts and bind-mounts admitted device
+# nodes into the nested container. It also mounts over /sys/fs/selinux,
 # which can retain the selinuxfs label or the label of a masking tmpfs.
 gen_require(`
-	type fuse_device_t;
+	attribute device_node;
 	type security_t;
 	type user_tmp_t;
 ')
 allow spaces_container_t devpts_t:filesystem remount;
-allow spaces_container_t fuse_device_t:chr_file mounton;
+dev_mounton_all_device_nodes(spaces_container_t)
+# crun's device-mount setup also requires ioctl permission on character
+# devices. Device exposure and the service cgroup policy still determine
+# which host nodes a nested runtime can access.
+allow spaces_container_t device_node:chr_file ioctl;
 allow spaces_container_t { init_var_run_t security_t user_tmp_t }:dir mounton;
 
 allow spaces_container_t self:bpf {
