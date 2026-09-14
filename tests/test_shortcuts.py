@@ -42,7 +42,7 @@ class ShortcutExportTests(unittest.TestCase):
             f"Exec={command}\n"
             f"Icon={icon}\n"
             "Terminal=false\n"
-            "NoDisplay=true\n"
+            "NoDisplay=false\n"
             "TryExec=/usr/bin/editor\n"
             "Path=/tmp\n"
             "DBusActivatable=true\n"
@@ -126,7 +126,7 @@ class ShortcutExportTests(unittest.TestCase):
             "/usr/bin/editor --new-window\n",
             text,
         )
-        self.assertIn("NoDisplay=true\n", text)
+        self.assertIn("NoDisplay=false\n", text)
         self.assertIn("StartupWMClass=editor\n", text)
         self.assertIn("DBusActivatable=false\n", text)
         self.assertNotIn("TryExec=", text)
@@ -228,7 +228,7 @@ class ShortcutExportTests(unittest.TestCase):
             self.desktop(
                 "NordVPN",
                 command="nordvpn click %u",
-                extra="Terminal=true\nMimeType=x-scheme-handler/nordvpn;\n",
+                extra="Terminal=true\nNoDisplay=true\nMimeType=x-scheme-handler/nordvpn;\n",
             ),
             encoding="utf-8",
         )
@@ -242,6 +242,47 @@ class ShortcutExportTests(unittest.TestCase):
         self.assertIn("NoDisplay=true\n", text)
         self.assertIn("Terminal=true\n", text)
         self.assertIn("MimeType=x-scheme-handler/nordvpn;\n", text)
+
+    def test_no_display_entries_require_nonempty_mime_types(self) -> None:
+        source = self.system / "handler.desktop"
+        for mime_types, expected in (
+            (None, False),
+            ("", False),
+            (" ; ; ", False),
+            ("text/plain;", True),
+            ("x-scheme-handler/example;", True),
+        ):
+            with self.subTest(mime_types=mime_types):
+                extra = "NoDisplay=TrUe\n"
+                if mime_types is not None:
+                    extra += f"MimeType={mime_types}\n"
+                source.write_text(self.desktop(extra=extra), encoding="utf-8")
+
+                generated = shortcuts.generate(
+                    "work", self.rootfs, "custom", self.output
+                )
+
+                self.assertEqual(len(generated), int(expected))
+                if expected:
+                    text = generated[0].desktop.decode("utf-8")
+                    self.assertIn("NoDisplay=TrUe\n", text)
+                    self.assertIn(f"MimeType={mime_types}\n", text)
+
+    def test_reconcile_removes_no_display_exports_without_mime_types(self) -> None:
+        source = self.system / "editor.desktop"
+        source.write_text(self.desktop(), encoding="utf-8")
+        self.add_icon()
+        shortcuts.reconcile("work", self.rootfs, "custom", applications_root=self.output)
+        exported = self.output / "spaces-work-v1-editor.desktop"
+        icon = self.output / "spaces-icons" / "spaces-work-v1-editor.png"
+        self.assertTrue(exported.exists())
+        self.assertTrue(icon.exists())
+
+        source.write_text(self.desktop(extra="NoDisplay=true\n"), encoding="utf-8")
+        shortcuts.reconcile("work", self.rootfs, "custom", applications_root=self.output)
+
+        self.assertFalse(exported.exists())
+        self.assertFalse(icon.exists())
 
     def test_local_prefix_collision_gets_stable_suffix(self) -> None:
         (self.system / "local-foo.desktop").write_text(

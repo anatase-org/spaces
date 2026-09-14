@@ -539,6 +539,14 @@ def generate(
             (values for name, values in groups if name == "Desktop Entry"),
             {},
         )
+        no_display = main.get("NoDisplay", "").strip().casefold() == "true"
+        mime_types = [
+            value.strip()
+            for value in main.get("MimeType", "").split(";")
+            if value.strip()
+        ]
+        if no_display and not mime_types:
+            continue
         if (
             BLACKLIST_TERMINAL
             and main.get("Terminal", "").strip().casefold() == "true"
@@ -546,10 +554,10 @@ def generate(
             # callback handler. Export those even though terminal apps are
             # otherwise omitted from the host's application menu.
             and not (
-                main.get("NoDisplay", "").strip().casefold() == "true"
+                no_display
                 and any(
-                    value.strip().startswith("x-scheme-handler/")
-                    for value in main.get("MimeType", "").split(";")
+                    value.startswith("x-scheme-handler/")
+                    for value in mime_types
                 )
             )
         ):
