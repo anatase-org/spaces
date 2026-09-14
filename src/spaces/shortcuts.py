@@ -32,6 +32,18 @@ SOURCE_DIRECTORIES = (
 )
 BLACKLIST = frozenset(
     {
+        # This is clutter from a default Arch space
+        "assistant",
+        "avahidiscover",
+        "bssh",
+        "bvnc",
+        "designer",
+        "linguist",
+        "lstopo",
+        "qdbusviewer",
+        "qv4l2",
+        "qvidcap",
+        # Anatase provides these
         "systemsettings",
         "kdesystemsettings",
     }

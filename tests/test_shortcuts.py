@@ -173,6 +173,16 @@ class ShortcutExportTests(unittest.TestCase):
             "system-settings",
             "systemsettings",
             "kdesystemsettings",
+            "avahi-discover",
+            "bssh",
+            "bvnc",
+            "lstopo",
+            "assistant",
+            "qdbusviewer",
+            "linguist",
+            "designer",
+            "qv4l2",
+            "qvidcap",
         ):
             (self.system / f"{name}.desktop").write_text(
                 self.desktop(name), encoding="utf-8"
