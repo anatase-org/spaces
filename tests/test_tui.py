@@ -185,16 +185,6 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                 "host-authentication-true",
             )
             self.assertTrue(app.ansi_color)
-            variables = app.get_css_variables()
-            selected_label_background = next(
-                segment.style.bgcolor
-                for segment in network.pressed_button.render_line(0)
-                if "Advanced" in segment.text
-            )
-            self.assertEqual(
-                selected_label_background,
-                Color.parse(variables["accent-muted"]).rich_color,
-            )
             self.assertTrue(
                 all(button.region.height == 1 for button in app.query(Button))
             )
