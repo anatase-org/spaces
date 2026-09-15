@@ -1413,8 +1413,8 @@ def _credential_plan(
             environment["SSH_AUTH_SOCK"] = str(ssh_destination)
 
     # The extra socket is GnuPG's deliberately restricted forwarding
-    # interface. Present it at the guest's ordinary agent location so modern
-    # GnuPG clients use it without changing GNUPGHOME or deprecated variables.
+    # interface. Present it at the guest's ordinary agent location for GnuPG
+    # clients and at the extra location for onward SSH forwarding.
     socket_directories = (
         runtime / "gnupg",
         home / ".gnupg",
@@ -1429,6 +1429,10 @@ def _credential_plan(
             PurePosixPath(f"/run/user/{user.uid}/gnupg/S.gpg-agent"),
             roots=(runtime, home),
         ):
+            binding = binds[-1]
+            binds.append(
+                replace(binding, destination=f"{binding.destination}.extra")
+            )
             break
 
     return DesktopPlan(

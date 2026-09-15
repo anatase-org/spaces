@@ -288,6 +288,10 @@ class DesktopPathTests(unittest.TestCase):
             bindings[f"{gpg_root}/S.gpg-agent"],
             extra_path,
         )
+        self.assertEqual(
+            bindings[f"{gpg_root}/S.gpg-agent.extra"],
+            extra_path,
+        )
         self.assertNotIn(f"{gpg_root}/S.gpg-agent.browser", bindings)
         self.assertNotIn(browser_path, bindings.values())
         self.assertFalse(plan.desktop)
