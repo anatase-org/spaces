@@ -636,12 +636,12 @@ class PermissionForm(
                         (
                             _(
                                 "The existing space will be overwritten. "
-                                "Its home data will be deleted."
+                                "Its home and cache data will be deleted."
                             )
                             if self.purge
                             else _(
                                 "The existing space will be overwritten. "
-                                "Its home data will be preserved."
+                                "Its home and cache data will be preserved."
                             )
                         ),
                         classes="description",

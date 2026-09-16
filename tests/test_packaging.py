@@ -184,6 +184,7 @@ class PackagingTests(unittest.TestCase):
             "%{_localstatedir}/lib/spaces",
             spec,
         )
+        self.assertIn("%{_localstatedir}/cache/spaces", spec)
         self.assertEqual(
             spec.count(
                 "restorecon -F /home/*/.ssh/config /root/.ssh/config"
@@ -205,6 +206,15 @@ class PackagingTests(unittest.TestCase):
         self.assertTrue((ROOT / "selinux" / "spaces.if").is_file())
         type_enforcement = (ROOT / "selinux" / "spaces.te").read_text(
             encoding="utf-8"
+        )
+        self.assertIn(
+            "allow spaces_t spaces_file_t:{ file dir } mounton;",
+            type_enforcement,
+        )
+        self.assertIn(
+            "allow spaces_t spaces_file_t:filesystem "
+            "{ mount remount unmount };",
+            type_enforcement,
         )
         self.assertIn(
             "allow systemd_machined_t spaces_file_t:{ file dir } mounton;",
@@ -424,6 +434,11 @@ class PackagingTests(unittest.TestCase):
         self.assertIn(
             "/usr/local/share/applications/spaces-icons(/.*)?",
             file_contexts,
+        )
+        self.assertIn("/var/cache/spaces(/.*)?", file_contexts)
+        self.assertIn(
+            'files_var_filetrans(spaces_t, spaces_file_t, dir, "spaces")',
+            type_enforcement,
         )
         self.assertIn(
             "type_transition spaces_t usr_t:file spaces_shortcut_t;",

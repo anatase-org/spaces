@@ -783,6 +783,7 @@ class CliTests(unittest.TestCase):
 
         self.assertIn("Press Enter", prompt.call_args.args[0])
         self.assertIn("preserving its home data", prompt.call_args.args[0])
+        self.assertIn("cached data will be deleted", prompt.call_args.args[0])
         invoke.assert_called_once_with(
             "delete", {"name": "work", "purge": False}
         )

@@ -23,6 +23,8 @@ class LaunchTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.state_root = Path(self.temporary.name) / "spaces"
         self.space = self.state_root / "work"
+        self.cache_root = Path(self.temporary.name) / "cache"
+        self.cache = self.cache_root / "work"
         self.rootfs = self.space / "rootfs"
         self.rootfs.mkdir(parents=True)
         self.home = self.space / "home"
@@ -48,6 +50,10 @@ class LaunchTests(unittest.TestCase):
             core, "STATE_ROOT", self.state_root
         )
         self.state_root_patch.start()
+        self.cache_root_patch = mock.patch.object(
+            core, "CACHE_ROOT", self.cache_root
+        )
+        self.cache_root_patch.start()
         self.shortcuts_root_patch = mock.patch.object(
             shortcuts,
             "APPLICATIONS_ROOT",
@@ -117,6 +123,7 @@ class LaunchTests(unittest.TestCase):
         self.addCleanup(native_patch.stop)
 
     def tearDown(self) -> None:
+        self.cache_root_patch.stop()
         self.device_policy_patch.stop()
         self.worker_patch.stop()
         self.session_runtime_patch.stop()
@@ -456,6 +463,7 @@ class LaunchTests(unittest.TestCase):
             f"--hostname={launch_module.socket.gethostname()}",
             f"--bind={self.home}:/home",
             f"--bind={self.root_home}:/root",
+            f"--bind={self.cache}:/var/cache",
             *launch_module._unit_mask_bind_arguments(),
         ]
 
@@ -1154,8 +1162,19 @@ class LaunchTests(unittest.TestCase):
         )
 
     def test_rootfs_fixups_prepare_links_and_zsh_skeleton(self) -> None:
+        legacy_cache = self.rootfs / "var" / "cache"
+        legacy_cache.mkdir(parents=True)
+        (legacy_cache / "package").write_text("cached", encoding="utf-8")
+
         launch_module._apply_rootfs_fixups(self.rootfs)
 
+        cache = self.cache
+        self.assertTrue(cache.is_dir())
+        self.assertEqual(
+            (cache / "package").read_text(encoding="utf-8"),
+            "cached",
+        )
+        self.assertTrue((self.rootfs / "var" / "cache").is_dir())
         var_home = self.rootfs / "var" / "home"
         self.assertTrue(var_home.is_symlink())
         self.assertEqual(os.readlink(var_home), "/home")
@@ -1375,8 +1394,15 @@ class UserFixupTests(unittest.TestCase):
         self.etc.mkdir(parents=True)
         self.space_home = self.root / "home"
         self.space_home.mkdir()
+        self.cache_root_patch = mock.patch.object(
+            core,
+            "CACHE_ROOT",
+            self.root / "cache",
+        )
+        self.cache_root_patch.start()
 
     def tearDown(self) -> None:
+        self.cache_root_patch.stop()
         self.temporary.cleanup()
 
     def _user(

@@ -21,6 +21,7 @@ class PrivilegedTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.state_root = Path(self.temporary.name) / "spaces"
+        self.cache_root = Path(self.temporary.name) / "cache"
         self.identity = core.Identity(0, 0, Path("/root"))
         self.info = core.create_info(
             "ubuntu",
@@ -31,6 +32,7 @@ class PrivilegedTests(unittest.TestCase):
         )
         self.patches = [
             mock.patch.object(core, "STATE_ROOT", self.state_root),
+            mock.patch.object(core, "CACHE_ROOT", self.cache_root),
             mock.patch.object(
                 shortcuts,
                 "APPLICATIONS_ROOT",
@@ -57,6 +59,7 @@ class PrivilegedTests(unittest.TestCase):
         space = self.state_root / "ubuntu"
         self.assertTrue((space / "rootfs").is_dir())
         self.assertTrue((space / "home").is_dir())
+        self.assertTrue((self.cache_root / "ubuntu").is_dir())
         stored = json.loads((space / "info.json").read_text(encoding="utf-8"))
         self.assertEqual(stored, self.info)
         self.assertEqual(stat.S_IMODE(space.stat().st_mode), 0o755)
@@ -69,6 +72,15 @@ class PrivilegedTests(unittest.TestCase):
                         "/usr/bin/systemctl",
                         "stop",
                         "spaces@ubuntu.service",
+                    ],
+                    check=True,
+                ),
+                mock.call(
+                    [
+                        "mount",
+                        "--bind",
+                        str(self.cache_root / "ubuntu"),
+                        str(space / "rootfs" / "var" / "cache"),
                     ],
                     check=True,
                 ),
@@ -117,18 +129,25 @@ class PrivilegedTests(unittest.TestCase):
             ]
         )
 
-        self.assertEqual(run.call_count, 8)
+        self.assertEqual(run.call_count, 10)
         self.assertEqual(
-            run.call_args_list[-2],
+            run.call_args_list[-3],
             mock.call(
                 ["umount", str(space / "rootfs" / "sys")],
                 check=True,
             ),
         )
         self.assertEqual(
-            run.call_args,
+            run.call_args_list[-2],
             mock.call(
                 ["umount", str(space / "rootfs" / "proc")],
+                check=True,
+            ),
+        )
+        self.assertEqual(
+            run.call_args,
+            mock.call(
+                ["umount", str(space / "rootfs" / "var" / "cache")],
                 check=True,
             ),
         )
@@ -464,6 +483,8 @@ class PrivilegedTests(unittest.TestCase):
             encoding="utf-8",
         )
         (space / "home" / "keep").write_text("preserve", encoding="utf-8")
+        cache = self.cache_root / "ubuntu"
+        (cache / "keep").write_text("preserve", encoding="utf-8")
         with mock.patch.object(ubuntu.subprocess, "run"):
             priv.create(self.info)
         self.assertFalse((space / "rootfs" / "partial").exists())
@@ -471,12 +492,34 @@ class PrivilegedTests(unittest.TestCase):
         self.assertEqual(
             (space / "home" / "keep").read_text(encoding="utf-8"), "preserve"
         )
+        self.assertEqual(
+            (cache / "keep").read_text(encoding="utf-8"), "preserve"
+        )
+
+    def test_rebuild_migrates_legacy_rootfs_cache_before_replacement(self) -> None:
+        space = self.state_root / "ubuntu"
+        legacy_cache = space / "rootfs" / "var" / "cache"
+        legacy_cache.mkdir(parents=True)
+        (legacy_cache / "package").write_text("cached", encoding="utf-8")
+        (space / "home").mkdir()
+
+        with mock.patch.object(ubuntu.subprocess, "run"):
+            priv.create(self.info)
+
+        self.assertEqual(
+            (self.cache_root / "ubuntu" / "package").read_text(
+                encoding="utf-8"
+            ),
+            "cached",
+        )
 
     def test_rebuild_with_purge_removes_home_contents(self) -> None:
         with mock.patch.object(ubuntu.subprocess, "run"):
             priv.create(self.info)
         space = self.state_root / "ubuntu"
         (space / "home" / "remove").write_text("remove", encoding="utf-8")
+        cache = self.cache_root / "ubuntu"
+        (cache / "remove").write_text("remove", encoding="utf-8")
         request = {**self.info, "purge": True}
 
         with mock.patch.object(ubuntu.subprocess, "run"):
@@ -484,6 +527,7 @@ class PrivilegedTests(unittest.TestCase):
 
         self.assertTrue((space / "home").is_dir())
         self.assertFalse((space / "home" / "remove").exists())
+        self.assertFalse((cache / "remove").exists())
         stored = json.loads(
             (space / "info.json").read_text(encoding="utf-8")
         )
@@ -510,7 +554,9 @@ class PrivilegedTests(unittest.TestCase):
                         ],
                         0,
                     ),
+                    subprocess.CompletedProcess([], 0),
                     error,
+                    subprocess.CompletedProcess([], 0),
                 ],
             ),
             self.assertRaises(subprocess.CalledProcessError),
@@ -539,7 +585,9 @@ class PrivilegedTests(unittest.TestCase):
                         ],
                         0,
                     ),
+                    subprocess.CompletedProcess([], 0),
                     KeyboardInterrupt,
+                    subprocess.CompletedProcess([], 0),
                 ],
             ),
             self.assertRaises(KeyboardInterrupt),
@@ -764,6 +812,9 @@ class PrivilegedTests(unittest.TestCase):
         (space / "rootfs").mkdir(parents=True)
         (space / "home").mkdir()
         (space / "home" / "file").write_text("preserve", encoding="utf-8")
+        cache = self.cache_root / "work"
+        cache.mkdir(parents=True)
+        (cache / "file").write_text("delete", encoding="utf-8")
         (space / "info.json").write_text("{}", encoding="utf-8")
 
         with mock.patch.object(priv.subprocess, "run") as run:
@@ -772,6 +823,7 @@ class PrivilegedTests(unittest.TestCase):
         self.assertTrue(space.is_dir())
         self.assertFalse((space / "rootfs").exists())
         self.assertFalse((space / "info.json").exists())
+        self.assertFalse(cache.exists())
         self.assertEqual(
             (space / "home" / "file").read_text(encoding="utf-8"),
             "preserve",

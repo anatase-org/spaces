@@ -27,6 +27,7 @@ from typing import Any
 from . import _
 from . import core
 from . import session
+from . import storage
 
 
 SYSTEMCTL = "/usr/bin/systemctl"
@@ -672,11 +673,17 @@ def create(request: dict[str, Any]) -> None:
         )
         shortcuts.remove(name)
         home = space / "home"
+        cache = core.CACHE_ROOT / name
         if purge:
             _remove_rootfs(home)
+            _remove_rootfs(cache)
         elif home.is_symlink() or (home.exists() and not home.is_dir()):
             raise core.SpacesError(
                 _("Unsafe home path: {home}.", home=home)
+            )
+        elif cache.is_symlink() or (cache.exists() and not cache.is_dir()):
+            raise core.SpacesError(
+                _("Unsafe cache path: {cache}.", cache=cache)
             )
         _root_owned_directory(home)
 
@@ -684,6 +691,8 @@ def create(request: dict[str, Any]) -> None:
         failed_rootfs = space / "rootfs.fail"
         _assert_no_mounts(rootfs)
         _assert_no_mounts(failed_rootfs)
+        if not purge and rootfs.is_dir() and not rootfs.is_symlink():
+            storage.prepare_persistent_cache(space)
         _remove_rootfs(rootfs)
         _remove_rootfs(failed_rootfs)
         _root_owned_directory(rootfs)
@@ -702,14 +711,23 @@ def create(request: dict[str, Any]) -> None:
             additional_packages = configuration.packages_for(
                 distribution["id"]
             )
+            bootstrap_arguments = {}
             if additional_packages:
+                bootstrap_arguments["additional_packages"] = additional_packages
+            if distribution["id"] == "custom":
                 driver.bootstrap(
                     distribution,
                     rootfs,
-                    additional_packages=additional_packages,
+                    **bootstrap_arguments,
                 )
             else:
-                driver.bootstrap(distribution, rootfs)
+                cache = storage.prepare_persistent_cache(space)
+                with storage.mounted_persistent_cache(rootfs, cache):
+                    driver.bootstrap(
+                        distribution,
+                        rootfs,
+                        **bootstrap_arguments,
+                    )
         except (Exception, KeyboardInterrupt) as error:
             _preserve_failed_rootfs(rootfs, failed_rootfs)
             if isinstance(error, DistributionError):
@@ -806,6 +824,7 @@ def delete(request: dict[str, Any]) -> None:
         )
         _assert_no_mounts(space)
         shortcuts.remove(name)
+        _remove_rootfs(core.CACHE_ROOT / name)
         if purge:
             shutil.rmtree(space)
             return

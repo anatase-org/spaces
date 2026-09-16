@@ -73,7 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
     create_parser.add_argument(
         "--purge",
         action="store_true",
-        help=_("delete existing space home data before creating"),
+        help=_("delete existing space home and cache data before creating"),
     )
     create_parser.add_argument(
         "--no-enable",
@@ -587,9 +587,12 @@ def _delete(name: str, *, noconfirm: bool, purge: bool = False) -> int:
 
     if not noconfirm:
         deletion = (
-            _("including its home data")
+            _("including its home data and cache data")
             if purge
-            else _("while preserving its home data")
+            else _(
+                "while preserving its home data "
+                "(cached data will be deleted to save storage)"
+            )
         )
         response = input(
             _(

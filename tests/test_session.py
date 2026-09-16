@@ -589,10 +589,12 @@ class DesktopPathTests(unittest.TestCase):
             root = Path(temporary)
             rootfs = root / "rootfs"
             space_home = root / "home"
+            space_cache = root / "cache"
             forwarded = root / "forwarded"
             for directory in (
                 rootfs,
                 space_home / "root",
+                space_cache,
                 forwarded,
             ):
                 directory.mkdir(parents=True)
@@ -618,7 +620,7 @@ class DesktopPathTests(unittest.TestCase):
             )
 
             descriptors, arguments = session._open_mapping_descriptors(
-                plan, rootfs, space_home
+                plan, rootfs, space_home, space_cache
             )
             try:
                 destinations = {
@@ -632,6 +634,7 @@ class DesktopPathTests(unittest.TestCase):
                         "/",
                         "/home",
                         "/root",
+                        "/var/cache",
                         "/home/alice/Projects",
                         "/home/alice/.config/kdeglobals",
                     },
@@ -660,7 +663,7 @@ class DesktopPathTests(unittest.TestCase):
             )
             with self.assertRaises(core.SpacesError):
                 session._open_mapping_descriptors(
-                    unsafe, rootfs, space_home
+                    unsafe, rootfs, space_home, space_cache
                 )
 
     def test_remote_x11_display_is_rejected(self) -> None:

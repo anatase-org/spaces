@@ -29,6 +29,7 @@ from . import devices
 from . import host_config
 from . import session
 from . import shortcuts
+from . import storage
 from . import system_bus
 from .distro import get_driver
 from .logging import configure_logging
@@ -276,6 +277,8 @@ def _drop_ping_capability(rootfs: Path) -> None:
 
 def _apply_rootfs_fixups(rootfs: Path) -> None:
     """Apply persistent compatibility fixups to a space rootfs."""
+
+    storage.prepare_persistent_cache(rootfs.parent)
 
     for link_name, target in ROOTFS_SYMLINKS:
         try:
@@ -2243,6 +2246,7 @@ def _command(
         f"--hostname={socket.gethostname()}",
         f"--bind={home}:/home",
         f"--bind={home / 'root'}:/root",
+        f"--bind={core.CACHE_ROOT / space_name}:/var/cache",
         *_unit_mask_bind_arguments(),
         # A complete procfs in the guest PID namespace lets rootless runtimes
         # mount their own procfs without removing nspawn's boot_id/kmsg binds.

@@ -774,11 +774,13 @@ def _open_mapping_descriptors(
     plan: DesktopPlan,
     rootfs: Path,
     space_home: Path,
+    space_cache: Path,
 ) -> tuple[list[int], list[str]]:
     mappings = [
         OpenPathMapping("/", rootfs),
         OpenPathMapping("/home", space_home),
         OpenPathMapping("/root", space_home / "root"),
+        OpenPathMapping("/var/cache", space_cache),
         *plan.open_mappings,
     ]
     for binding in plan.binds:
@@ -834,7 +836,10 @@ def _start_open_broker(
 ) -> tuple[subprocess.Popen[bytes], str]:
     name = _broker_name(space_name, user.uid, session_id)
     descriptors, mapping_arguments = _open_mapping_descriptors(
-        plan, rootfs, space_home
+        plan,
+        rootfs,
+        space_home,
+        core.CACHE_ROOT / space_name,
     )
     ready_read, ready_write = os.pipe2(os.O_CLOEXEC | os.O_NONBLOCK)
     command = [

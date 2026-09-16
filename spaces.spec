@@ -115,6 +115,7 @@ done
 %post selinux
 %selinux_modules_install %{_datadir}/selinux/packages/spaces.pp
 restorecon -RF %{_bindir}/spaces.priv %{_localstatedir}/lib/spaces \
+  %{_localstatedir}/cache/spaces \
   /usr/lib/spaces/guest %{_datadir}/spaces/portal %{_rundir}/spaces \
   %{_datadir}/spaces/system-bridge \
   %{_prefix}/local/share/applications/spaces-icons \

@@ -874,7 +874,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 str(app.query_one("#override-step Static").render()),
                 "The existing space will be overwritten. "
-                "Its home data will be preserved.",
+                "Its home and cache data will be preserved.",
             )
             self.assertEqual(
                 str(app.query_one("#step-title").render()),
@@ -915,7 +915,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 str(app.query_one("#override-step Static").render()),
                 "The existing space will be overwritten. "
-                "Its home data will be deleted.",
+                "Its home and cache data will be deleted.",
             )
 
     async def test_missing_step_is_prepended(self) -> None:

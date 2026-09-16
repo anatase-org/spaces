@@ -16,6 +16,7 @@ from .distro import DistributionError, KNOWN_IDS, get_driver
 
 SCHEMA_VERSION = 1
 STATE_ROOT = Path("/var/lib/spaces")
+CACHE_ROOT = Path("/var/cache/spaces")
 KNOWN_DISTRIBUTIONS = KNOWN_IDS
 RESERVED_NAMES = frozenset(KNOWN_DISTRIBUTIONS)
 GRAPHICAL_LAUNCH_ENVIRONMENT = frozenset(
@@ -464,6 +465,9 @@ def resolve_space_location(value: str) -> str:
     elif location == "/var/home" or location.startswith("/var/home/"):
         root = space / "home"
         relative = location.removeprefix("/var/home").lstrip("/")
+    elif location == "/var/cache" or location.startswith("/var/cache/"):
+        root = CACHE_ROOT / name
+        relative = location.removeprefix("/var/cache").lstrip("/")
     else:
         root = space / "rootfs"
         relative = location.lstrip("/")
