@@ -235,6 +235,32 @@ class CliTests(unittest.TestCase):
             "ubuntu",
             purge=False,
             enable=False,
+            preset=None,
+            name=None,
+        )
+
+    def test_create_preset_and_name_are_forwarded(self) -> None:
+        with mock.patch.object(cli, "_create", return_value=0) as create:
+            self.assertEqual(
+                cli.main(
+                    [
+                        "create",
+                        "custom",
+                        "--name",
+                        "work",
+                        "--preset",
+                        "develop",
+                    ]
+                ),
+                0,
+            )
+
+        create.assert_called_once_with(
+            "custom",
+            purge=False,
+            enable=True,
+            preset="develop",
+            name="work",
         )
 
     def test_configure_no_enable_is_forwarded(self) -> None:
@@ -344,6 +370,123 @@ class CliTests(unittest.TestCase):
         self.assertEqual(
             payload["permissions"]["system"]["devices"],
             "basic",
+        )
+
+    def test_create_preset_skips_tui_and_uses_distribution_default(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary) / "home"
+            home.mkdir()
+            identity = core.Identity(1000, 1000, home)
+            with (
+                mock.patch.object(
+                    core, "STATE_ROOT", Path(temporary) / "state"
+                ),
+                mock.patch.object(
+                    core, "initiating_identity", return_value=identity
+                ),
+                mock.patch.object(cli, "ask_custom_name") as ask_name,
+                mock.patch.object(cli, "run_permission_wizard") as wizard,
+                mock.patch.object(cli, "configure_logging"),
+                mock.patch.object(cli, "log"),
+                mock.patch.object(
+                    cli, "_invoke_helper", return_value=0
+                ) as invoke,
+            ):
+                self.assertEqual(
+                    cli.main(["create", "ubuntu", "--preset", "basic"]),
+                    0,
+                )
+
+        ask_name.assert_not_called()
+        wizard.assert_not_called()
+        payload = invoke.call_args.args[1]
+        self.assertEqual(payload["distribution"]["version"], "resolute")
+        self.assertEqual(
+            payload["permissions"]["system"],
+            {
+                "preset": "basic",
+                **core.PERMISSION_PRESETS["basic"]["system"],
+            },
+        )
+        self.assertEqual(
+            payload["permissions"]["users"]["1000"]["permissions"],
+            {
+                "preset": "basic",
+                **core.PERMISSION_PRESETS["basic"]["user"],
+            },
+        )
+
+    def test_create_custom_name_and_preset_skip_tui(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary) / "home"
+            home.mkdir()
+            identity = core.Identity(1000, 1000, home)
+            with (
+                mock.patch.object(
+                    core, "STATE_ROOT", Path(temporary) / "state"
+                ),
+                mock.patch.object(
+                    core, "initiating_identity", return_value=identity
+                ),
+                mock.patch.object(cli, "ask_custom_name") as ask_name,
+                mock.patch.object(cli, "run_permission_wizard") as wizard,
+                mock.patch.object(cli, "configure_logging"),
+                mock.patch.object(cli, "log"),
+                mock.patch.object(
+                    cli, "_invoke_helper", return_value=0
+                ) as invoke,
+            ):
+                self.assertEqual(
+                    cli.main(
+                        [
+                            "create",
+                            "custom",
+                            "--name",
+                            "work",
+                            "--preset",
+                            "develop",
+                        ]
+                    ),
+                    0,
+                )
+
+        ask_name.assert_not_called()
+        wizard.assert_not_called()
+        payload = invoke.call_args.args[1]
+        self.assertEqual(payload["name"], "work")
+        self.assertEqual(payload["distribution"], {"id": "custom"})
+        self.assertEqual(
+            payload["permissions"]["system"]["preset"], "develop"
+        )
+
+    def test_unattended_custom_create_requires_name(self) -> None:
+        with (
+            mock.patch.object(cli, "ask_custom_name") as ask_name,
+            mock.patch.object(cli, "run_permission_wizard") as wizard,
+            mock.patch.object(cli, "print") as print_output,
+        ):
+            self.assertEqual(
+                cli.main(["create", "custom", "--preset", "basic"]),
+                1,
+            )
+
+        ask_name.assert_not_called()
+        wizard.assert_not_called()
+        self.assertIn("--name is required", print_output.call_args.args[0])
+
+    def test_create_name_is_rejected_for_fixed_distribution(self) -> None:
+        with (
+            mock.patch.object(cli, "run_permission_wizard") as wizard,
+            mock.patch.object(cli, "print") as print_output,
+        ):
+            self.assertEqual(
+                cli.main(["create", "ubuntu", "--name", "work"]),
+                1,
+            )
+
+        wizard.assert_not_called()
+        self.assertIn(
+            "--name can only be used", print_output.call_args.args[0]
         )
 
     def test_create_from_enter_marks_space_as_missing(self) -> None:

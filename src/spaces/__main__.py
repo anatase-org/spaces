@@ -80,6 +80,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=_("do not start the space automatically at desktop login"),
     )
+    create_parser.add_argument(
+        "--preset",
+        choices=tuple(core.PERMISSION_PRESETS),
+        help=_("create without prompts using the selected permission preset"),
+    )
+    create_parser.add_argument(
+        "--name",
+        metavar=_("NAME"),
+        help=_("name for a custom space"),
+    )
 
     configure_parser = subparsers.add_parser(
         "configure", help=_("configure permissions for a space")
@@ -324,6 +334,8 @@ def _create(
     missing: bool = False,
     purge: bool = False,
     enable: bool = True,
+    preset: str | None = None,
+    name: str | None = None,
 ) -> int:
     from .distro import DistributionError
 
@@ -339,14 +351,24 @@ def _create(
         )
         return 2
 
-    identity = core.initiating_identity()
     if driver.default_name is None:
-        name = ask_custom_name()
         if name is None:
-            return 130
+            if preset is not None:
+                raise core.SpacesError(
+                    _("--name is required for unattended custom creation.")
+                )
+            name = ask_custom_name()
+            if name is None:
+                return 130
+        core.validate_space_name(name, allow_reserved=False)
     else:
+        if name is not None:
+            raise core.SpacesError(
+                _("--name can only be used when creating a custom space.")
+            )
         name = driver.default_name
 
+    identity = core.initiating_identity()
     target = core.STATE_ROOT / name
     target_present = target.exists() or target.is_symlink()
     rootfs = target / "rootfs"
@@ -356,21 +378,6 @@ def _create(
     existing_info = (
         core.load_info(target / "info.json") if target_present else None
     )
-    (
-        network,
-        kernel_capabilities,
-        devices,
-        host_authentication,
-        shortcuts,
-        selected_home,
-        administrator,
-        desktop,
-        credential_agents,
-        mounted_drives,
-    ) = core.defaults_from_info(
-        existing_info, identity
-    )
-    preset = core.selected_preset(existing_info, identity)
     existing_distribution = (
         existing_info.get("distribution") if existing_info else None
     )
@@ -385,37 +392,67 @@ def _create(
         if driver.multiple_options
         else []
     )
-    folders = core.discover_home_folders(identity.home)
-    result = run_permission_wizard(
-        home=identity.home,
-        folders=folders,
-        network=network,
-        kernel_capabilities=kernel_capabilities,
-        devices=devices,
-        host_authentication=host_authentication,
-        shortcuts=shortcuts,
-        selected_home=selected_home,
-        administrator=administrator,
-        desktop=desktop,
-        credential_agents=credential_agents,
-        mounted_drives=mounted_drives,
-        administrator_group=driver.administrator_group,
-        include_system=True,
-        distribution_title=driver.configuration_title,
-        distribution_description=driver.configuration_description,
-        distribution_options=distribution_options,
-        distribution_value=distribution_value,
-        distribution_multiple=driver.multiple_options,
-        distribution_values=distribution_values,
-        submit_label=_("Create"),
-        override=override,
-        purge=purge,
-        missing=missing and not override,
-        space_name=name,
-        preset=preset,
-    )
-    if result is None:
-        return 130
+    if preset is None:
+        (
+            network,
+            kernel_capabilities,
+            devices,
+            host_authentication,
+            shortcuts,
+            selected_home,
+            administrator,
+            desktop,
+            credential_agents,
+            mounted_drives,
+        ) = core.defaults_from_info(existing_info, identity)
+        selected_preset = core.selected_preset(existing_info, identity)
+        folders = core.discover_home_folders(identity.home)
+        result = run_permission_wizard(
+            home=identity.home,
+            folders=folders,
+            network=network,
+            kernel_capabilities=kernel_capabilities,
+            devices=devices,
+            host_authentication=host_authentication,
+            shortcuts=shortcuts,
+            selected_home=selected_home,
+            administrator=administrator,
+            desktop=desktop,
+            credential_agents=credential_agents,
+            mounted_drives=mounted_drives,
+            administrator_group=driver.administrator_group,
+            include_system=True,
+            distribution_title=driver.configuration_title,
+            distribution_description=driver.configuration_description,
+            distribution_options=distribution_options,
+            distribution_value=distribution_value,
+            distribution_multiple=driver.multiple_options,
+            distribution_values=distribution_values,
+            submit_label=_("Create"),
+            override=override,
+            purge=purge,
+            missing=missing and not override,
+            space_name=name,
+            preset=selected_preset,
+        )
+        if result is None:
+            return 130
+    else:
+        system_permissions = dict(
+            core.PERMISSION_PRESETS[preset]["system"]
+        )
+        user_permissions = dict(core.PERMISSION_PRESETS[preset]["user"])
+        user_permissions["home"] = list(user_permissions["home"])
+        result = {
+            "preset": preset,
+            **system_permissions,
+            **user_permissions,
+        }
+        if distribution_options:
+            if driver.multiple_options:
+                result["distribution_options"] = distribution_values
+            else:
+                result["distribution_option"] = distribution_value
 
     try:
         selection = (
@@ -767,6 +804,8 @@ def main(argv: list[str] | None = None) -> int:
                 arguments.type,
                 purge=arguments.purge,
                 enable=not arguments.no_enable,
+                preset=arguments.preset,
+                name=arguments.name,
             )
         elif arguments.command == "configure":
             return _configure(
