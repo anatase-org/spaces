@@ -124,6 +124,9 @@ dev_mounton_all_device_nodes(spaces_t)
 allow spaces_t self:process setexec;
 allow spaces_t spaces_container_t:process transition;
 allow spaces_t spaces_container_t:process { signal sigkill sigstop signull };
+# The host integration broker bounds RLIMIT_RTTIME for a verified guest
+# process before forwarding its realtime request to RTKit.
+allow spaces_t spaces_container_t:process setrlimit;
 allow spaces_container_t spaces_t:process sigchld;
 allow spaces_t spaces_container_t:process { noatsecure rlimitinh siginh };
 
@@ -250,7 +253,9 @@ fs_manage_tmpfs_blk_files(spaces_container_t)
 fs_mounton_tmpfs(spaces_container_t)
 # Qt QML and other guest runtimes execute JIT code from modified memfds.
 allow spaces_container_t tmpfs_t:file { execute execmod };
-# Libvirt relabels device nodes in each QEMU process's private /dev namespace.
+# Nested runtimes relabel generated bind-mount sources in their private tmpfs,
+# while Libvirt relabels device nodes in each QEMU process's /dev namespace.
+allow spaces_container_t tmpfs_t:{ dir file } relabelfrom;
 allow spaces_container_t tmpfs_t:chr_file relabelfrom;
 allow spaces_container_t tmpfs_t:lnk_file relabelfrom;
 
@@ -324,7 +329,9 @@ gen_require(`
 ')
 allow spaces_container_t cgroup_t:filesystem mount;
 allow spaces_container_t cgroup_t:file mounton;
-allow spaces_container_t devpts_t:chr_file { mounton open };
+# crun adjusts the ownership and mode of the nested container's pseudoterminal
+# after mounting its private devpts instance.
+allow spaces_container_t devpts_t:chr_file { mounton open setattr };
 allow spaces_container_t device_t:filesystem { remount unmount };
 # Newer container-selinux releases give some nspawn runtime tmpfs mounts a
 # dedicated type.  Guest systemd must be able to populate those mounts.

@@ -291,7 +291,8 @@ class PackagingTests(unittest.TestCase):
             type_enforcement,
         )
         self.assertIn(
-            "allow spaces_container_t devpts_t:chr_file { mounton open };",
+            "allow spaces_container_t devpts_t:chr_file "
+            "{ mounton open setattr };",
             type_enforcement,
         )
         self.assertIn(
@@ -403,11 +404,19 @@ class PackagingTests(unittest.TestCase):
             type_enforcement,
         )
         self.assertIn(
+            "allow spaces_container_t tmpfs_t:{ dir file } relabelfrom;",
+            type_enforcement,
+        )
+        self.assertIn(
             "allow spaces_container_t tmpfs_t:chr_file relabelfrom;",
             type_enforcement,
         )
         self.assertIn(
             "allow spaces_container_t tmpfs_t:lnk_file relabelfrom;",
+            type_enforcement,
+        )
+        self.assertIn(
+            "allow spaces_t spaces_container_t:process setrlimit;",
             type_enforcement,
         )
         self.assertIn(
