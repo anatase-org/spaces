@@ -77,6 +77,10 @@ files_var_filetrans(spaces_t, spaces_file_t, dir, "spaces")
 # operation can already have the right type but the initiating user's object
 # identity.  Let the trusted supervisor restore the complete default context.
 domain_obj_id_change_exemption(spaces_t)
+# Migrated cache trees can contain arbitrary guest package-manager types.
+# Run restorecon in the policy's relabeling domain before binding the cache
+# into the container, instead of granting the supervisor broad relabel rights.
+seutil_run_setfiles(spaces_t, system_r)
 
 # Exported desktop entries and their icons are the only host /usr content
 # Spaces may modify.  Flat desktop IDs require creating entries in the shared

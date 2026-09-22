@@ -450,6 +450,10 @@ class PackagingTests(unittest.TestCase):
             type_enforcement,
         )
         self.assertIn(
+            "seutil_run_setfiles(spaces_t, system_r)",
+            type_enforcement,
+        )
+        self.assertIn(
             "type_transition spaces_t usr_t:file spaces_shortcut_t;",
             type_enforcement,
         )

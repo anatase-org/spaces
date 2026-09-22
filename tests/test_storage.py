@@ -57,6 +57,33 @@ class PersistentCacheTests(unittest.TestCase):
             "rootfs",
         )
 
+    def test_relabels_migrated_and_existing_cache_on_selinux(self) -> None:
+        guest_cache = self.rootfs / "var" / "cache"
+        (guest_cache / "ldconfig").mkdir(parents=True)
+        (guest_cache / "ldconfig" / "aux-cache").touch()
+        selinuxfs = Path(self.temporary.name) / "selinux"
+        (selinuxfs / "enforce").parent.mkdir()
+        (selinuxfs / "enforce").touch()
+        restorecon = Path(self.temporary.name) / "restorecon"
+        restorecon.touch()
+
+        with (
+            mock.patch.object(storage, "SELINUXFS", selinuxfs),
+            mock.patch.object(storage, "RESTORECON", str(restorecon)),
+            mock.patch.object(storage.subprocess, "run") as run,
+        ):
+            cache = storage.prepare_persistent_cache(self.space)
+            self.assertEqual(storage.prepare_persistent_cache(self.space), cache)
+
+        self.assertTrue((cache / "ldconfig" / "aux-cache").exists())
+        self.assertEqual(
+            run.call_args_list,
+            [
+                mock.call([str(restorecon), "-F", str(self.cache_root)], check=True),
+                mock.call([str(restorecon), "-RF", str(cache)], check=True),
+            ] * 2,
+        )
+
     def test_rejects_unsafe_cache_paths(self) -> None:
         outside = Path(self.temporary.name) / "outside"
         outside.mkdir()

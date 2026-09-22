@@ -14,6 +14,8 @@ from . import core
 
 
 CACHE_PATH = Path("var/cache")
+RESTORECON = "/usr/sbin/restorecon"
+SELINUXFS = Path("/sys/fs/selinux")
 
 
 def _directory(path: Path, label: str, *, create: bool = False) -> Path:
@@ -54,6 +56,11 @@ def prepare_persistent_cache(space: Path) -> Path:
 
     _directory(cache, _("persistent cache"))
     _directory(guest_cache, _("rootfs /var/cache"), create=True)
+    if (SELINUXFS / "enforce").is_file() and Path(RESTORECON).is_file():
+        # A migrated rootfs cache retains its guest package-manager labels.
+        # Relabel the parent and the per-space tree before nspawn binds it.
+        subprocess.run([RESTORECON, "-F", str(cache_root)], check=True)
+        subprocess.run([RESTORECON, "-RF", str(cache)], check=True)
     return cache
 
 
