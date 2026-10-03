@@ -315,6 +315,11 @@ class LaunchTests(unittest.TestCase):
             },
         }
         develop_home = Path(self.temporary.name) / "develop-home"
+        for directory, name in ((self.host_home, "Téléchargements"), (develop_home, "Hentet")):
+            (directory / ".config").mkdir(parents=True, exist_ok=True)
+            (directory / ".config/user-dirs.dirs").write_text(
+                f'XDG_DOWNLOAD_DIR="$HOME/{name}"\n'
+            )
         accounts = [
             pwd.struct_passwd(
                 ("user", "x", 1000, 1000, "", str(self.host_home), "/bin/sh")
@@ -329,19 +334,26 @@ class LaunchTests(unittest.TestCase):
         ):
             user, developer = launch_module._resolve_users(info, self.home)
 
-        self.assertEqual(user.permitted_home, ("Downloads",))
+        self.assertEqual(user.permitted_home, ("Téléchargements",))
         self.assertTrue(user.administrator)
         self.assertTrue(user.desktop)
         self.assertFalse(user.credential_agents)
         self.assertTrue(user.mounted_drives)
         self.assertEqual(
             developer.permitted_home,
-            tuple(core.PERMISSION_PRESETS["develop"]["user"]["home"]),
+            tuple(["Hentet", *core.PERMISSION_PRESETS["develop"]["user"]["home"][1:]]),
         )
         self.assertTrue(developer.administrator)
         self.assertTrue(developer.desktop)
         self.assertTrue(developer.credential_agents)
         self.assertTrue(developer.mounted_drives)
+        (self.host_home / ".config/user-dirs.dirs").write_text(
+            'XDG_DOWNLOAD_DIR="$HOME/Changed"\n'
+        )
+        with mock.patch.object(launch_module.pwd, "getpwuid", side_effect=accounts):
+            user, developer = launch_module._resolve_users(info, self.home)
+        self.assertEqual(user.permitted_home, ("Changed",))
+        self.assertEqual(developer.permitted_home[0], "Hentet")
 
     def test_enabled_shortcuts_are_reconciled_and_monitored(self) -> None:
         self._write_info()

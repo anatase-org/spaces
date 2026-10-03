@@ -154,10 +154,104 @@ def validate_home_name(name: object) -> str:
     return name
 
 
-def discover_home_folders(home: Path) -> list[str]:
+def user_config_home(identity: Identity) -> Path:
+    """Find the target user's config directory without borrowing root's settings."""
+
+    environment: Mapping[str, str] = {}
+    if identity.uid == os.getuid():
+        environment = os.environ
+    elif os.geteuid() == 0 and Path(f"/run/user/{identity.uid}/bus").exists():
+        from .session import host_manager_environment
+
+        try:
+            environment = host_manager_environment(identity)
+        except OSError:
+            pass
+    value = environment.get("XDG_CONFIG_HOME", "")
+    if value and Path(value).is_absolute():
+        return Path(value)
+    return identity.home / ".config"
+
+
+def download_folder(home: Path, config_home: Path | None = None) -> str | None:
+    """Read the XDG Downloads mapping as data, restricted to direct home folders."""
+
+    if config_home is None:
+        config_home = home / ".config"
+        if os.environ.get("XDG_CONFIG_HOME"):
+            try:
+                account = pwd.getpwuid(os.getuid())
+                if Path(account.pw_dir) == home:
+                    config_home = user_config_home(
+                        Identity(account.pw_uid, account.pw_gid, home)
+                    )
+            except KeyError:
+                pass
+    try:
+        contents = (config_home / "user-dirs.dirs").read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return "Downloads"
+    result: str | None = "Downloads"
+    for line in contents.splitlines():
+        if not re.match(r"^\s*XDG_DOWNLOAD_DIR\s*=", line):
+            continue
+        # Only the quoted literal format written by xdg-user-dirs is accepted.
+        match = re.fullmatch(
+            r'\s*XDG_DOWNLOAD_DIR\s*=\s*"((?:[^"\\]|\\.)*)"\s*(?:#.*)?',
+            line,
+        )
+        result = None
+        if match is None:
+            continue
+        value = match.group(1)
+        expand_home = False
+        for prefix in ("${HOME}", "$HOME"):
+            if value == prefix or value.startswith(prefix + "/"):
+                value = value[len(prefix):]
+                expand_home = True
+                break
+        if re.search(r"(?<!\\)[$`]", value):
+            continue
+        # Decode shell double-quote escapes, without expanding arbitrary variables.
+        value = re.sub(r'\\([\\"$`])', r'\1', value)
+        if expand_home:
+            value = str(home) + value
+        path = Path(value)
+        if not path.is_absolute() or ".." in path.parts:
+            continue
+        if path.parent != home or path.name.startswith("."):
+            continue
+        try:
+            result = validate_home_name(path.name)
+        except SpacesError:
+            continue
+    return result
+
+
+def preset_user_permissions(
+    preset: str, home: Path | None = None, config_home: Path | None = None
+) -> dict[str, Any]:
+    """Resolve a fresh copy of preset permissions for a particular host home."""
+
+    permissions = dict(PERMISSION_PRESETS[preset]["user"])
+    download = download_folder(home, config_home) if home is not None else "Downloads"
+    permissions["home"] = list(
+        dict.fromkeys(
+            download if name == "Downloads" else name
+            for name in permissions["home"]
+            if name != "Downloads" or download is not None
+        )
+    )
+    return permissions
+
+
+def discover_home_folders(home: Path, config_home: Path | None = None) -> list[str]:
     """Find mountable home directories and files, with files listed last."""
 
-    directories = set(DEFAULT_HOME_FOLDERS)
+    directories = set(DEFAULT_HOME_FOLDERS) - {"Downloads"}
+    download = download_folder(home, config_home)
+    if download is not None:
+        directories.add(download)
     files = set(DEFAULT_HOME_FILES)
     try:
         for entry in home.iterdir():
@@ -209,7 +303,11 @@ def effective_system_permissions(
     return dict(PERMISSION_PRESETS[preset]["system"])
 
 
-def effective_user_permissions(record: Mapping[str, Any]) -> dict[str, Any]:
+def effective_user_permissions(
+    record: Mapping[str, Any],
+    home: Path | None = None,
+    config_home: Path | None = None,
+) -> dict[str, Any]:
     """Return the user permissions that should be applied at runtime."""
 
     permissions = record.get("permissions", {})
@@ -218,9 +316,7 @@ def effective_user_permissions(record: Mapping[str, Any]) -> dict[str, Any]:
     preset = _validate_preset(permissions, "user permission")
     if preset == "custom":
         return dict(permissions)
-    effective = dict(PERMISSION_PRESETS[preset]["user"])
-    effective["home"] = list(effective["home"])
-    return effective
+    return preset_user_permissions(preset, home, config_home)
 
 
 def selected_preset(
@@ -498,14 +594,19 @@ def load_info(path: Path) -> dict[str, Any] | None:
 
 
 def defaults_from_info(
-    info: Mapping[str, Any] | None, identity: Identity
+    info: Mapping[str, Any] | None,
+    identity: Identity,
+    *,
+    config_home: Path | None = None,
 ) -> tuple[str, str, str, bool, bool, list[str], bool, bool, bool, bool]:
     network = "basic"
     kernel_capabilities = "basic"
     devices = "basic"
     host_authentication = True
     shortcuts = True
-    selected_home = list(PERMISSION_PRESETS["basic"]["user"]["home"])
+    if config_home is None:
+        config_home = user_config_home(identity)
+    selected_home = preset_user_permissions("basic", identity.home, config_home)["home"]
     administrator = True
     desktop = True
     credential_agents = False
@@ -549,9 +650,9 @@ def defaults_from_info(
         shortcuts = existing_shortcuts
     user = permissions.get("users", {}).get(str(identity.uid))
     user_permissions = (
-        effective_user_permissions(user)
+        effective_user_permissions(user, identity.home, config_home)
         if isinstance(user, dict)
-        else dict(PERMISSION_PRESETS["basic"]["user"])
+        else preset_user_permissions("basic", identity.home, config_home)
     )
     home = user_permissions.get("home")
     if isinstance(home, list):

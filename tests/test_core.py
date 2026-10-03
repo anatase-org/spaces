@@ -226,6 +226,88 @@ class CoreTests(unittest.TestCase):
                 ],
             )
 
+    def test_xdg_download_mapping_and_mount_limits(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            config = home / ".config"
+            config.mkdir()
+            mapping = config / "user-dirs.dirs"
+            self.assertEqual(core.download_folder(home), "Downloads")
+            for value, expected in (
+                ('"$HOME/Téléchargements"', "Téléchargements"),
+                ('"${HOME}/Hentede filer"', "Hentede filer"),
+                (f'"{home}/下载"', "下载"),
+                ('"$HOME/A\\"B"', 'A"B'),
+            ):
+                with self.subTest(value=value):
+                    mapping.write_text(f"XDG_DOWNLOAD_DIR={value}\n")
+                    self.assertEqual(core.download_folder(home), expected)
+            for value in ('"$HOME"', '"$HOME/"', '"$HOME/a/b"',
+                          '"/outside/Downloads"', '"$HOME/.hidden"',
+                          '"$HOME/a/../Downloads"', 'unquoted',
+                          '"$OTHER/Downloads"', '"$HOME/$(touch sentinel)"',
+                          '"$HOME/`touch sentinel`"'):
+                with self.subTest(value=value):
+                    mapping.write_text(f"XDG_DOWNLOAD_DIR={value}\n")
+                    self.assertIsNone(core.download_folder(home))
+                    self.assertEqual(core.preset_user_permissions("basic", home)["home"], [])
+            self.assertFalse((home / "sentinel").exists())
+            mapping.write_text('XDG_DOCUMENTS_DIR="$HOME/Documents"\n')
+            self.assertEqual(core.download_folder(home), "Downloads")
+            mapping.write_bytes(b"\xff")
+            self.assertEqual(core.download_folder(home), "Downloads")
+            with mock.patch.object(Path, "read_text", side_effect=PermissionError):
+                self.assertEqual(core.download_folder(home), "Downloads")
+            alternate_config = home / "settings"
+            alternate_config.mkdir()
+            (alternate_config / "user-dirs.dirs").write_text(
+                'XDG_DOWNLOAD_DIR="$HOME/Configured"\n'
+            )
+            self.assertEqual(core.download_folder(home, alternate_config), "Configured")
+
+    def test_xdg_defaults_discovery_and_custom_selections(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            (home / ".config").mkdir()
+            mapping = home / ".config/user-dirs.dirs"
+            mapping.write_text('XDG_DOWNLOAD_DIR="$HOME/Téléchargements"\n')
+            identity = core.Identity(1000, 1000, home)
+            self.assertEqual(core.defaults_from_info(None, identity)[5], ["Téléchargements"])
+            self.assertIn("Téléchargements", core.discover_home_folders(home))
+            self.assertNotIn("Downloads", core.discover_home_folders(home))
+            (home / "Downloads").mkdir()
+            self.assertIn("Downloads", core.discover_home_folders(home))
+            record = {"permissions": {"preset": "custom", "home": ["Downloads"]}}
+            self.assertEqual(core.effective_user_permissions(record, home)["home"], ["Downloads"])
+            record["permissions"]["preset"] = "develop"
+            self.assertEqual(core.effective_user_permissions(record, home)["home"][0], "Téléchargements")
+            mapping.write_text('XDG_DOWNLOAD_DIR="$HOME/Hentet"\n')
+            self.assertEqual(core.effective_user_permissions(record, home)["home"][0], "Hentet")
+            self.assertEqual(core.PERMISSION_PRESETS["develop"]["user"]["home"][0], "Downloads")
+
+    def test_xdg_config_directory_belongs_to_target_user(self) -> None:
+        identity = core.Identity(1001, 1001, Path("/home/target"))
+        with (
+            mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": "/config/caller"}),
+            mock.patch.object(os, "getuid", return_value=1001),
+        ):
+            self.assertEqual(core.user_config_home(identity), Path("/config/caller"))
+        with (
+            mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": "/config/root"}),
+            mock.patch.object(os, "getuid", return_value=0),
+            mock.patch.object(os, "geteuid", return_value=0),
+            mock.patch.object(Path, "exists", return_value=True),
+            mock.patch("spaces.session.host_manager_environment", return_value={
+                "XDG_CONFIG_HOME": "/config/target"
+            }) as manager,
+        ):
+            self.assertEqual(core.user_config_home(identity), Path("/config/target"))
+            manager.assert_called_once_with(identity)
+            manager.return_value = {"XDG_CONFIG_HOME": "relative"}
+            self.assertEqual(core.user_config_home(identity), identity.home / ".config")
+            manager.side_effect = OSError("no manager")
+            self.assertEqual(core.user_config_home(identity), identity.home / ".config")
+
     def test_new_space_defaults(self) -> None:
         (
             network,

@@ -392,6 +392,7 @@ def _create(
         if driver.multiple_options
         else []
     )
+    config_home = core.user_config_home(identity)
     if preset is None:
         (
             network,
@@ -404,11 +405,14 @@ def _create(
             desktop,
             credential_agents,
             mounted_drives,
-        ) = core.defaults_from_info(existing_info, identity)
+        ) = core.defaults_from_info(
+            existing_info, identity, config_home=config_home
+        )
         selected_preset = core.selected_preset(existing_info, identity)
-        folders = core.discover_home_folders(identity.home)
+        folders = core.discover_home_folders(identity.home, config_home)
         result = run_permission_wizard(
             home=identity.home,
+            config_home=config_home,
             folders=folders,
             network=network,
             kernel_capabilities=kernel_capabilities,
@@ -441,8 +445,9 @@ def _create(
         system_permissions = dict(
             core.PERMISSION_PRESETS[preset]["system"]
         )
-        user_permissions = dict(core.PERMISSION_PRESETS[preset]["user"])
-        user_permissions["home"] = list(user_permissions["home"])
+        user_permissions = core.preset_user_permissions(
+            preset, identity.home, config_home
+        )
         result = {
             "preset": preset,
             **system_permissions,
@@ -537,6 +542,7 @@ def _configure(
                 name=name,
             )
         )
+    config_home = core.user_config_home(identity)
     (
         network,
         kernel_capabilities,
@@ -548,7 +554,7 @@ def _configure(
         desktop,
         credential_agents,
         mounted_drives,
-    ) = core.defaults_from_info(info, identity)
+    ) = core.defaults_from_info(info, identity, config_home=config_home)
     preset = core.selected_preset(info, identity)
     driver = get_driver(info["distribution"]["id"])
     administrator_group = (
@@ -556,7 +562,8 @@ def _configure(
     )
     result = run_permission_wizard(
         home=identity.home,
-        folders=core.discover_home_folders(identity.home),
+        config_home=config_home,
+        folders=core.discover_home_folders(identity.home, config_home),
         network=network,
         kernel_capabilities=kernel_capabilities,
         devices=devices,

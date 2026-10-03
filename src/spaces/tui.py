@@ -37,6 +37,7 @@ from .core import (
     NETWORK_LEVELS,
     PERMISSION_PRESETS,
     SpacesError,
+    preset_user_permissions,
     validate_space_name,
 )
 
@@ -511,9 +512,11 @@ class PermissionForm(
         missing: bool = False,
         space_name: str = "",
         preset: str = "custom",
+        config_home: Path | None = None,
     ) -> None:
         super().__init__(ansi_color=True)
         self.home = home
+        self.config_home = config_home
         self.initial_network = network
         self.initial_kernel_capabilities = kernel_capabilities
         self.initial_devices = devices
@@ -1254,8 +1257,9 @@ class PermissionForm(
                 }
             )
         else:
-            user_permissions = dict(PERMISSION_PRESETS[preset]["user"])
-            user_permissions["home"] = list(user_permissions["home"])
+            user_permissions = preset_user_permissions(
+                preset, self.home, self.config_home
+            )
             result.update(user_permissions)
         if self.include_system and preset == "custom":
             result["network"] = self._radio_value(

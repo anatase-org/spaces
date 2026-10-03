@@ -376,6 +376,10 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary) / "home"
             home.mkdir()
+            (home / ".config").mkdir()
+            (home / ".config/user-dirs.dirs").write_text(
+                'XDG_DOWNLOAD_DIR="$HOME/Téléchargements"\n'
+            )
             identity = core.Identity(1000, 1000, home)
             with (
                 mock.patch.object(
@@ -413,6 +417,7 @@ class CliTests(unittest.TestCase):
             {
                 "preset": "basic",
                 **core.PERMISSION_PRESETS["basic"]["user"],
+                "home": ["Téléchargements"],
             },
         )
 

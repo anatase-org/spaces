@@ -416,7 +416,6 @@ def _safe_user_name(name: str) -> bool:
 def _resolve_users(info: dict[str, Any], home: Path) -> tuple[SpaceUser, ...]:
     users: list[SpaceUser] = []
     for uid_key, record in info["permissions"]["users"].items():
-        user_permissions = core.effective_user_permissions(record)
         uid = int(uid_key)
         try:
             host_user = pwd.getpwuid(uid)
@@ -439,6 +438,10 @@ def _resolve_users(info: dict[str, Any], home: Path) -> tuple[SpaceUser, ...]:
                 _("Host UID {uid} has a non-absolute home path.", uid=uid)
             )
 
+        identity = core.Identity(uid, host_user.pw_gid, host_home)
+        user_permissions = core.effective_user_permissions(
+            record, host_home, core.user_config_home(identity)
+        )
         is_root = uid == 0
         name = host_user.pw_name
         space_home = home / ("root" if is_root else name)

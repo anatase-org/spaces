@@ -437,7 +437,7 @@ def _parse_environment(output: str) -> dict[str, str]:
     return result
 
 
-def host_manager_environment(user: DesktopUser) -> dict[str, str]:
+def host_manager_environment(user: DesktopUser | core.Identity) -> dict[str, str]:
     """Read the host user manager without creating another login session."""
 
     # Do not use ``--machine=<user>@.host`` here. That transport starts a

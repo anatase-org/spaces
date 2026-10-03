@@ -747,6 +747,41 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("~/Projects", overview)
             self.assertNotIn("System permissions", overview)
 
+    async def test_xdg_preset_overview_and_custom_preselection(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            config = home / ".config"
+            config.mkdir()
+            (config / "user-dirs.dirs").write_text('XDG_DOWNLOAD_DIR="$HOME/Hentede filer"\n')
+            app = PermissionForm(
+                home=home,
+                config_home=config,
+                folders=core.discover_home_folders(home, config),
+                network="basic",
+                selected_home=core.defaults_from_info(None, core.Identity(1000, 1000, home))[5],
+                include_system=True,
+                distribution_title="",
+                distribution_description="",
+                distribution_options=[],
+                distribution_value=None,
+                preset="basic",
+            )
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                self.assertEqual(app._result()["home"], ["Hentede filer"])
+                await pilot.press("enter")
+                await pilot.pause()
+                overview = rendered_widget_text(app.query_one("#overview", Static))
+                self.assertIn("~/Hentede filer", overview)
+                self.assertNotIn("~/Downloads", overview)
+                await pilot.press("backspace")
+                await pilot.pause()
+                await pilot.click("#preset-custom")
+                await pilot.pause()
+                self.assertEqual(app._result()["home"], ["Hentede filer"])
+                (config / "user-dirs.dirs").write_text('XDG_DOWNLOAD_DIR="$HOME/Other"\n')
+                self.assertEqual(app._result()["home"], ["Hentede filer"])
+
     async def test_develop_preset_skips_details_and_uses_defaults(self) -> None:
         app = PermissionForm(
             home=Path("/home/user"),
