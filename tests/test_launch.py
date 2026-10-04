@@ -832,6 +832,9 @@ class LaunchTests(unittest.TestCase):
 
     def test_system_bridge_runs_without_authentication_or_desktop(self) -> None:
         self._write_info(host_authentication=False)
+        shadow_path = self.rootfs / "etc/shadow"
+        with shadow_path.open("a", encoding="utf-8") as shadow:
+            shadow.write("user:$6$hash:20000:0:99999:7:::\n")
         process = mock.Mock()
         process.wait.return_value = 0
         with (
@@ -846,6 +849,10 @@ class LaunchTests(unittest.TestCase):
             self.assertEqual(launch_module.launch("work"), 0)
 
         prepare.assert_not_called()
+        self.assertIn(
+            "user:$6$hash:20000:0:99999:7:::\n",
+            shadow_path.read_text(encoding="utf-8"),
+        )
         self.system_bridge.start.assert_called_once_with()
         self.system_bridge.stop.assert_called_once_with()
         self.native_validation.assert_called_once_with(self.rootfs)
@@ -1513,6 +1520,53 @@ class UserFixupTests(unittest.TestCase):
             record for record in gshadow if record[0] == "staff"
         )
         self.assertEqual(gshadow_account[3], "alice")
+
+    def test_reconcile_preserves_password_without_host_authentication(self) -> None:
+        for old_name in ("alice", "old"):
+            with self.subTest(old_name=old_name):
+                self._write_accounts(
+                    passwd_text=(
+                        "root:x:0:0::/root:/bin/sh\n"
+                        f"{old_name}:x:12345:12346::/old:/bin/sh\n"
+                    ),
+                    group_text="root:x:0:\nalice:x:12346:\n",
+                    shadow_text=(
+                        "root:!:::::::\n"
+                        f"{old_name}:$6$hash:20000:0:99999:7:::\n"
+                    ),
+                )
+
+                launch_module._reconcile_accounts(
+                    self.rootfs,
+                    (self._user(uid=12345, gid=12346),),
+                    host_authentication=False,
+                )
+
+                self.assertEqual(
+                    launch_module._read_database(self.etc / "shadow", 9),
+                    [
+                        ["root", "!", "", "", "", "", "", "", ""],
+                        ["alice", "$6$hash", "20000", "0", "99999", "7", "", "", ""],
+                    ],
+                )
+
+    def test_reconcile_adds_shadow_entry_without_host_authentication(self) -> None:
+        self._write_accounts(
+            passwd_text="root:x:0:0::/root:/bin/sh\n",
+            group_text="root:x:0:\n",
+            shadow_text="root:!:::::::\n",
+        )
+
+        launch_module._reconcile_accounts(
+            self.rootfs,
+            (self._user(uid=12345, gid=12346),),
+            host_authentication=False,
+        )
+
+        self.assertIn(
+            ["alice", "!", "", "", "", "", "", "", ""],
+            launch_module._read_database(self.etc / "shadow", 9),
+        )
 
     def test_reconcile_creates_account_and_primary_group(self) -> None:
         self._write_accounts(

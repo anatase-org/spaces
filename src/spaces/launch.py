@@ -626,6 +626,8 @@ def _reconcile_accounts(
     rootfs: Path,
     users: tuple[SpaceUser, ...],
     administrator_group: str = "wheel",
+    *,
+    host_authentication: bool = True,
 ) -> None:
     non_root_users = tuple(user for user in users if user.uid != 0)
     if not non_root_users:
@@ -786,7 +788,8 @@ def _reconcile_accounts(
                 )
             else:
                 shadow_records[shadow_index][0] = user.name
-                shadow_records[shadow_index][1] = "!"
+                if host_authentication:
+                    shadow_records[shadow_index][1] = "!"
 
     _atomic_write_database(passwd_path, passwd_records)
     _atomic_write_database(group_path, group_records)
@@ -2330,6 +2333,7 @@ def launch(space_name: str) -> int:
         rootfs,
         users,
         administrator_group,
+        host_authentication=host_authentication,
     )
     distro_id = info["distribution"]["id"]
     custom_binds = _prepare_custom_mounts(
