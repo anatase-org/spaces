@@ -100,7 +100,7 @@ class DistributionDriverTests(unittest.TestCase):
 
     def test_fedora_configuration_and_command(self) -> None:
         driver = fedora.DISTRIBUTION
-        self.assertEqual(driver.choices(), [("44", "44")])
+        self.assertEqual(driver.choices(), [("44", "44"), ("45", "45")])
         self.assertEqual(driver.default_option, "44")
         self.assertEqual(driver.metadata("44"), {"id": "fedora", "version": "44"})
         command = driver.command(
@@ -125,8 +125,13 @@ class DistributionDriverTests(unittest.TestCase):
         self.assertIn("dbus-tools", command)
         self.assertIn("qca-qt6-ossl", command)
         self.assertIn("qt6-qtwayland", command)
+        self.assertEqual(driver.metadata("45"), {"id": "fedora", "version": "45"})
+        self.assertIn(
+            "--releasever=45",
+            driver.command(driver.metadata("45"), Path("/rootfs")),
+        )
         with self.assertRaises(DistributionError):
-            driver.validate({"id": "fedora", "version": "45"})
+            driver.validate({"id": "fedora", "version": "46"})
 
     def test_arch_options_default_to_ranking_and_yay(self) -> None:
         driver = arch.DISTRIBUTION

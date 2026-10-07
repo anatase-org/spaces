@@ -50,6 +50,7 @@ spaces = ["overlay/*.png"]
 ]
 "share/spaces/keys" = [
   "data/keys/RPM-GPG-KEY-fedora-44-primary",
+  "data/keys/RPM-GPG-KEY-fedora-45-primary",
   "data/keys/kali-archive-key.asc",
   "data/keys/kali-archive-key.gpg.base64",
 ]

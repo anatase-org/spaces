@@ -880,6 +880,10 @@ class PackagingTests(unittest.TestCase):
             pyproject,
         )
         self.assertIn(
+            '"data/keys/RPM-GPG-KEY-fedora-45-primary"',
+            pyproject,
+        )
+        self.assertIn(
             '"data/keys/kali-archive-key.gpg.base64"',
             pyproject,
         )
@@ -925,6 +929,10 @@ class PackagingTests(unittest.TestCase):
         self.assertIn(
             "36F612DCF27F7D1A48A835E4DBFCF71C6D9F90A6",
             fingerprints(fedora_key),
+        )
+        self.assertIn(
+            "4F50A6114CD5C6976A7F1179655A4B02F577861E",
+            fingerprints(ROOT / "data" / "keys" / "RPM-GPG-KEY-fedora-45-primary"),
         )
         expected_kali = "827C8569F2518CC677FECA1AED65462EC8D5E4C5"
         self.assertIn(expected_kali, fingerprints(kali_key))

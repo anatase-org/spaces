@@ -45,7 +45,7 @@ PACKAGES = (
     "xdg-desktop-portal",
     "xdg-desktop-portal-kde",
 )
-RELEASES = {"44": _("44")}
+RELEASES = {"44": _("44"), "45": _("45")}
 HOST_REPOSITORY_DIRECTORY = Path("/usr/share/spaces/repos")
 RPM_DATABASE_DIRECTORY = Path("/usr/lib/sysimage/rpm")
 AUTHSELECT_STATE = Path("var/lib/spaces/fedora-authselect.json")
