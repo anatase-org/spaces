@@ -146,6 +146,13 @@ systemd_login_watch_session_dirs(spaces_t)
 systemd_read_logind_sessions_files(spaces_t)
 systemd_machined_watch_pid_dirs(spaces_t)
 systemd_machined_read_pid_files(spaces_t)
+# systemd-nspawn registers machines over machined's Varlink socket.  The
+# stream-connect interface grants connectto but not access to the socket file.
+systemd_machined_stream_connect(spaces_t)
+gen_require(`
+	type systemd_machined_var_run_t;
+')
+allow spaces_t systemd_machined_var_run_t:sock_file write_sock_file_perms;
 init_create_pid_dirs(spaces_t)
 init_delete_pid_dir_entry(spaces_t)
 init_manage_pid_files(spaces_t)
