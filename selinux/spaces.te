@@ -153,6 +153,16 @@ gen_require(`
 	type systemd_machined_var_run_t;
 ')
 allow spaces_t systemd_machined_var_run_t:sock_file write_sock_file_perms;
+# systemd-userdbd enumerates namespace users through nsresourced's Varlink
+# socket.  Older host policies (including Fedora 45's 45.20) lack read access,
+# which can stall user lookups while entering a space. Keep this optional for
+# hosts whose systemd policy does not define nsresourced yet.
+optional_policy(`
+	gen_require(`
+		type systemd_userdbd_t, systemd_nsresourced_runtime_t;
+	')
+	allow systemd_userdbd_t systemd_nsresourced_runtime_t:sock_file read;
+')
 init_create_pid_dirs(spaces_t)
 init_delete_pid_dir_entry(spaces_t)
 init_manage_pid_files(spaces_t)
