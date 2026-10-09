@@ -273,6 +273,15 @@ allow spaces_container_t { file_context_t selinux_config_t }:file {
 	relabelto unlink
 };
 
+# updatedb lists guest systemd state that can retain a dedicated pstore label.
+# Older host policies do not define this type.
+optional_policy(`
+	gen_require(`
+		type systemd_pstore_var_lib_t;
+	')
+	allow spaces_container_t systemd_pstore_var_lib_t:dir list_dir_perms;
+')
+
 # The guest systemd manages units within the cgroup subtree delegated by the
 # host service. Nested container runtimes also mount that delegated cgroup
 # filesystem in their own mount namespaces.
