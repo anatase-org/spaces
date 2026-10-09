@@ -256,6 +256,23 @@ allow spaces_container_t spaces_file_t:fifo_file watch;
 allow spaces_container_t spaces_file_t:{ file dir } mounton;
 allow spaces_container_t spaces_file_t:filesystem { mount remount unmount };
 
+# Guest SELinux package scripts update their on-disk module store even though
+# the launcher masks /sys/fs/selinux. semodule may leave these files with their
+# guest policy types instead of spaces_file_t. Permit rebuilding and replacing
+# that store without granting access to the host's SELinux policy controls.
+seutil_read_file_contexts(spaces_container_t)
+gen_require(`
+	type file_context_t;
+	type selinux_config_t;
+	type semanage_store_t;
+')
+manage_dirs_pattern(spaces_container_t, semanage_store_t, semanage_store_t)
+manage_files_pattern(spaces_container_t, semanage_store_t, semanage_store_t)
+allow spaces_container_t semanage_store_t:{ dir file } relabelto;
+allow spaces_container_t { file_context_t selinux_config_t }:file {
+	relabelto unlink
+};
+
 # The guest systemd manages units within the cgroup subtree delegated by the
 # host service. Nested container runtimes also mount that delegated cgroup
 # filesystem in their own mount namespaces.
