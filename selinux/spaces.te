@@ -584,7 +584,8 @@ gen_require(`
 allow spaces_container_t user_home_t:dir mounton;
 
 # Copies and moves between host-home and space directories may preserve or
-# reset file contexts. Permit both sides of those regular-file relabels.
+# reset file contexts, including directories created by package installers.
+allow spaces_container_t user_home_t:dir { relabelfrom relabelto };
 allow spaces_container_t { user_home_t spaces_file_t }:file { relabelfrom relabelto };
 
 # A user's selected /run/media directory is bind-mounted read-write. Native
