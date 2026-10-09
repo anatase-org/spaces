@@ -431,6 +431,8 @@ allow spaces_container_t netcontrol_device_t:chr_file { open read };
 allow spaces_container_t tun_tap_device_t:chr_file rw_chr_file_perms;
 allow spaces_container_t vhost_device_t:chr_file rw_chr_file_perms;
 allow spaces_container_t tty_device_t:chr_file open;
+# USB serial tools such as edl use explicitly forwarded /dev/ttyUSB* nodes.
+term_use_usb_ttys(spaces_container_t)
 allow spaces_container_t user_tty_device_t:chr_file {
 	open watch watch_reads
 };
