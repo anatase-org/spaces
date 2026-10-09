@@ -1151,6 +1151,32 @@ class LaunchTests(unittest.TestCase):
             "nm-cloud-setup.service",
             "nm-cloud-setup.timer",
             "nm-priv-helper.service",
+            "systemd-network-generator.service",
+        }
+        arguments = set(launch_module._disabled_unit_bind_arguments())
+        for unit in units:
+            with self.subTest(unit=unit):
+                self.assertIn(
+                    f"--bind-ro={launch_module.DISABLED_UNIT_CONFIG}:"
+                    f"/etc/systemd/system/{unit}.d/50-spaces-disabled.conf",
+                    arguments,
+                )
+
+    def test_host_device_and_home_management_units_are_disabled(self) -> None:
+        units = {
+            "systemd-udevd.service",
+            "systemd-udevd-control.socket",
+            "systemd-udevd-kernel.socket",
+            "systemd-udevd-varlink.socket",
+            "systemd-udev-trigger.service",
+            "systemd-udev-settle.service",
+            "systemd-homed.service",
+            "systemd-homed-activate.service",
+            "dbus-org.freedesktop.home1.service",
+            "systemd-oomd.service",
+            "systemd-oomd.socket",
+            "dbus-org.freedesktop.oom1.service",
+            "systemd-pstore.service",
         }
         arguments = set(launch_module._disabled_unit_bind_arguments())
         for unit in units:

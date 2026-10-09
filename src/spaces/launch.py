@@ -78,6 +78,28 @@ DISABLED_UNIT_DESTINATIONS = (
     "/etc/systemd/system/nm-cloud-setup.service",
     "/etc/systemd/system/nm-cloud-setup.timer",
     "/etc/systemd/system/nm-priv-helper.service",
+    # Do not derive guest network configuration from the host kernel cmdline.
+    "/etc/systemd/system/systemd-network-generator.service",
+    # The host manages devices and Spaces forwards permitted nodes. Explicit
+    # conditions also cover admin spaces where /sys is writable, so udev's
+    # upstream ConditionPathIsReadWrite=/sys does not prevent activation.
+    "/etc/systemd/system/systemd-udevd.service",
+    "/etc/systemd/system/systemd-udevd-control.socket",
+    "/etc/systemd/system/systemd-udevd-kernel.socket",
+    "/etc/systemd/system/systemd-udevd-varlink.socket",
+    "/etc/systemd/system/systemd-udev-trigger.service",
+    "/etc/systemd/system/systemd-udev-settle.service",
+    # Spaces mounts configured home directories; homed must not manage them.
+    "/etc/systemd/system/systemd-homed.service",
+    "/etc/systemd/system/systemd-homed-activate.service",
+    "/etc/systemd/system/dbus-org.freedesktop.home1.service",
+    # Leave memory pressure policy to the host instead of adding a guest OOM
+    # killer. Disable both socket and D-Bus activation paths.
+    "/etc/systemd/system/systemd-oomd.service",
+    "/etc/systemd/system/systemd-oomd.socket",
+    "/etc/systemd/system/dbus-org.freedesktop.oom1.service",
+    # Persistent kernel crash records belong to the host.
+    "/etc/systemd/system/systemd-pstore.service",
     # Avoid claiming host Bluetooth adapters.
     "/etc/systemd/system/bluetooth-mesh.service",
     "/etc/systemd/system/bluetooth.service",
