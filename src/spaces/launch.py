@@ -100,6 +100,11 @@ DISABLED_UNIT_DESTINATIONS = (
     "/etc/systemd/system/dbus-org.freedesktop.oom1.service",
     # Persistent kernel crash records belong to the host.
     "/etc/systemd/system/systemd-pstore.service",
+    # Spaces uses the host user namespace, so binfmt interpreter registration
+    # is shared with the host. Skip both registration and its automount setup.
+    "/etc/systemd/system/systemd-binfmt.service",
+    "/etc/systemd/system/proc-sys-fs-binfmt_misc.mount",
+    "/etc/systemd/system/proc-sys-fs-binfmt_misc.automount",
     # Avoid claiming host Bluetooth adapters.
     "/etc/systemd/system/bluetooth-mesh.service",
     "/etc/systemd/system/bluetooth.service",
