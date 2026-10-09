@@ -42,6 +42,9 @@ mcs_constrained(spaces_container_t)
 role system_r types spaces_container_t;
 
 kernel_read_all_proc(spaces_container_t)
+# Tools such as ripgrep try mmap on process state files before falling back
+# to read. These /proc/<pid> files carry the guest process's domain label.
+allow spaces_container_t self:file map;
 allow spaces_container_t spaces_file_t:file entrypoint;
 
 virt_sandbox_net_domain(spaces_container_t)
