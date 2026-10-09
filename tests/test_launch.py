@@ -476,7 +476,7 @@ class LaunchTests(unittest.TestCase):
             f"--bind={self.home}:/home",
             f"--bind={self.root_home}:/root",
             f"--bind={self.cache}:/var/cache",
-            *launch_module._unit_mask_bind_arguments(),
+            *launch_module._disabled_unit_bind_arguments(),
         ]
 
         for network, added_caps in network_caps.items():
@@ -1127,18 +1127,19 @@ class LaunchTests(unittest.TestCase):
         self.worker.join.assert_called()
         self.monitor.close.assert_called()
 
-    def test_unit_masks_are_launch_time_binds(self) -> None:
-        arguments = launch_module._unit_mask_bind_arguments()
+    def test_disabled_units_use_launch_time_drop_ins(self) -> None:
+        arguments = launch_module._disabled_unit_bind_arguments()
 
         self.assertEqual(
             set(arguments),
             {
-                f"--bind-ro=/dev/null:{destination}"
-                for destination in launch_module.MASKED_UNIT_DESTINATIONS
+                f"--bind-ro={launch_module.DISABLED_UNIT_CONFIG}:"
+                f"{destination}.d/50-spaces-disabled.conf"
+                for destination in launch_module.DISABLED_UNIT_DESTINATIONS
             },
         )
 
-    def test_network_manager_units_are_masked(self) -> None:
+    def test_network_manager_units_are_disabled(self) -> None:
         units = {
             "NetworkManager-config-initrd.service",
             "NetworkManager-dispatcher.service",
@@ -1151,33 +1152,38 @@ class LaunchTests(unittest.TestCase):
             "nm-cloud-setup.timer",
             "nm-priv-helper.service",
         }
-        arguments = set(launch_module._unit_mask_bind_arguments())
+        arguments = set(launch_module._disabled_unit_bind_arguments())
         for unit in units:
             with self.subTest(unit=unit):
                 self.assertIn(
-                    f"--bind-ro=/dev/null:/etc/systemd/system/{unit}",
+                    f"--bind-ro={launch_module.DISABLED_UNIT_CONFIG}:"
+                    f"/etc/systemd/system/{unit}.d/50-spaces-disabled.conf",
                     arguments,
                 )
 
-    def test_bluetooth_units_are_masked(self) -> None:
+    def test_bluetooth_units_are_disabled(self) -> None:
         expected = {
-            "--bind-ro=/dev/null:/etc/systemd/system/bluetooth-mesh.service",
-            "--bind-ro=/dev/null:/etc/systemd/system/bluetooth.service",
-            "--bind-ro=/dev/null:/etc/systemd/system/bluetooth.target",
-            "--bind-ro=/dev/null:/etc/systemd/system/dbus-org.bluez.service",
-            "--bind-ro=/dev/null:/etc/systemd/user/"
-            "dbus-org.bluez.obex.service",
-            "--bind-ro=/dev/null:/etc/systemd/user/obex.service",
+            f"--bind-ro={launch_module.DISABLED_UNIT_CONFIG}:{destination}"
+            ".d/50-spaces-disabled.conf"
+            for destination in (
+                "/etc/systemd/system/bluetooth-mesh.service",
+                "/etc/systemd/system/bluetooth.service",
+                "/etc/systemd/system/bluetooth.target",
+                "/etc/systemd/system/dbus-org.bluez.service",
+                "/etc/systemd/user/dbus-org.bluez.obex.service",
+                "/etc/systemd/user/obex.service",
+            )
         }
         self.assertLessEqual(
             expected,
-            set(launch_module._unit_mask_bind_arguments()),
+            set(launch_module._disabled_unit_bind_arguments()),
         )
 
-    def test_rtkit_is_masked_without_granting_guest_sysfs_mounts(self) -> None:
+    def test_rtkit_is_disabled_without_granting_guest_sysfs_mounts(self) -> None:
         self.assertIn(
-            "--bind-ro=/dev/null:/etc/systemd/system/rtkit-daemon.service",
-            launch_module._unit_mask_bind_arguments(),
+            f"--bind-ro={launch_module.DISABLED_UNIT_CONFIG}:"
+            "/etc/systemd/system/rtkit-daemon.service.d/50-spaces-disabled.conf",
+            launch_module._disabled_unit_bind_arguments(),
         )
 
     def test_rootfs_fixups_prepare_links_and_zsh_skeleton(self) -> None:
@@ -1201,7 +1207,7 @@ class LaunchTests(unittest.TestCase):
         self.assertTrue(zshrc.is_file())
         self.assertEqual(zshrc.read_text(encoding="utf-8"), "")
         self.assertEqual(zshrc.stat().st_mode & 0o777, 0o644)
-        for destination in launch_module.MASKED_UNIT_DESTINATIONS:
+        for destination in launch_module.DISABLED_UNIT_DESTINATIONS:
             with self.subTest(destination=destination):
                 self.assertFalse(
                     (self.rootfs / destination.removeprefix("/")).exists()

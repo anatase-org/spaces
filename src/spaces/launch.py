@@ -64,7 +64,8 @@ BASE_DEVICE_ALLOW = (
 )
 ROOTFS_SYMLINKS = (("/var/home", "/home"),)
 ZSH_SKELETON_PATH = Path("/etc/skel/.zshrc")
-MASKED_UNIT_DESTINATIONS = (
+DISABLED_UNIT_CONFIG = Path("/usr/share/spaces/system-bridge/disabled-unit.conf")
+DISABLED_UNIT_DESTINATIONS = (
     # Avoid messing with the network
     "/etc/systemd/system/netplan-configure.service",
     "/etc/systemd/system/NetworkManager-config-initrd.service",
@@ -1312,16 +1313,20 @@ def _prepare_custom_overlays(
     return tuple(arguments)
 
 
-def _unit_mask_bind_arguments() -> tuple[str, ...]:
-    """Mask guest units for this launch without changing the rootfs."""
+def _disabled_unit_bind_arguments() -> tuple[str, ...]:
+    """Skip guest units without mounting over package-owned files or aliases."""
 
+    # nspawn follows unit symlinks before mounting. A /dev/null bind onto an
+    # alias can therefore cover a vendor unit in /usr, preventing RPM/dpkg
+    # from replacing it. A condition drop-in leaves both paths replaceable
+    # and lets package scripts request starts without failing the transaction.
     return tuple(
         _path_bind_argument(
-            Path("/dev/null"),
-            destination,
+            DISABLED_UNIT_CONFIG,
+            f"{destination}.d/50-spaces-disabled.conf",
             read_only=True,
         )
-        for destination in MASKED_UNIT_DESTINATIONS
+        for destination in DISABLED_UNIT_DESTINATIONS
     )
 
 
@@ -2253,7 +2258,7 @@ def _command(
         f"--bind={home}:/home",
         f"--bind={home / 'root'}:/root",
         f"--bind={core.CACHE_ROOT / space_name}:/var/cache",
-        *_unit_mask_bind_arguments(),
+        *_disabled_unit_bind_arguments(),
         # A complete procfs in the guest PID namespace lets rootless runtimes
         # mount their own procfs without removing nspawn's boot_id/kmsg binds.
         # Development and admin spaces support nested container runtimes.

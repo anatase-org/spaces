@@ -85,6 +85,7 @@ spaces = ["overlay/*.png"]
 ]
 
 "share/spaces/system-bridge" = [
+  "data/system-bridge/disabled-unit.conf",
   "data/system-bridge/host-service.conf",
   "data/system-bridge/multi-user.conf",
   "data/system-bridge/spaces-system-broker.service",
