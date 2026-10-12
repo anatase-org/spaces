@@ -5,6 +5,7 @@ from __future__ import annotations
 import ctypes
 import ctypes.util
 import errno
+import json
 import logging
 import os
 import pwd
@@ -1181,6 +1182,9 @@ def _path_bind_argument(
 def _prepare_custom_mounts(
     rootfs: Path,
     mounts: tuple[host_config.Mount, ...],
+    *,
+    created_files: set[str] | None = None,
+    bind_destinations: set[str] | None = None,
 ) -> tuple[str, ...]:
     """Create safe bind targets and return read-only nspawn arguments."""
 
@@ -1237,6 +1241,8 @@ def _prepare_custom_mounts(
                         )
                 else:
                     os.close(descriptor)
+                    if created_files is not None:
+                        created_files.add(str(mount.destination))
             arguments.append(
                 _path_bind_argument(
                     mount.source,
@@ -1244,6 +1250,8 @@ def _prepare_custom_mounts(
                     read_only=True,
                 )
             )
+            if bind_destinations is not None:
+                bind_destinations.add(str(mount.destination))
         except (OSError, RuntimeError, ValueError) as error:
             logger.warning(
                 _(
@@ -1260,6 +1268,9 @@ def _prepare_custom_mounts(
 def _prepare_custom_overlays(
     rootfs: Path,
     overlays: tuple[host_config.Overlay, ...],
+    *,
+    created_files: set[str] | None = None,
+    bind_destinations: set[str] | None = None,
 ) -> tuple[str, ...]:
     """Expose overlay entries without making their whole destination read-only."""
 
@@ -1331,7 +1342,12 @@ def _prepare_custom_overlays(
                         )
                     )
             arguments.extend(
-                _prepare_custom_mounts(rootfs, tuple(mounts))
+                _prepare_custom_mounts(
+                    rootfs,
+                    tuple(mounts),
+                    created_files=created_files,
+                    bind_destinations=bind_destinations,
+                )
             )
         except (OSError, RuntimeError, ValueError) as error:
             logger.warning(
@@ -1344,6 +1360,141 @@ def _prepare_custom_overlays(
                 )
             )
     return tuple(arguments)
+
+
+def _load_bind_files(path: Path) -> set[str]:
+    """Read owned placeholder paths without following a manifest symlink."""
+
+    try:
+        descriptor = os.open(
+            path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+        )
+    except FileNotFoundError:
+        return set()
+    with os.fdopen(descriptor, "r", encoding="utf-8") as source:
+        if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+            raise ValueError(_("the bind manifest is not a regular file"))
+        paths = json.load(source)
+    if not isinstance(paths, list):
+        raise ValueError(_("the bind manifest must be a list of paths"))
+    for value in paths:
+        if not isinstance(value, str) or "\0" in value:
+            raise ValueError(_("the bind manifest contains an invalid path"))
+        guest_path = PurePosixPath(value)
+        if (
+            not guest_path.is_absolute()
+            or value.startswith("//")
+            or str(guest_path) != value
+            or ".." in guest_path.parts
+            or guest_path == PurePosixPath("/")
+            or any(
+                guest_path == unsafe or unsafe in guest_path.parents
+                for unsafe in host_config.UNSAFE_DESTINATIONS
+            )
+        ):
+            raise ValueError(_("the bind manifest contains an unsafe path"))
+    return set(paths)
+
+
+def _remove_obsolete_bind_file(rootfs: Path, guest_path: str) -> bool:
+    """Remove an empty placeholder; return whether deletion needs a retry."""
+
+    descriptor: int | None = None
+    try:
+        # Directory descriptors keep cleanup within the rootfs even if a
+        # parent is replaced with a symlink during traversal.
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        descriptor = os.open(rootfs, flags)
+        relative = PurePosixPath(guest_path).relative_to("/")
+        for component in relative.parts[:-1]:
+            child = os.open(component, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        status = os.stat(relative.name, dir_fd=descriptor, follow_symlinks=False)
+        if stat.S_ISREG(status.st_mode) and status.st_size == 0:
+            os.unlink(relative.name, dir_fd=descriptor)
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        logger.warning(
+            _(
+                "Could not remove obsolete bind file {path}: {error}",
+                path=guest_path,
+                error=error,
+            )
+        )
+        # A symlink or non-directory parent is no longer an owned placeholder.
+        return error.errno not in {errno.ELOOP, errno.ENOTDIR}
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    return False
+
+
+def _write_bind_files(path: Path, paths: set[str]) -> None:
+    """Atomically persist placeholder ownership before nspawn starts."""
+
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".binds.", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            json.dump(sorted(paths), output, indent=2)
+            output.write("\n")
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _prepare_configured_binds(
+    rootfs: Path,
+    mounts: tuple[host_config.Mount, ...],
+    overlays: tuple[host_config.Overlay, ...],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Reconcile persistent file targets for configured mounts at startup."""
+
+    manifest = rootfs.parent / "binds.json"
+    try:
+        previous = _load_bind_files(manifest)
+    except (OSError, ValueError) as error:
+        raise core.SpacesError(
+            _(
+                "Could not read bind manifest {path}: {error}",
+                path=manifest,
+                error=error,
+            )
+        ) from error
+
+    created_files: set[str] = set()
+    bind_destinations: set[str] = set()
+    custom_binds = _prepare_custom_mounts(
+        rootfs,
+        mounts,
+        created_files=created_files,
+        bind_destinations=bind_destinations,
+    )
+    custom_overlays = _prepare_custom_overlays(
+        rootfs,
+        overlays,
+        created_files=created_files,
+        bind_destinations=bind_destinations,
+    )
+    retained = (previous & bind_destinations) | created_files
+    for guest_path in sorted(previous - bind_destinations):
+        if _remove_obsolete_bind_file(rootfs, guest_path):
+            retained.add(guest_path)
+    try:
+        _write_bind_files(manifest, retained)
+    except OSError as error:
+        raise core.SpacesError(
+            _(
+                "Could not write bind manifest {path}: {error}",
+                path=manifest,
+                error=error,
+            )
+        ) from error
+    return custom_binds, custom_overlays
 
 
 def _disabled_unit_bind_arguments() -> tuple[str, ...]:
@@ -2377,12 +2528,9 @@ def launch(space_name: str) -> int:
         host_authentication=host_authentication,
     )
     distro_id = info["distribution"]["id"]
-    custom_binds = _prepare_custom_mounts(
+    custom_binds, custom_overlays = _prepare_configured_binds(
         rootfs,
         configuration.mounts_for(distro_id),
-    )
-    custom_overlays = _prepare_custom_overlays(
-        rootfs,
         configuration.overlays_for(distro_id),
     )
     _ensure_user_homes(rootfs, users)

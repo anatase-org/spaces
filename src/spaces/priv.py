@@ -694,6 +694,7 @@ def create(request: dict[str, Any]) -> None:
         if not purge and rootfs.is_dir() and not rootfs.is_symlink():
             storage.prepare_persistent_cache(space)
         _remove_rootfs(rootfs)
+        (space / "binds.json").unlink(missing_ok=True)
         _remove_rootfs(failed_rootfs)
         _root_owned_directory(rootfs)
         _write_info(space, info)

@@ -287,6 +287,239 @@ class LaunchTests(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def _bind_manifest(self) -> list[str]:
+        return json.loads((self.space / "binds.json").read_text(encoding="utf-8"))
+
+    def test_bind_manifest_tracks_only_new_file_targets(self) -> None:
+        source = Path(self.temporary.name) / "vendor:library.so"
+        source.write_text("host library", encoding="utf-8")
+        directory = source.parent / "vendor"
+        directory.mkdir()
+        existing = self.rootfs / "etc/existing"
+        existing.touch()
+        mounts = (
+            host_config.Mount(source, launch_module.PurePosixPath("/etc/new:library")),
+            host_config.Mount(source, launch_module.PurePosixPath("/etc/existing")),
+            host_config.Mount(directory, launch_module.PurePosixPath("/opt/vendor")),
+        )
+
+        arguments, overlays = launch_module._prepare_configured_binds(
+            self.rootfs, mounts, ()
+        )
+        self.assertEqual(len(arguments), 3)
+        self.assertEqual(overlays, ())
+        self.assertEqual(self._bind_manifest(), ["/etc/new:library"])
+
+        # Existing targets must retain ownership on a second startup.
+        (self.space / "binds.json").write_text(
+            '["/etc/new:library", "/etc/new:library"]', encoding="utf-8"
+        )
+        launch_module._prepare_configured_binds(self.rootfs, mounts, ())
+        self.assertEqual(self._bind_manifest(), ["/etc/new:library"])
+        launch_module._prepare_configured_binds(self.rootfs, (), ())
+        self.assertFalse((self.rootfs / "etc/new:library").exists())
+        self.assertTrue(existing.exists())
+        self.assertTrue((self.rootfs / "opt/vendor").is_dir())
+
+    def test_bind_manifest_reconciles_driver_version_changes(self) -> None:
+        source = Path(self.temporary.name) / "nvidia"
+        source.mkdir()
+        old_library = source / "libcuda.so.1"
+        old_library.write_text("old driver", encoding="utf-8")
+        destination = self.rootfs / "usr/lib64"
+        destination.mkdir(parents=True)
+        unrelated = destination / "libguest.so"
+        unrelated.touch()
+        overlays = (
+            host_config.Overlay(source, launch_module.PurePosixPath("/usr/lib64")),
+        )
+        launch_module._prepare_configured_binds(self.rootfs, (), overlays)
+        old_library.unlink()
+        (source / "libcuda.so.2").write_text("new driver", encoding="utf-8")
+        (source / "libcuda.so").symlink_to("libcuda.so.2")
+
+        _, arguments = launch_module._prepare_configured_binds(
+            self.rootfs, (), overlays
+        )
+
+        self.assertEqual(len(arguments), 2)
+        self.assertFalse((destination / "libcuda.so.1").exists())
+        self.assertEqual(
+            self._bind_manifest(),
+            ["/usr/lib64/libcuda.so", "/usr/lib64/libcuda.so.2"],
+        )
+        self.assertTrue(unrelated.exists())
+
+    def test_bind_manifest_cleans_removed_configuration_or_source(self) -> None:
+        for remove_source in (False, True):
+            with self.subTest(remove_source=remove_source):
+                source = Path(self.temporary.name) / "vendor.conf"
+                source.write_text("host config", encoding="utf-8")
+                mounts = (
+                    host_config.Mount(source, launch_module.PurePosixPath("/etc/vendor")),
+                )
+                launch_module._prepare_configured_binds(self.rootfs, mounts, ())
+                if remove_source:
+                    source.unlink()
+                launch_module._prepare_configured_binds(
+                    self.rootfs, mounts if remove_source else (), ()
+                )
+                self.assertFalse((self.rootfs / "etc/vendor").exists())
+                self.assertEqual(self._bind_manifest(), [])
+
+    def test_bind_manifest_preserves_modified_and_unsafe_targets(self) -> None:
+        library = self.rootfs / "usr/lib"
+        library.mkdir(parents=True)
+        (library / "installed.so").write_text("guest library", encoding="utf-8")
+        (library / "directory").mkdir()
+        outside = Path(self.temporary.name) / "outside"
+        outside.mkdir()
+        outside_file = outside / "empty.so"
+        outside_file.touch()
+        (library / "link.so").symlink_to(outside_file)
+        (library / "parent").symlink_to(outside, target_is_directory=True)
+        paths = [
+            "/usr/lib/installed.so",
+            "/usr/lib/directory",
+            "/usr/lib/link.so",
+            "/usr/lib/parent/empty.so",
+            "/usr/lib/missing.so",
+        ]
+        (self.space / "binds.json").write_text(json.dumps(paths), encoding="utf-8")
+
+        with self.assertLogs(launch_module.logger, "WARNING"):
+            launch_module._prepare_configured_binds(self.rootfs, (), ())
+
+        self.assertEqual(self._bind_manifest(), [])
+        self.assertEqual((library / "installed.so").read_text(), "guest library")
+        self.assertTrue((library / "directory").is_dir())
+        self.assertTrue((library / "link.so").is_symlink())
+        self.assertTrue((library / "parent").is_symlink())
+        self.assertTrue(outside_file.exists())
+
+    def test_bind_manifest_retries_failed_deletions(self) -> None:
+        placeholder = self.rootfs / "etc/vendor"
+        placeholder.touch()
+        (self.space / "binds.json").write_text('["/etc/vendor"]', encoding="utf-8")
+        real_unlink = os.unlink
+
+        def unlink(path: str | Path, **kwargs: object) -> None:
+            if path == "vendor":
+                raise PermissionError(13, "permission denied")
+            real_unlink(path, **kwargs)
+
+        with (
+            mock.patch.object(launch_module.os, "unlink", side_effect=unlink),
+            self.assertLogs(launch_module.logger, "WARNING"),
+        ):
+            launch_module._prepare_configured_binds(self.rootfs, (), ())
+        self.assertTrue(placeholder.exists())
+        self.assertEqual(self._bind_manifest(), ["/etc/vendor"])
+
+        launch_module._prepare_configured_binds(self.rootfs, (), ())
+        self.assertFalse(placeholder.exists())
+        self.assertEqual(self._bind_manifest(), [])
+
+    def test_invalid_bind_manifests_prevent_launch(self) -> None:
+        self._write_info()
+        manifest = self.space / "binds.json"
+        invalid_values = (
+            "{",
+            '{}',
+            '[1]',
+            '["relative"]',
+            '["/"]',
+            '["//etc/vendor"]',
+            '["/etc/../outside"]',
+            '["/etc/./vendor"]',
+            '["/etc/vendor\\u0000"]',
+            '["/home/user/file"]',
+        )
+        for value in invalid_values:
+            with self.subTest(value=value):
+                manifest.write_text(value, encoding="utf-8")
+                with (
+                    mock.patch.object(launch_module.subprocess, "Popen") as run,
+                    self.assertRaises(core.SpacesError),
+                ):
+                    launch_module.launch("work")
+                run.assert_not_called()
+                self.assertEqual(manifest.read_text(encoding="utf-8"), value)
+
+    def test_manifest_symlink_prevents_launch(self) -> None:
+        self._write_info()
+        outside = Path(self.temporary.name) / "outside.json"
+        outside.write_text("[]", encoding="utf-8")
+        (self.space / "binds.json").symlink_to(outside)
+        with (
+            mock.patch.object(launch_module.subprocess, "Popen") as run,
+            self.assertRaises(core.SpacesError),
+        ):
+            launch_module.launch("work")
+        run.assert_not_called()
+        self.assertEqual(outside.read_text(encoding="utf-8"), "[]")
+
+    def test_bind_manifest_write_failure_prevents_launch(self) -> None:
+        self._write_info()
+        manifest = self.space / "binds.json"
+        manifest.write_text("[]", encoding="utf-8")
+        real_replace = os.replace
+
+        def replace(source: Path, destination: Path) -> None:
+            if destination == manifest:
+                raise OSError("manifest write failed")
+            real_replace(source, destination)
+
+        with (
+            mock.patch.object(launch_module.os, "replace", side_effect=replace),
+            mock.patch.object(launch_module.subprocess, "Popen") as run,
+            self.assertRaises(core.SpacesError),
+        ):
+            launch_module.launch("work")
+        run.assert_not_called()
+        self.assertEqual(manifest.read_text(encoding="utf-8"), "[]")
+        self.assertEqual(list(self.space.glob(".binds.*")), [])
+
+    def test_bind_placeholders_survive_exit_and_launch_failure(self) -> None:
+        self._write_info()
+        source = Path(self.temporary.name) / "vendor.conf"
+        source.write_text("host config", encoding="utf-8")
+        configuration = host_config.HostConfig(
+            distros={
+                "custom": host_config.DistroConfig(
+                    mounts=(
+                        host_config.Mount(source, launch_module.PurePosixPath("/etc/vendor")),
+                    ),
+                ),
+            },
+        )
+
+        def start(*args: object, **kwargs: object) -> mock.Mock:
+            self.assertEqual(self._bind_manifest(), ["/etc/vendor"])
+            self.assertTrue((self.rootfs / "etc/vendor").is_file())
+            process = mock.Mock()
+            process.wait.return_value = 0
+            return process
+
+        for fail in (False, True):
+            with self.subTest(fail=fail):
+                with (
+                    mock.patch.object(host_config, "load", return_value=configuration),
+                    mock.patch.object(
+                        launch_module.subprocess,
+                        "Popen",
+                        side_effect=OSError("nspawn failed") if fail else start,
+                    ),
+                    mock.patch.object(launch_module.signal, "signal"),
+                ):
+                    if fail:
+                        with self.assertRaises(OSError):
+                            launch_module.launch("work")
+                    else:
+                        self.assertEqual(launch_module.launch("work"), 0)
+                self.assertEqual(self._bind_manifest(), ["/etc/vendor"])
+                self.assertTrue((self.rootfs / "etc/vendor").is_file())
+
     def test_users_resolve_their_presets_independently(self) -> None:
         info = core.create_info(
             "work",

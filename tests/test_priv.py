@@ -217,6 +217,25 @@ class PrivilegedTests(unittest.TestCase):
             additional_packages=("tmux", "zsh"),
         )
 
+    def test_recreating_rootfs_resets_bind_manifest(self) -> None:
+        space = self.state_root / "ubuntu"
+        (space / "rootfs").mkdir(parents=True)
+        manifest = space / "binds.json"
+        manifest.write_text('["/usr/lib64/libcuda.so.1"]', encoding="utf-8")
+        driver = mock.Mock()
+
+        def bootstrap(*args: object, **kwargs: object) -> None:
+            self.assertFalse(manifest.exists())
+
+        driver.bootstrap.side_effect = bootstrap
+        with (
+            mock.patch.object(priv, "get_driver", return_value=driver),
+            mock.patch.object(priv.subprocess, "run"),
+        ):
+            priv.create(self.info)
+        driver.bootstrap.assert_called_once()
+        self.assertFalse(manifest.exists())
+
     def test_space_lock_owns_the_specific_space_directory(self) -> None:
         space = self.state_root / "work"
         targets: list[Path] = []
@@ -605,6 +624,8 @@ class PrivilegedTests(unittest.TestCase):
         rootfs.mkdir(parents=True)
         existing = rootfs / "keep"
         existing.write_text("preserve", encoding="utf-8")
+        manifest = space / "binds.json"
+        manifest.write_text('["/usr/lib64/libcuda.so.1"]', encoding="utf-8")
         error = subprocess.CalledProcessError(
             1,
             [
@@ -621,6 +642,10 @@ class PrivilegedTests(unittest.TestCase):
             priv.create(self.info)
 
         self.assertEqual(existing.read_text(encoding="utf-8"), "preserve")
+        self.assertEqual(
+            json.loads(manifest.read_text(encoding="utf-8")),
+            ["/usr/lib64/libcuda.so.1"],
+        )
 
     def test_keyboard_interrupt_returns_130(self) -> None:
         payload = json.dumps(self.info)
