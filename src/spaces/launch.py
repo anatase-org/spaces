@@ -2201,8 +2201,29 @@ class _MountWorker:
         _unmount_in_machine(self._space_name, mount.destination)
 
 
-def _unmount_in_machine(space_name: str, destination: str) -> None:
+def _unmount_in_machine(
+    space_name: str,
+    destination: str,
+    *,
+    remove_target: bool = False,
+) -> None:
     """Lazily revoke one runtime bind from a running space."""
+
+    command = [UMOUNT, "--lazy", "--", destination]
+    if remove_target:
+        # Device binds cover regular-file placeholders in the guest's /dev.
+        # Remove those only after a successful unmount, in the same guest
+        # command. Pass paths as arguments rather than interpolating them.
+        command = [
+            "/bin/sh",
+            "-c",
+            '"$1" --lazy -- "$2" || exit "$?"; '
+            'if [ -f "$2" ] && [ ! -L "$2" ]; then '
+            '/usr/bin/rm -f -- "$2"; fi',
+            "spaces-unmount-device",
+            UMOUNT,
+            destination,
+        ]
 
     # LazyUnmount= is a mount-unit setting, but systemd does not expose it
     # through systemctl set-property. Run the stable umount(8) interface in
@@ -2219,10 +2240,7 @@ def _unmount_in_machine(space_name: str, destination: str) -> None:
             "--collect",
             "--service-type=exec",
             "--",
-            UMOUNT,
-            "--lazy",
-            "--",
-            destination,
+            *command,
         ],
         check=True,
     )
@@ -2341,7 +2359,9 @@ class _DeviceWorker:
             reverse=True,
         )
         for node in removals:
-            _unmount_in_machine(self._space_name, str(node.destination))
+            _unmount_in_machine(
+                self._space_name, str(node.destination), remove_target=True
+            )
             self._mounted.remove(node)
         if removals:
             _set_device_policy(

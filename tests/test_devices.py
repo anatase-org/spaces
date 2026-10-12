@@ -557,8 +557,8 @@ class DeviceWorkerTests(unittest.TestCase):
             mock.patch.object(
                 launch,
                 "_unmount_in_machine",
-                side_effect=lambda *_args: events.append("unmount"),
-            ),
+                side_effect=lambda *_args, **_kwargs: events.append("unmount"),
+            ) as unmount,
             mock.patch.object(
                 launch,
                 "_set_device_policy",
@@ -568,8 +568,80 @@ class DeviceWorkerTests(unittest.TestCase):
             self.worker._reconcile()
 
         self.assertEqual(events, ["unmount", "shrink"])
+        unmount.assert_called_once_with(
+            "work", "/dev/existing", remove_target=True
+        )
         self.assertEqual(tuple(policy.call_args.args[2]), ())
         self.assertEqual(self.worker._mounted, set())
+
+    def test_device_unmount_cleans_only_regular_targets_after_success(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for kind in ("file", "symlink", "directory", "missing"):
+                for success in (True, False):
+                    with self.subTest(kind=kind, success=success):
+                        # Shell metacharacters must remain part of the path.
+                        target = root / f"hidraw {kind} {success}; $(false)"
+                        if kind == "file":
+                            target.touch()
+                        elif kind == "symlink":
+                            backing = root / f"backing-{success}"
+                            backing.touch()
+                            target.symlink_to(backing)
+                        elif kind == "directory":
+                            target.mkdir()
+
+                        with mock.patch.object(launch.subprocess, "run") as run:
+                            launch._unmount_in_machine(
+                                "work", str(target), remove_target=True
+                            )
+                        arguments = run.call_args.args[0]
+                        command = arguments[arguments.index("--") + 1:]
+                        # Simulate the unmount result without touching mounts.
+                        command[-2] = "/usr/bin/true" if success else "/usr/bin/false"
+                        result = subprocess.run(command, check=False)
+
+                        self.assertEqual(result.returncode, 0 if success else 1)
+                        if kind == "file":
+                            self.assertEqual(target.exists(), not success)
+                        elif kind == "symlink":
+                            self.assertTrue(target.is_symlink())
+                            self.assertTrue(backing.exists())
+                        elif kind == "directory":
+                            self.assertTrue(target.is_dir())
+                        else:
+                            self.assertFalse(target.exists())
+
+    def test_replacement_at_same_path_cleans_old_target_before_binding(self) -> None:
+        replacement = node("existing", 240, 2)
+        events: list[str] = []
+        with (
+            mock.patch.object(
+                launch.devices, "discover", return_value=(replacement,)
+            ),
+            mock.patch.object(
+                launch,
+                "_unmount_in_machine",
+                side_effect=lambda *_args, **_kwargs: events.append("cleanup"),
+            ) as unmount,
+            mock.patch.object(
+                launch,
+                "_set_device_policy",
+                side_effect=lambda *_args: events.append("policy"),
+            ),
+            mock.patch.object(
+                launch.subprocess,
+                "run",
+                side_effect=lambda *_args, **_kwargs: events.append("bind"),
+            ),
+        ):
+            self.worker._reconcile()
+
+        self.assertEqual(events, ["cleanup", "policy", "policy", "bind"])
+        unmount.assert_called_once_with(
+            "work", "/dev/existing", remove_target=True
+        )
+        self.assertEqual(self.worker._mounted, {replacement})
 
     def test_monitor_failure_terminates_the_space(self) -> None:
         process = mock.Mock()
