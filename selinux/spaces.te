@@ -366,6 +366,7 @@ gen_require(`
 	type hsa_device_t;
 	type hugetlbfs_t;
 	type lvm_control_t;
+	type memory_device_t;
 	type mtrr_device_t;
 	type netcontrol_device_t;
 	type proc_t;
@@ -426,6 +427,11 @@ allow spaces_container_t hsa_device_t:chr_file map;
 allow spaces_container_t xserver_misc_device_t:chr_file rw_chr_file_perms;
 allow spaces_container_t xserver_misc_device_t:chr_file map;
 allow spaces_container_t lvm_control_t:chr_file rw_chr_file_perms;
+# Admin and full device access grant CAP_SYS_RAWIO at launch. Permit raw
+# hardware access through admitted /dev/port and /dev/mem device nodes.
+allow spaces_container_t self:capability sys_rawio;
+allow spaces_container_t memory_device_t:chr_file rw_chr_file_perms;
+allow spaces_container_t memory_device_t:chr_file map;
 allow spaces_container_t sound_device_t:chr_file rw_chr_file_perms;
 allow spaces_container_t cpu_device_t:chr_file { open read };
 # turbostat uses the latency QoS device to keep the package out of deep idle

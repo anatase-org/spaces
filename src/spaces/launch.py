@@ -180,6 +180,12 @@ KERNEL_CAPS = {
     "development": DEVELOPMENT_KERNEL_CAPS,
     "admin": DEVELOPMENT_KERNEL_CAPS,
 }
+DEVICE_CAPS = {
+    "disabled": (),
+    "basic": (),
+    "admin": ("CAP_SYS_RAWIO",),
+    "full": ("CAP_SYS_RAWIO",),
+}
 NETWORK_SYSCTL_BINDS = (
     "--bind=/proc/sys/net:/run/spaces-host/proc-sys-net",
     "--bind=/run/spaces-host/proc-sys-net:/proc/sys/net",
@@ -2267,10 +2273,13 @@ def _command(
     authentication_binds: tuple[str, ...] = (),
     custom_binds: tuple[str, ...] = (),
     custom_overlays: tuple[str, ...] = (),
+    *,
+    device_level: str = "basic",
 ) -> list[str]:
     network_caps = NETWORK_CAPS[network]
     kernel_caps = KERNEL_CAPS[kernel_capabilities]
-    kept_caps = (*KEPT_CAPS, *network_caps, *kernel_caps)
+    device_caps = DEVICE_CAPS[device_level]
+    kept_caps = (*KEPT_CAPS, *network_caps, *kernel_caps, *device_caps)
     dropped_caps = tuple(
         capability
         for capability in DROPPED_CAPS
@@ -2524,6 +2533,7 @@ def launch(space_name: str) -> int:
                 ),
                 custom_binds,
                 custom_overlays,
+                device_level=device_level,
             ),
             env=environment,
         )

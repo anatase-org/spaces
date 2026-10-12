@@ -917,6 +917,41 @@ class LaunchTests(unittest.TestCase):
             ],
         )
 
+    def test_rawio_requires_admin_or_full_device_permission(self) -> None:
+        process = mock.Mock()
+        process.wait.return_value = 0
+        with (
+            mock.patch.object(launch_module.devices, "Udev"),
+            mock.patch.object(
+                launch_module.devices, "discover", return_value=()
+            ),
+            mock.patch.object(launch_module, "_DeviceWorker"),
+            mock.patch.object(
+                launch_module.subprocess, "Popen", return_value=process
+            ) as popen,
+            mock.patch.object(launch_module.signal, "signal"),
+        ):
+            for kernel_level in ("basic", "development", "admin"):
+                for device_level in ("disabled", "basic", "admin", "full"):
+                    with self.subTest(
+                        kernel_level=kernel_level, device_level=device_level
+                    ):
+                        self._write_info(
+                            devices=device_level,
+                            kernel_capabilities=kernel_level,
+                        )
+                        self.assertEqual(launch_module.launch("work"), 0)
+                        command = popen.call_args.args[0]
+                        capabilities = next(
+                            argument.removeprefix("--capability=").split(",")
+                            for argument in command
+                            if argument.startswith("--capability=")
+                        )
+                        self.assertEqual(
+                            "CAP_SYS_RAWIO" in capabilities,
+                            device_level in ("admin", "full"),
+                        )
+
     def test_full_devices_bind_all_nodes_and_use_unrestricted_policy(
         self,
     ) -> None:
