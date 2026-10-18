@@ -22,6 +22,8 @@ PACKAGES = (
     "fedora-repos",
     "systemd",
     "systemd-pam",
+    # Provides /etc/pam.d/login for machinectl shell sessions.
+    "util-linux",
     "dnf5",
     "passwd",
     "openssh-clients",
