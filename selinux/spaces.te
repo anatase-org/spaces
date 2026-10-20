@@ -242,6 +242,8 @@ optional_policy(`
 # access to user-selected host-home paths. Recursive copies also preserve or
 # reset directory contexts within the guest's persistent tree.
 allow spaces_container_t spaces_file_t:dir { relabelfrom relabelto };
+# cp -a also preserves contexts on symlinks within the guest tree.
+allow spaces_container_t spaces_file_t:lnk_file { relabelfrom relabelto };
 allow spaces_container_t spaces_file_t:dir_file_class_set map;
 manage_dirs_pattern(spaces_container_t, spaces_file_t, spaces_file_t)
 manage_files_pattern(spaces_container_t, spaces_file_t, spaces_file_t)
@@ -264,6 +266,7 @@ allow spaces_container_t spaces_file_t:filesystem { mount remount unmount };
 # guest policy types instead of spaces_file_t. Permit rebuilding and replacing
 # that store without granting access to the host's SELinux policy controls.
 seutil_read_file_contexts(spaces_container_t)
+seutil_manage_config(spaces_container_t)
 gen_require(`
 	type file_context_t;
 	type selinux_config_t;
@@ -272,6 +275,7 @@ gen_require(`
 manage_dirs_pattern(spaces_container_t, semanage_store_t, semanage_store_t)
 manage_files_pattern(spaces_container_t, semanage_store_t, semanage_store_t)
 allow spaces_container_t semanage_store_t:{ dir file } relabelto;
+allow spaces_container_t selinux_config_t:dir relabelto;
 allow spaces_container_t { file_context_t selinux_config_t }:file {
 	relabelto unlink
 };
@@ -328,6 +332,9 @@ dev_remount_sysfs_fs(spaces_container_t)
 dev_unmount_sysfs_fs(spaces_container_t)
 fs_remount_tmpfs(spaces_container_t)
 fs_unmount_tmpfs(spaces_container_t)
+# Bubblewrap recursively remounts its sandbox read-only, including nsfs
+# namespace handles inherited from the guest's mount tree.
+fs_remount_nsfs(spaces_container_t)
 kernel_mount_proc(spaces_container_t)
 kernel_unmount_proc(spaces_container_t)
 kernel_mounton_all_proc(spaces_container_t)
@@ -462,6 +469,12 @@ allow spaces_container_t proc_t:filesystem remount;
 # These sysctls are host-global rather than namespaced.  Guest systemd may
 # probe them, but a space must not change them.
 dontaudit spaces_container_t proc_security_t:file write;
+# Guest boot units may probe these host-global filesystems. Keep the mounts
+# denied without logging expected failures from a containerized systemd.
+gen_require(`
+	type configfs_t, debugfs_t, tracefs_t;
+')
+dontaudit spaces_container_t { configfs_t debugfs_t tracefs_t }:filesystem mount;
 # Permit guest NFS services to mount their namespaced RPC pipe filesystem.
 allow spaces_container_t rpc_pipefs_t:filesystem mount;
 allow spaces_container_t sysctl_t:file mounton;
@@ -583,13 +596,13 @@ kernel_io_uring_use(spaces_container_t)
 userdom_manage_user_home_content(spaces_container_t)
 userdom_exec_user_home_content_files(spaces_container_t)
 
-# Nested container runtimes bind selected host-home directories into their
-# mount namespaces. The bind retains user_home_t, and setting its mount
-# propagation requires mounton on that directory.
+# Nested container runtimes bind selected host-home files and directories
+# into their mount namespaces. The destination retains user_home_t and
+# requires mounton, including file placeholders in rootless overlay storage.
 gen_require(`
 	type user_home_t;
 ')
-allow spaces_container_t user_home_t:dir mounton;
+allow spaces_container_t user_home_t:{ dir file } mounton;
 
 # Copies and moves between host-home and space directories may preserve or
 # reset file contexts, including directories created by package installers.
