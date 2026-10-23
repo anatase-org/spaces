@@ -612,7 +612,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             distribution_description="Choose optional software.",
             distribution_options=[
                 ("yay — AUR helper (built from community source)", "yay"),
-                ("Shelly — graphical package manager", "shelly"),
+                ("Fetch top Arch mirrors and rank them", "rankmirrors"),
             ],
             distribution_value=None,
             distribution_multiple=True,

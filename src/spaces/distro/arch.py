@@ -41,11 +41,9 @@ PACKAGES = (
 AUR_BUILD_PACKAGES = ("base-devel",)
 AUR_REPOSITORIES = {
     "yay": "https://aur.archlinux.org/yay.git",
-    "shelly": "https://aur.archlinux.org/shelly.git",
 }
 AUR_PACKAGE_NAMES = {
     "yay": "yay",
-    "shelly": "Shelly",
 }
 BUILDER = "spaces-build"
 SYSTEM_AUTH = Path("etc/pam.d/system-auth")
@@ -62,7 +60,6 @@ AUR_SUDOERS_CONTENT = (
 OPTIONS = {
     "rankmirrors": _("Fetch top Arch mirrors and rank them"),
     "yay": _("yay — AUR helper (built from community source)"),
-    "shelly": _("Shelly — graphical package manager"),
 }
 RANKMIRRORS = Path("/usr/lib/spaces/rankmirrors")
 MIRRORLIST = Path("/etc/pacman.d/mirrorlist")
@@ -317,7 +314,7 @@ class ArchDistribution(Distribution):
     ) -> list[str]:
         self.validate(metadata)
         packages = list(PACKAGES)
-        if {"yay", "shelly"} & set(metadata["options"]):
+        if "yay" in metadata["options"]:
             packages.extend(AUR_BUILD_PACKAGES)
         packages.extend(additional_packages)
         return ["pacstrap", "-K", str(rootfs), *packages]

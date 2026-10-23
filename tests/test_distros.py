@@ -142,14 +142,13 @@ class DistributionDriverTests(unittest.TestCase):
             [
                 ("Fetch top Arch mirrors and rank them", "rankmirrors"),
                 ("yay — AUR helper (built from community source)", "yay"),
-                ("Shelly — graphical package manager", "shelly"),
             ],
         )
         self.assertEqual(driver.default_options, ("rankmirrors", "yay"))
         self.assertEqual(driver.selected_options(None), ["rankmirrors", "yay"])
         self.assertEqual(
-            driver.metadata(["yay", "shelly"]),
-            {"id": "arch", "options": ["yay", "shelly"]},
+            driver.metadata(["rankmirrors", "yay"]),
+            {"id": "arch", "options": ["rankmirrors", "yay"]},
         )
         self.assertEqual(driver.metadata([]), {"id": "arch", "options": []})
         self.assertEqual(
@@ -169,16 +168,12 @@ class DistributionDriverTests(unittest.TestCase):
         yay = arch.DISTRIBUTION.command(
             {"id": "arch", "options": ["yay"]}, Path("/rootfs")
         )
-        shelly = arch.DISTRIBUTION.command(
-            {"id": "arch", "options": ["shelly"]}, Path("/rootfs")
-        )
         opted_out = arch.DISTRIBUTION.command(
             {"id": "arch", "options": []},
             Path("/rootfs"),
         )
         self.assertEqual(yay[:3], ["pacstrap", "-K", "/rootfs"])
         self.assertTrue(set(arch.AUR_BUILD_PACKAGES).issubset(yay))
-        self.assertTrue(set(arch.AUR_BUILD_PACKAGES).issubset(shelly))
         self.assertTrue(set(arch.AUR_BUILD_PACKAGES).isdisjoint(opted_out))
         for package in (
             "base",
@@ -444,7 +439,7 @@ class DistributionDriverTests(unittest.TestCase):
         install.assert_not_called()
 
     def test_arch_ranking_precedes_bootstrap_and_aur_operations(self) -> None:
-        for options in (["rankmirrors"], ["yay", "rankmirrors", "shelly"]):
+        for options in (["rankmirrors"], ["yay", "rankmirrors"]):
             with self.subTest(options=options), tempfile.TemporaryDirectory() as temporary:
                 mirrorlist = Path(temporary) / "mirrorlist"
                 mirrorlist.write_text("original mirrors\n")
@@ -530,14 +525,14 @@ class DistributionDriverTests(unittest.TestCase):
                     ))
                     install.assert_not_called()
 
-    def test_arch_bootstrap_builds_each_selected_aur_package(self) -> None:
+    def test_arch_bootstrap_builds_yay_when_selected(self) -> None:
         with (
             mock.patch.object(arch.subprocess, "run"),
             mock.patch.object(arch, "_install_aur_package") as install,
             mock.patch.object(arch, "mounted_rootfs") as mounted_rootfs,
         ):
             arch.DISTRIBUTION.bootstrap(
-                {"id": "arch", "options": ["yay", "shelly"]},
+                {"id": "arch", "options": ["yay"]},
                 Path("/rootfs"),
             )
         self.assertEqual(
@@ -548,30 +543,9 @@ class DistributionDriverTests(unittest.TestCase):
                     "yay",
                     arch.AUR_REPOSITORIES["yay"],
                 ),
-                mock.call(
-                    Path("/rootfs"),
-                    "shelly",
-                    arch.AUR_REPOSITORIES["shelly"],
-                ),
             ],
         )
         mounted_rootfs.assert_called_once_with(Path("/rootfs"), "Arch")
-
-    def test_shelly_does_not_depend_on_yay_being_selected(self) -> None:
-        with (
-            mock.patch.object(arch.subprocess, "run"),
-            mock.patch.object(arch, "_install_aur_package") as install,
-            mock.patch.object(arch, "mounted_rootfs"),
-        ):
-            arch.DISTRIBUTION.bootstrap(
-                {"id": "arch", "options": ["shelly"]},
-                Path("/rootfs"),
-            )
-        install.assert_called_once_with(
-            Path("/rootfs"),
-            "shelly",
-            arch.AUR_REPOSITORIES["shelly"],
-        )
 
     def test_aur_packages_are_built_unprivileged_and_installed_by_name(
         self,
@@ -596,25 +570,25 @@ class DistributionDriverTests(unittest.TestCase):
                         rootfs / "home" / arch.BUILDER / "packages"
                     )
                     package_directory.mkdir()
-                    (package_directory / "shelly-1.0-1-x86_64.pkg.tar.zst").touch()
+                    (package_directory / "yay-1.0-1-x86_64.pkg.tar.zst").touch()
                     (
                         package_directory
-                        / "shelly-flatpak-backend-1.0-1-x86_64.pkg.tar.zst"
+                        / "yay-debug-1.0-1-x86_64.pkg.tar.zst"
                     ).touch()
                 output = None
                 if stdout == subprocess.PIPE:
                     output = (
-                        "shelly-flatpak-backend\n"
-                        if "shelly-flatpak-backend-" in command[-1]
-                        else "shelly\n"
+                        "yay-debug\n"
+                        if "yay-debug-" in command[-1]
+                        else "yay\n"
                     )
                 return subprocess.CompletedProcess(command, 0, stdout=output)
 
             with mock.patch.object(arch.subprocess, "run", side_effect=run):
                 arch._install_aur_package(
                     rootfs,
-                    "shelly",
-                    arch.AUR_REPOSITORIES["shelly"],
+                    "yay",
+                    arch.AUR_REPOSITORIES["yay"],
                 )
 
             self.assertFalse((rootfs / arch.AUR_SUDOERS_DROP_IN).exists())
@@ -631,7 +605,7 @@ class DistributionDriverTests(unittest.TestCase):
         self.assertIn("TMPDIR=/home/spaces-build/.tmp", commands[3])
         self.assertIn("PKGDEST=/home/spaces-build/packages", commands[3])
         self.assertIn("/usr/bin/git", commands[3])
-        self.assertIn(arch.AUR_REPOSITORIES["shelly"], commands[3])
+        self.assertIn(arch.AUR_REPOSITORIES["yay"], commands[3])
         self.assertEqual(commands[4][0:3], ["arch-chroot", "-u", arch.BUILDER])
         self.assertIn("HOME=/home/spaces-build", commands[4])
         self.assertIn("/usr/bin/makepkg", commands[4])
@@ -639,8 +613,8 @@ class DistributionDriverTests(unittest.TestCase):
         self.assertIn("--rmdeps", commands[4])
         self.assertNotIn("/usr/bin/runuser", commands[3])
         install = next(command for command in commands if "-U" in command)
-        self.assertIn("shelly-1.0-1-x86_64.pkg.tar.zst", install[-1])
-        self.assertNotIn("flatpak-backend", install[-1])
+        self.assertIn("yay-1.0-1-x86_64.pkg.tar.zst", install[-1])
+        self.assertNotIn("yay-debug", install[-1])
         self.assertEqual(commands[-1][-2:], ["/usr/bin/userdel", arch.BUILDER])
 
     def test_aur_builder_is_removed_after_failure(self) -> None:
