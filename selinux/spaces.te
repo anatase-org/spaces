@@ -49,6 +49,9 @@ allow spaces_container_t spaces_file_t:file entrypoint;
 
 virt_sandbox_net_domain(spaces_container_t)
 
+# ThroneCore queries socket diagnostics through NETLINK_SOCK_DIAG.
+allow spaces_container_t self:netlink_tcpdiag_socket nlmsg_read;
+
 # Network-admin spaces are capability-gated at launch.  Permit the SELinux
 # socket classes required to configure packet filters and TUN interfaces.
 allow spaces_container_t self:netlink_netfilter_socket create_socket_perms;
