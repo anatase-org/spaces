@@ -502,3 +502,130 @@ root and remove the interface. Do not assign a default route or a `~.` routing
 domain during this test. Finally validate packaged Ubuntu startup and NordVPN
 connectivity under the installed Spaces SELinux domain. Updating that policy is
 a user action; never run `sync.sh --selinux` as the agent.
+
+## scu computer use
+
+[`scu mcp`](../docs/scu.md) runs inside the guest, through the existing portal
+and accessibility forwarding. Spaces changes for this executable are limited
+to its native bundle and command exposure. There is no added status mount or
+host computer-control service. The accessibility socket gates every desktop
+operation, including each batch step. An absent socket returns
+`accessibility_permission_required` with `spaces configure <space>`; an
+unusable forwarded registry reports `accessibility_unavailable`. Because there
+is no separate permission record, absence cannot distinguish a disabled tier
+from integration that has not started. `health_report` records that distinction
+as `forwarded` versus actual registry `ready` and reports missing libraries.
+
+Build and run the isolated tests from a Fedora development Space:
+
+```sh
+sudo dnf install gcc pkgconf-pkg-config glib2-devel at-spi2-core-devel \
+  libei-devel pipewire-devel libxkbcommon-devel gdk-pixbuf2-devel \
+  dbus-daemon python3-gobject
+make -C native check-guest-abi
+PYTHONPATH=src venv/bin/python -m unittest tests.test_scu -v
+```
+
+`test_scu.py` compiles the actual executable and uses private D-Bus endpoints.
+`scu_atspi_fixture.py` exposes a registry and an application on separate
+connections. State is written independently by the fixture, so successful tool
+submission alone cannot pass the action checks. Coverage includes semantic
+insertion versus replacement, Unicode, password suppression, token expiry,
+whole-batch validation before effects, first-failure stopping, recovery after
+bus replacement, and revocation with a running MCP process.
+`scu_portal_fixture.py` checks permission rejection before any portal call,
+consent refusal, and closing an outstanding request on cancellation. Portal
+fixtures run with graphical/session variables absent, and with deliberately
+stale bus/runtime variables, to verify direct guest runtime discovery. Invalid,
+oversized and Unicode JSON, both MCP eras, missing optional libraries and clean
+EOF shutdown are also covered.
+
+`scu_backend_fixture.c` includes the production translation unit and drives a
+real libei client against a private libeis peer. It checks delivered pointer,
+scroll, drag and keyboard events and release of held input during cancellation.
+Separate cases feed CPU video buffers through the real frame conversion and PNG
+encoding code, validate truncation rejection, monitor pairing, negative origins,
+mixed scaling, resized-image coordinates, stale captures, ambiguous mappings,
+and private rotating restore-token files. These buffer/geometry cases are
+isolated fixtures, not an end-to-end multi-monitor PipeWire compositor test.
+
+For live testing on `win5`, deploy without modifying SELinux policy:
+
+```sh
+./sync.sh win5
+ssh win5f sudo dnf install at-spi2-core libei pipewire-libs libxkbcommon gdk-pixbuf2
+```
+
+Enable accessibility on the host with `sudo spaces configure fedora`, then
+restart the Space. A configuration error must leave the setting user-controlled.
+Direct machinectl/systemd-run commands must always use sudo. Keep SELinux
+enforcing; inspect AVCs with `ssh win5 sudo ausearch -m AVC,USER_AVC -ts recent -i`.
+Never use `sync.sh --selinux`; deployment of policy is user-operated.
+
+From the host graphical session, start one fixture at a time:
+
+```sh
+python3 tests/manual_atspi_fixture.py gtk scu-live-gtk /tmp/scu-gtk-state.json --computer-use
+python3 tests/manual_atspi_fixture.py qt scu-live-qt /tmp/scu-qt-state.json --computer-use
+```
+
+GTK needs PyGObject/GTK 3 and Qt needs PySide6. For a Qt fixture that otherwise
+omits its accessibility tree, launch that fixture with
+`QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1`. The test does not change host accessibility
+settings. Copy `tests/manual_scu_probe.py` into the guest if the checkout is not
+shared, then run it there:
+
+```sh
+python3 tests/manual_scu_probe.py scu-live-gtk --artifacts /tmp/scu-gtk --capture
+```
+
+Inspect the returned PNG, then repeat with the entry and scroll/drag surface
+centers measured in that image:
+
+```sh
+python3 tests/manual_scu_probe.py scu-live-gtk --artifacts /tmp/scu-gtk-actions \
+  --capture --visual-actions --entry-point 639 290 --surface-point 639 420
+```
+
+Coordinates above are the recorded GTK fixture positions on win5, not portable
+constants. The Qt fixture used entry `639 288`, surface `639 406`. Update these
+from a fresh image if the window moves. Wayland AT-SPI frames can be local to a
+window; never use them as global screenshot coordinates. If capture is black,
+check whether the desktop is locked. A reported `unverifiable` action is not
+proof of delivery.
+
+Read the **host** state file independently after each run. Expect a button count
+increment, checkbox toggle, text exactly `Visual Unicode 世界 scu-live-gtk!`
+(or `scu-live-qt!`), and positive `scrolls`/`drags`. Semantic-only runs write
+`Héllo 世界 <token>`. Screenshots are explicit observation calls; batches do not
+capture automatically. Clipboard fallback replaces regular clipboard text and
+uses Ctrl+V; Shift+Insert can address PRIMARY on Linux.
+
+For recovery, hold one MCP process open, capture, restart the host's
+`plasma-xdg-desktop-portal-kde.service`, and make another observation. It should
+report `visual_session_closed`. A subsequent request may restore a fresh
+session and capture; no interrupted action may replay. For revocation, downgrade
+the Space, apply the existing restart flow, and launch a fresh client. It must
+return the configuration instruction without a consent prompt. Restore the
+original tier after the test. The isolated socket-replacement tests additionally
+exercise revocation while the MCP transport remains open.
+
+Live results on 2026-10-31: Fedora 44 guest on win5's KDE/Wayland host, SELinux
+enforcing. Both GTK and Qt fixtures confirmed semantic button/checkbox actions,
+Unicode insertion/replacement, Ctrl+A, Unicode clipboard paste plus mapped-key
+insertion, PNG monitor observation, scrolling and dragging through independent
+JSON state. The monitor was 1920x1080 at 1.65 scale, captured at 1280x720; EIS
+coordinate conversion delivered to the correct widgets. Restarting the portal
+invalidated the session and a fresh request restored capture. AVC inspection
+reported no matches. Only one monitor was granted on this host, so live
+multi-monitor/hotplug acceptance remains unverified. Automated geometry tests
+cover mixed scaling and negative origins; they do not replace that live test.
+
+The affected configuration/TUI, authentication, launch, session, accessibility,
+native-ABI and packaging regression run completed with 256 tests, 7 explicit
+skips. The scu suite completed with 12 tests, including a real EIS peer. Native
+build/GLIBC <= 2.17 checks and the ordinary RPM sync/install passed. A freshly
+started client after a live downgrade to `basic` returned the correct
+`spaces configure fedora` instruction; accessibility was restored afterward.
+Configuration hints use `spaces configure <space>`; scu does not discover or
+publish the Space name. Consent tokens are scoped by guest machine ID and UID.

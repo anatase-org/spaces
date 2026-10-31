@@ -2632,6 +2632,14 @@ def launch(space_name: str) -> int:
                 )
         auth.validate_native_runtime(rootfs)
         authentication_binds = (auth.native_bind_argument(),)
+        # The executable lives in the read-only injected bundle; expose its
+        # stable command name without relying on shell-specific PATH setup.
+        scu_link = rootfs / "usr/local/bin/scu"
+        if not scu_link.parent.resolve().is_relative_to(rootfs.resolve()):
+            raise core.SpacesError(_("Unsafe guest executable directory."))
+        scu_link.parent.mkdir(parents=True, exist_ok=True)
+        if not scu_link.exists() and not scu_link.is_symlink():
+            scu_link.symlink_to("/run/spaces-host/bin/scu")
         system_bridge = system_bus.SystemBusService(space_name, network)
         system_bridge.start()
         authentication_binds += system_bridge.bind_arguments

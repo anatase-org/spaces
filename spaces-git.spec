@@ -10,7 +10,7 @@ Version:        %{gitversion}
 Release:        1%{?dist}
 Summary:        Spaces. Develop on the distribution of your choice, securely.
 
-License:        AGPL-3.0-or-later AND GPL-3.0-or-later
+License:        AGPL-3.0-or-later AND GPL-3.0-or-later AND MIT
 URL:            https://github.com/anatase-org/spaces
 Source:         %{url}/archive/%{commit}/%{name}-%{commit}.tar.gz
 
@@ -21,6 +21,11 @@ BuildRequires:  binutils
 BuildRequires:  container-selinux
 BuildRequires:  glib2-devel
 BuildRequires:  pkgconfig(gio-unix-2.0)
+BuildRequires:  pkgconfig(atspi-2)
+BuildRequires:  pkgconfig(libpipewire-0.3)
+BuildRequires:  pkgconfig(libei-1.0) >= 1.6
+BuildRequires:  pkgconfig(xkbcommon)
+BuildRequires:  pkgconfig(gdk-pixbuf-2.0)
 BuildRequires:  pam-devel
 BuildRequires:  selinux-policy-devel
 BuildRequires:  systemd-rpm-macros
@@ -166,6 +171,8 @@ fi
 /usr/lib/spaces/guest/spaces-open
 /usr/lib/spaces/guest/spaces-secret-helper
 /usr/lib/spaces/guest/spaces
+/usr/lib/spaces/guest/scu
+%license %{_datadir}/licenses/spaces/yyjson.LICENSE
 %{_datadir}/spaces/system-bridge
 %dir %{_datadir}/spaces/portal
 %{_datadir}/spaces/portal/*

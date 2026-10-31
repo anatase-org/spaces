@@ -11,4 +11,8 @@ recursive-include data/portal *
 recursive-include data/applications *.desktop
 recursive-include data/icons *.png
 recursive-include native Makefile *.c *.h *.py
-recursive-include tests *.py
+recursive-include tests *.py *.c
+
+include native/vendor/yyjson.LICENSE
+
+recursive-include docs *.md

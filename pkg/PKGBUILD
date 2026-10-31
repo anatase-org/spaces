@@ -9,7 +9,7 @@ pkgrel=1
 pkgdesc="Develop on the distribution of your choice, securely"
 arch=('x86_64' 'aarch64')
 url="https://github.com/anatase-org/spaces"
-license=('AGPL-3.0-or-later' 'GPL-3.0-or-later')
+license=('AGPL-3.0-or-later' 'GPL-3.0-or-later' 'MIT')
 depends=(
   'bash'
   'curl'
@@ -38,6 +38,11 @@ makedepends=(
   'gcc'
   'binutils'
   'pkgconf'
+  'at-spi2-core'
+  'pipewire'
+  'libei>=1.6'
+  'libxkbcommon'
+  'gdk-pixbuf2'
 )
 source=("https://gitlab.archlinux.org/pacman/pacman-contrib/-/raw/${_rankmirrors_commit}/src/rankmirrors.sh.in")
 sha256sums=('b67902d26a8b193cc096421c8d780f795a253d0742cd31d592254059af15cc27')

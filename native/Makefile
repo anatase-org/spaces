@@ -12,7 +12,16 @@ TARGET_ARCH ?= $(shell uname -m)
 .PHONY: all check-guest-abi clean install
 
 all: pam_spaces.so spaces-pam spaces spaces-portal \
-	spaces-secret-helper spaces-open spaces-broker spaces-system-broker
+	spaces-secret-helper spaces-open spaces-broker spaces-system-broker scu
+
+# Desktop libraries supply headers at build time and are dlopen'd in the guest.
+# Only the existing GLib/GIO baseline is a required runtime dependency.
+scu: scu.c vendor/yyjson.c vendor/yyjson.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DYYJSON_READER_DEPTH_LIMIT=64 \
+		$$(pkg-config --cflags gio-unix-2.0 atspi-2 libpipewire-0.3 libei-1.0 xkbcommon gdk-pixbuf-2.0) \
+		-o $@ scu.c vendor/yyjson.c $(LDFLAGS) \
+		-Wl,--wrap=__libc_start_main -Wl,--wrap=dlopen -Wl,--wrap=dlsym \
+		$$(pkg-config --libs gio-unix-2.0) -ldl
 
 pam_spaces.so: pam_spaces.c protocol.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -shared -o $@ pam_spaces.c \
@@ -64,10 +73,12 @@ check-guest-abi: all
 	$(PYTHON) check_guest_abi.py --target $(TARGET_ARCH) \
 		--glibc-max 2.17 \
 		--guest pam_spaces.so spaces spaces-portal \
-			spaces-secret-helper spaces-open spaces-system-broker \
+			spaces-secret-helper spaces-open spaces-system-broker scu \
 		--host spaces-pam spaces-broker
 
 install: check-guest-abi
+	install -Dm755 scu $(DESTDIR)$(GUESTDIR)/scu
+	install -Dm644 vendor/yyjson.LICENSE $(DESTDIR)$(PREFIX)/share/licenses/spaces/yyjson.LICENSE
 	install -Dm755 spaces-system-broker $(DESTDIR)$(GUESTDIR)/spaces-system-broker
 	install -Dm755 spaces-system-broker $(DESTDIR)$(LIBEXECDIR)/spaces-system-broker
 	install -Dm755 pam_spaces.so \
@@ -87,4 +98,4 @@ install: check-guest-abi
 
 clean:
 	rm -f pam_spaces.so spaces-pam spaces \
-		spaces-portal spaces-secret-helper spaces-open spaces-broker spaces-system-broker
+		spaces-portal spaces-secret-helper spaces-open spaces-broker spaces-system-broker scu

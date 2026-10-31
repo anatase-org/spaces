@@ -7,6 +7,11 @@ RUN dnf -y install \
         binutils \
         container-selinux \
         glib2-devel \
+        at-spi2-core-devel \
+        pipewire-devel \
+        libei-devel \
+        libxkbcommon-devel \
+        gdk-pixbuf2-devel \
         pam-devel \
         selinux-policy-devel \
         systemd-rpm-macros \
