@@ -71,7 +71,7 @@ class AccessibilityPermissionTests(unittest.TestCase):
         identity = core.Identity(1000, 1000, Path("/home/user"))
         for preset, expected in (
             ("basic", "basic"),
-            ("develop", "accessibility"),
+            ("develop", "basic"),
             ("custom", "basic"),
         ):
             info = core.create_info(

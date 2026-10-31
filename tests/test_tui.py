@@ -60,7 +60,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(app._result()["desktop"], level)
             await pilot.click("#preset-develop")
             await pilot.pause()
-            self.assertEqual(app._result()["desktop"], "accessibility")
+            self.assertEqual(app._result()["desktop"], "basic")
 
     def test_permission_form_uses_textual_4_theme_variables(self) -> None:
         self.assertNotIn("$ansi-foreground", PermissionForm.CSS)

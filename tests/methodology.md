@@ -66,9 +66,10 @@ and guest ABI checks passed too.
 
 Desktop permissions have three levels: `disabled`, `basic`, and
 `accessibility`. The wizard calls the last level **Plus Accessibility and Agent
-computer use**. Basic/application presets use basic integration; Develop
-presets use accessibility, including existing Develop spaces on their next
-start. Custom legacy boolean grants keep their meaning (`false` is disabled,
+computer use**. Both Basic/application and Develop presets use basic
+integration, including existing Develop spaces on their next start.
+Accessibility and Agent computer use require an explicit Customise selection.
+Custom legacy boolean grants keep their meaning (`false` is disabled,
 `true` is basic). Configuration saves write the canonical strings.
 
 The accessibility tier forwards the selected host user's dedicated AT-SPI

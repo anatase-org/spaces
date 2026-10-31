@@ -73,7 +73,7 @@ PERMISSION_PRESETS: dict[str, dict[str, dict[str, Any]]] = {
                 ".ssh/config",
             ],
             "administrator": True,
-            "desktop": "accessibility",
+            "desktop": "basic",
             "credential_agents": True,
             "mounted_drives": True,
         },
