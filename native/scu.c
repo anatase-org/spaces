@@ -4079,15 +4079,40 @@ static void stop_signal(int sig)
     g_atomic_int_set(&scu.stopping, 1);
 }
 
+/* Keep enrollment discoverable without starting MCP or touching the desktop. */
+static void print_help(FILE *stream)
+{
+    fputs("scu - Spaces computer use\n"
+          "\n"
+          "Usage: scu mcp       Serve MCP over stdin/stdout (no listening port).\n"
+          "       scu --help    Show this help.\n"
+          "\n"
+          "Enroll with your agent from inside the Space, as the agent's user:\n"
+          "  Codex:\n"
+          "    codex mcp add scu -- scu mcp\n"
+          "  Claude Code:\n"
+          "    claude mcp add --transport stdio --scope user scu -- scu mcp\n"
+          "  Other MCP clients: command \"scu\", arguments [\"mcp\"], transport stdio.\n"
+          "\n"
+          "Reload the agent's MCP connections after enrollment.\n"
+          "Host permission: run `sudo spaces configure <space>` on the host and\n"
+          "enable Accessibility and Agent computer use.\n",
+        stream);
+}
+
 int main(int argc, char **argv)
 {
+    if (argc == 1 || (argc == 2 &&
+                        (!strcmp(argv[1], "--help") || !strcmp(argv[1], "-h")))) {
+        print_help(stdout);
+        return 0;
+    }
     if (argc == 3 && !strcmp(argv[1], "--atspi-worker")) {
         return run_atspi_worker((guint)g_ascii_strtoull(argv[2], NULL, 10));
     }
     if (argc != 2 || strcmp(argv[1], "mcp")) {
-        fprintf(argc == 2 && !strcmp(argv[1], "--help") ? stdout : stderr,
-            "Usage: scu mcp\nSpaces computer use over MCP stdio.\n");
-        return argc == 2 && !strcmp(argv[1], "--help") ? 0 : 2;
+        print_help(stderr);
+        return 2;
     }
     signal(SIGPIPE, SIG_IGN);
     signal(SIGINT, stop_signal);
