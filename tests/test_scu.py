@@ -97,6 +97,9 @@ class ScuTests(unittest.TestCase):
         tools = client.call("tools/list", {})["result"]["tools"]
         self.assertEqual(len(tools), 17)
         self.assertIn("run_steps", {tool["name"] for tool in tools})
+        batch_schema = next(tool["inputSchema"] for tool in tools if tool["name"] == "run_steps")
+        self.assertIn("anyOf", batch_schema["properties"]["steps"]["items"])
+        self.assertIn("anyOf", batch_schema["properties"]["observe"])
         health = client.tool("health_report")
         self.assertFalse(health["isError"])
         self.assertFalse(health["structuredContent"]["ready"])
@@ -122,9 +125,13 @@ class ScuTests(unittest.TestCase):
         self.assertIn("2026-07-28", result["supportedVersions"])
         self.assertIn("tools", client.call("tools/list", {})["result"])
         self.assertIn("io.modelcontextprotocol/serverInfo", result["_meta"])
+        self.assertIn("without replaying", result["instructions"])
         unsupported = client.call("ping", {"_meta": {**metadata, "io.modelcontextprotocol/protocolVersion": "1900-01-01"}})
         self.assertEqual(unsupported["error"]["data"]["requested"], "1900-01-01")
         self.assertIn("tools", client.call("tools/list", {"_meta": metadata})["result"])
+        legacy = client.call("initialize", {"protocolVersion": "2025-06-18"})["result"]
+        self.assertEqual(legacy["protocolVersion"], "2025-06-18")
+        self.assertEqual(legacy["instructions"], result["instructions"])
 
     def test_malformed_messages_do_not_corrupt_stdio(self):
         client = self.client()
@@ -137,7 +144,7 @@ class ScuTests(unittest.TestCase):
     def test_backend_invariants(self):
         for case in ("mapping", "frame", "png", "tokens", "input"):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as state:
-                result = subprocess.run([str(self.backend), case], timeout=10,
+                result = subprocess.run([str(self.backend), case], timeout=20,
                     env={**self.environment, "XDG_STATE_HOME": state}, capture_output=True)
                 self.assertEqual(result.returncode, 0, result.stderr.decode())
 
@@ -261,6 +268,13 @@ class ScuTests(unittest.TestCase):
         self.assertTrue(result["isError"])
         self.assertEqual(result["structuredContent"]["code"], "consent_cancelled")
         self.assertEqual(json.loads(state.read_text())["created"], 1)
+        refused = client.tool("run_steps", steps=[{"press_key": {"key": "a"}},
+                              {"press_key": {"key": "b"}}])
+        self.assertTrue(refused["isError"])
+        self.assertEqual(refused["structuredContent"]["completed"], 0)
+        self.assertEqual(refused["structuredContent"]["skipped"], 1)
+        self.assertEqual(refused["structuredContent"]["failed"]["code"], "consent_cancelled")
+        self.assertEqual(json.loads(state.read_text())["created"], 2)
 
     def test_cancellation_and_eof_close_pending_portal(self):
         state = self.start_portal("hold")
@@ -301,16 +315,57 @@ class ScuTests(unittest.TestCase):
             {"press_key": {"key": "a", "bad": True}}])
         self.assertTrue(bad["isError"])
         self.assertEqual(json.loads(state.read_text())["clicks"], 0)
+        unsupported = client.tool("run_steps", steps=[{"click": {"element_token": button}},
+            {"press_key": {"key": "a", "delivery_mode": "background"}}])
+        self.assertTrue(unsupported["isError"])
+        self.assertEqual(json.loads(state.read_text())["clicks"], 0)
+        for observation in (True, {"kind": "desktop", "bad": True},
+                            {"kind": "window", "include_screenshot": True},
+                            {"kind": "unknown"}):
+            invalid = client.tool("run_steps", steps=[{"click": {"element_token": button}}],
+                                  observe=observation)
+            self.assertTrue(invalid["isError"], invalid)
+            self.assertEqual(json.loads(state.read_text())["clicks"], 0)
+        # A desktop default must not replace semantic token targeting or open a portal.
+        semantic = client.tool("run_steps", target={"kind": "desktop", "display_id": "display-1"},
+                              steps=[{"click": {"element_token": button}}])
+        self.assertFalse(semantic["isError"], semantic)
+        self.assertEqual(semantic["structuredContent"]["completed"], 1)
+        self.assertNotIn("observation", semantic["structuredContent"])
+        self.assertNotIn("steps", semantic["structuredContent"])
+        self.assertEqual([item["type"] for item in semantic["content"]], ["text"])
         result = client.tool("run_steps", steps=[{"click": {"element_token": button}},
             {"set_value": {"element_token": entry, "value": "Héllo 世界"}},
             {"type_text": {"element_token": entry, "text": " ✨"}}], observe=window)
         self.assertFalse(result["isError"], result)
-        self.assertEqual(json.loads(state.read_text()), {"clicks": 1, "text": "Héllo 世界 ✨", "password_reads": 0})
+        self.assertEqual(json.loads(state.read_text()), {"clicks": 2, "text": "Héllo 世界 ✨", "password_reads": 0})
+        self.assertEqual(result["structuredContent"]["completed"], 3)
         stale = client.tool("click", element_token=button)
         self.assertEqual(stale["structuredContent"]["code"], "stale_element")
         failed = client.tool("run_steps", steps=[{"click": {"element_token": "stale"}},
             {"set_value": {"element_token": "stale", "value": "bad"}}])
-        self.assertEqual([row["status"] for row in failed["structuredContent"]["steps"]], ["failed", "skipped"])
+        self.assertTrue(failed["isError"])
+        self.assertEqual(failed["structuredContent"]["completed"], 0)
+        self.assertEqual(failed["structuredContent"]["skipped"], 1)
+        self.assertEqual(failed["structuredContent"]["failed"]["index"], 0)
+        self.assertEqual(failed["structuredContent"]["failed"]["tool"], "click")
+        # Preserve completed actions even when explicit final observation fails.
+        fresh = client.tool("get_window_state", **window, tree_format="elements")["structuredContent"]
+        token = next(row["element_token"] for row in fresh["elements"] if row["label"] == "Fixture button")
+        observed = client.tool("run_steps", steps=[{"click": {"element_token": token}}],
+                               observe={"kind": "window", "pid": window["pid"], "window_id": -1})
+        self.assertTrue(observed["isError"])
+        self.assertEqual(observed["structuredContent"]["completed"], 1)
+        self.assertEqual(observed["structuredContent"]["skipped"], 0)
+        self.assertIn("observation_error", observed["structuredContent"])
+        self.assertNotIn("failed", observed["structuredContent"])
+        self.assertEqual(json.loads(state.read_text())["clicks"], 3)
+        inherited = client.tool("run_steps", steps=[{"click": {
+            "element_token": token, "target": {"kind": "window", **window}}}],
+            observe={"kind": "window", "tree_format": "elements"})
+        self.assertFalse(inherited["isError"], inherited)
+        self.assertIn("elements", inherited["structuredContent"]["observation"])
+        self.assertEqual(json.loads(state.read_text())["clicks"], 4)
         self.socket_path.unlink()
         self.assertEqual(client.tool("list_windows")["structuredContent"]["code"], "accessibility_permission_required")
 

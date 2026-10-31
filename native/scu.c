@@ -289,7 +289,7 @@ static JsonResult *scu_action(
     result_string(r, "route", route);
     result_string(delivery, "mode", mode);
     result_member(r, "delivery", delivery);
-    result_string(r, "summary", summary);
+    /* Keep routine submissions terse; only readback evidence needs prose. */
     if (confirmed) {
         JsonResult *e = result_array(), *v = result_object();
         result_string(v, "kind", "value_readback");
@@ -1351,6 +1351,11 @@ typedef struct {
     __typeof__(&ei_keymap_get_type) keymap_get_type;
     /* Text capabilities were added in libei 1.6; older libraries still work. */
     __typeof__(&ei_device_text_utf8) device_text_utf8;
+    /* Round trips appeared in 1.4. Older guests retain capture support. */
+    __typeof__(&ei_new_ping) new_ping;
+    __typeof__(&ei_ping) ping;
+    __typeof__(&ei_ping_unref) ping_unref;
+    __typeof__(&ei_event_pong_get_ping) event_pong_get_ping;
 } EiLibrary;
 
 typedef struct {
@@ -1404,6 +1409,8 @@ typedef struct {
     gboolean has_geometry;
     guint capture_width, capture_height;
     guint64 revision, capture_revision;
+    guint64 frame_sequence, capture_frame_sequence, observed_input_sequence;
+    gint64 frame_received;
     char *capture_id;
     gboolean failed;
 } Display;
@@ -1420,7 +1427,11 @@ typedef struct {
     struct ei *input;
     GPtrArray *devices;
     Display displays[MAX_DISPLAYS];
-    guint display_count, emulation_sequence;
+    guint display_count, emulation_sequence, selected_display;
+    guint64 input_sequence;
+    gint64 last_input_time;
+    struct ei_ping *pending_ping; /* Borrowed from the observation wait. */
+    gboolean ping_done;
     struct ei_device *held_device;
     guint held_button;
     struct ei_device *keyboard_device;
@@ -1505,6 +1516,11 @@ static gboolean load_visual_libraries(void)
     LOAD_EI(keymap_get_type);
 #undef LOAD_EI
     *(void **)(&ei_api.device_text_utf8) = dlsym(ei_library, "ei_device_text_utf8");
+    *(void **)(&ei_api.new_ping) = dlsym(ei_library, "ei_new_ping");
+    *(void **)(&ei_api.ping) = dlsym(ei_library, "ei_ping");
+    *(void **)(&ei_api.ping_unref) = dlsym(ei_library, "ei_ping_unref");
+    *(void **)(&ei_api.event_pong_get_ping) =
+        dlsym(ei_library, "ei_event_pong_get_ping");
 #define LOAD_XKB(name) LOAD_SYMBOL(xkb_library, xkb, "xkb_", name)
     LOAD_XKB(context_new);
     LOAD_XKB(context_unref);
@@ -1537,6 +1553,8 @@ static gboolean load_visual_libraries(void)
 static void input_frame(struct ei_device *device)
 {
     ei_api.device_frame(device, (uint64_t)g_get_monotonic_time());
+    visual.input_sequence++;
+    visual.last_input_time = g_get_monotonic_time();
 }
 
 /* Release our own input state only. The compositor also neutralizes devices
@@ -1699,6 +1717,8 @@ static void stream_process(void *data)
         }
         g_clear_pointer(&display->pixels, g_bytes_unref);
         display->pixels = g_bytes_new_take(pixels, (gsize)width * height * 3);
+        display->frame_sequence++;
+        display->frame_received = g_get_monotonic_time();
         pipewire.stream_queue_buffer(display->stream, buffer);
     }
 }
@@ -1756,7 +1776,11 @@ static void poll_visual_events(void)
     while ((event = ei_api.get_event(visual.input)) != NULL) {
         enum ei_event_type type = ei_api.event_get_type(event);
         struct ei_device *raw_device = ei_api.event_get_device(event);
-        if (type == EI_EVENT_SEAT_ADDED) {
+        if (type == EI_EVENT_PONG && ei_api.event_pong_get_ping != NULL) {
+            if (ei_api.event_pong_get_ping(event) == visual.pending_ping) {
+                visual.ping_done = TRUE;
+            }
+        } else if (type == EI_EVENT_SEAT_ADDED) {
             ei_api.seat_bind_capabilities(ei_api.event_get_seat(event),
                 EI_DEVICE_CAP_POINTER_ABSOLUTE, EI_DEVICE_CAP_BUTTON,
                 EI_DEVICE_CAP_SCROLL, EI_DEVICE_CAP_KEYBOARD,
@@ -2362,11 +2386,16 @@ static gboolean visual_step(void)
 
 static Display *selected_display(const char *id)
 {
-    if (id == NULL || strcmp(id, "primary") == 0) {
+    if (id == NULL) {
+        return &visual.displays[visual.selected_display];
+    }
+    if (strcmp(id, "primary") == 0) {
+        visual.selected_display = 0;
         return &visual.displays[0];
     }
     for (guint index = 0; index < visual.display_count; index++) {
         if (strcmp(id, visual.displays[index].id) == 0) {
+            visual.selected_display = index;
             return &visual.displays[index];
         }
     }
@@ -2392,6 +2421,72 @@ static gboolean wait_for_frame(Display *display)
         return FALSE;
     }
     return TRUE;
+}
+
+/* A PipeWire buffer already in memory says nothing about an input just sent.
+ * Synchronize delivery when libei supports it, consume queued frames, and give
+ * the application a short render interval. This is observation, not an action
+ * retry or an assertion that the application has finished its work. */
+static const char *observation_frame(Display *display)
+{
+    if (!wait_for_frame(display)) {
+        return NULL;
+    }
+    if (visual.input_sequence == display->observed_input_sequence) {
+        return display->frame_sequence > display->capture_frame_sequence
+                   ? "new" : "cached";
+    }
+
+    gint64 deadline = g_get_monotonic_time() + G_USEC_PER_SEC;
+    gboolean synchronized = FALSE;
+    struct ei_ping *ping = NULL;
+    if (visual.input != NULL && ei_api.new_ping != NULL && ei_api.ping != NULL &&
+        ei_api.ping_unref != NULL && ei_api.event_pong_get_ping != NULL) {
+        ping = ei_api.new_ping(visual.input);
+    }
+    if (ping != NULL) {
+        visual.pending_ping = ping;
+        visual.ping_done = FALSE;
+        ei_api.ping(ping);
+        gint64 sync_deadline = g_get_monotonic_time() + 250000;
+        while (!visual.ping_done && g_get_monotonic_time() < sync_deadline) {
+            if (!visual_step() || !scu_pause(2)) {
+                visual.pending_ping = NULL;
+                ei_api.ping_unref(ping);
+                return NULL;
+            }
+        }
+        synchronized = visual.ping_done;
+        visual.pending_ping = NULL;
+        ei_api.ping_unref(ping);
+    }
+    if (!visual_step()) {
+        return NULL;
+    }
+    guint64 baseline = display->frame_sequence;
+    gint64 render_after = visual.last_input_time + 100000;
+    while (g_get_monotonic_time() < deadline) {
+        if (!visual_step()) {
+            return NULL;
+        }
+        if (g_get_monotonic_time() >= render_after &&
+            display->frame_sequence > baseline &&
+            display->frame_received >= visual.last_input_time) {
+            break;
+        }
+        if (!scu_pause(5)) {
+            return NULL;
+        }
+    }
+    if (display->pixels == NULL || display->failed) {
+        scu_fail("capture_unavailable", "The display has no readable frame after input.");
+        return NULL;
+    }
+    display->observed_input_sequence = visual.input_sequence;
+    if (!synchronized) {
+        return "unknown";
+    }
+    return display->frame_sequence > baseline ? "new" : "cached";
 }
 
 static JsonResult *display_metadata(Display *selected)
@@ -2425,7 +2520,8 @@ static JsonResult *display_metadata(Display *selected)
 
 static JsonResult *capture_desktop(Display *display, JsonValue *arguments)
 {
-    if (!wait_for_frame(display)) {
+    const char *frame_status = observation_frame(display);
+    if (frame_status == NULL) {
         return NULL;
     }
     GdkPixbuf *image = pixbuf.new_from_bytes(display->pixels, GDK_COLORSPACE_RGB, FALSE,
@@ -2474,11 +2570,13 @@ static JsonResult *capture_desktop(Display *display, JsonValue *arguments)
     display->capture_width = width;
     display->capture_height = height;
     display->capture_revision = display->revision;
+    display->capture_frame_sequence = display->frame_sequence;
     JsonResult *result = display_metadata(display);
     result_string(result, "capture_id", display->capture_id);
     result_string(result, "screenshot_mime_type", "image/png");
     result_integer(result, "screenshot_width", width);
     result_integer(result, "screenshot_height", height);
+    result_string(result, "frame_status", frame_status);
     return result;
 }
 
@@ -3029,10 +3127,13 @@ static JsonResult *type_foreground_text(JsonValue *arguments)
         gboolean ok = paste_text(device, &map, text);
         g_array_unref(strokes);
         free_keyboard_map(&map);
-        return ok ? scu_action("global_input", "foreground", FALSE,
-                        "Clipboard text replaced and Ctrl+V submitted; verify "
-                        "the paste result.")
-                  : NULL;
+        if (!ok) {
+            return NULL;
+        }
+        JsonResult *result = scu_action("global_input", "foreground", FALSE, NULL);
+        result_string(result, "route", "clipboard_paste");
+        result_string(result, "warning", "Clipboard text replaced.");
+        return result;
     }
     free_keyboard_map(&map);
     for (guint index = 0; index < strokes->len; index++) {
@@ -3061,12 +3162,6 @@ static JsonResult *scu_visual(const char *tool, JsonValue *arguments)
     if (!ensure_visual_session() || !visual_step()) {
         return NULL;
     }
-    if (strcmp(tool, "press_key") == 0 || strcmp(tool, "hotkey") == 0) {
-        return keyboard_action(tool, arguments);
-    }
-    if (strcmp(tool, "type_text") == 0) {
-        return type_foreground_text(arguments);
-    }
     const char *id = json_string(arguments, "display_id");
     if (json_member(arguments, "target") != NULL) {
         JsonValue *target = json_member(arguments, "target");
@@ -3080,6 +3175,13 @@ static JsonResult *scu_visual(const char *tool, JsonValue *arguments)
     Display *display = selected_display(id);
     if (display == NULL) {
         return NULL;
+    }
+    /* A keyboard target selects the observation surface, never keyboard focus. */
+    if (strcmp(tool, "press_key") == 0 || strcmp(tool, "hotkey") == 0) {
+        return keyboard_action(tool, arguments);
+    }
+    if (strcmp(tool, "type_text") == 0) {
+        return type_foreground_text(arguments);
     }
     if (strcmp(tool, "get_desktop_state") == 0) {
         return capture_desktop(display, arguments);
@@ -3122,6 +3224,7 @@ typedef struct {
     const char *const *choices;
     double minimum;
     double maximum; /* Zero means no bound in this argument definition. */
+    const char *description;
 } Argument;
 
 typedef enum {
@@ -3236,6 +3339,10 @@ static const Argument batch_arguments[] = {
     {.name = "pid", .type = ARG_INTEGER},
     {.name = "window_id", .type = ARG_INTEGER},
     {.name = "delivery_mode", .type = ARG_STRING, .choices = delivery_modes},
+    {.name = "target", .type = ARG_TARGET,
+        .description = "Default desktop monitor for foreground steps; explicit step targets override it."},
+    {.name = "capture_id", .type = ARG_STRING,
+        .description = "Default pixel capture, inherited only on the same monitor."},
     {NULL},
 };
 static const Argument target_arguments[] = {
@@ -3271,8 +3378,8 @@ static const Tool tools[] = {
         ARGS_SESSION | ARGS_WINDOW,
         .required = require_window},
     {.name = "get_desktop_state",
-        "Capture one monitor as PNG. Coordinates use this image; primary means first "
-        "granted monitor.",
+        "Observe the selected monitor as PNG; coordinates use this image. An explicit "
+        "display_id selects it for later calls; primary means first granted monitor.",
         ARGS_SESSION,
         capture_arguments},
     {.name = "get_screen_size",
@@ -3338,8 +3445,10 @@ static const Tool tools[] = {
         require_keys,
         TRUE},
     {.name = "run_steps",
-        "Validate 1–64 actions before executing in order. Stop on failure. observe "
-        "reads one final tree; no automatic screenshots or retries.",
+        "Preferred for known sequences: validate 1–64 actions, execute in order, stop "
+        "on failure. Foreground batches return one final selected-monitor image. "
+        "observe:false skips it; a desktop or window-tree object replaces it. "
+        "Inspect the image to verify effects; actions are never retried.",
         ARGS_SESSION,
         batch_arguments,
         require_steps,
@@ -3393,6 +3502,9 @@ static void add_argument_schemas(JsonResult *properties, const Argument *argumen
             g_assert_not_reached();
         }
         result_string(property, "type", type);
+        if (argument->description != NULL) {
+            result_string(property, "description", argument->description);
+        }
         if (argument->choices != NULL) {
             JsonResult *choices = result_array();
             for (const char *const *choice = argument->choices; *choice != NULL;
@@ -3447,6 +3559,82 @@ static yyjson_doc *build_tool_schema(const Tool *tool)
         add_argument_schemas(properties, window_arguments);
     }
     add_argument_schemas(properties, tool->arguments);
+    if (strcmp(tool->name, "run_steps") == 0) {
+        /* Advertise the actual nested contract, not an opaque array of objects.
+         * Individual steps are validated again after defaults are merged. */
+        JsonResult *alternatives = result_array();
+        for (unsigned index = 0; index < G_N_ELEMENTS(tools); index++) {
+            const Tool *action = &tools[index];
+            if (!action->action || action == tool) {
+                continue;
+            }
+            yyjson_doc *input = build_tool_schema(action);
+            JsonResult *named = result_object(), *named_properties = result_object();
+            JsonResult *name = result_object(), *names = result_array();
+            result_string(named, "type", "object");
+            result_string(name, "type", "string");
+            result_append(names, yyjson_mut_strcpy(scu.doc, action->name));
+            result_member(name, "enum", names);
+            result_member(named_properties, "tool", name);
+            result_member(named_properties, "args",
+                yyjson_val_mut_copy(scu.doc, yyjson_doc_get_root(input)));
+            result_member(named, "properties", named_properties);
+            JsonResult *required_names = result_array();
+            result_append(required_names, yyjson_mut_str(scu.doc, "tool"));
+            result_append(required_names, yyjson_mut_str(scu.doc, "args"));
+            result_member(named, "required", required_names);
+            result_boolean(named, "additionalProperties", FALSE);
+            result_append(alternatives, named);
+
+            JsonResult *short_form = result_object(), *short_properties = result_object();
+            result_string(short_form, "type", "object");
+            result_member(short_properties, action->name,
+                yyjson_val_mut_copy(scu.doc, yyjson_doc_get_root(input)));
+            result_member(short_form, "properties", short_properties);
+            JsonResult *short_required = result_array();
+            result_append(short_required, yyjson_mut_strcpy(scu.doc, action->name));
+            result_member(short_form, "required", short_required);
+            result_boolean(short_form, "additionalProperties", FALSE);
+            result_append(alternatives, short_form);
+            yyjson_doc_free(input);
+        }
+        JsonResult *items = result_object();
+        result_member(items, "anyOf", alternatives);
+        result_member(yyjson_mut_obj_get(properties, "steps"), "items", items);
+
+        JsonResult *observe = result_object(), *choices = result_array();
+        JsonResult *off = result_object(), *off_values = result_array();
+        result_string(off, "type", "boolean");
+        result_append(off_values, yyjson_mut_false(scu.doc));
+        result_member(off, "enum", off_values);
+        result_append(choices, off);
+        const char *observation_tools[] = {"get_desktop_state", "get_window_state"};
+        const char *kinds[] = {"desktop", "window"};
+        for (unsigned index = 0; index < 2; index++) {
+            yyjson_doc *input = build_tool_schema(find_tool(observation_tools[index]));
+            JsonResult *option = yyjson_val_mut_copy(scu.doc, yyjson_doc_get_root(input));
+            JsonResult *kind = result_object(), *values = result_array();
+            result_string(kind, "type", "string");
+            result_append(values, yyjson_mut_str(scu.doc, kinds[index]));
+            result_member(kind, "enum", values);
+            result_member(yyjson_mut_obj_get(option, "properties"), "kind", kind);
+            JsonResult *observe_required = result_array();
+            if (index == 0) {
+                result_append(observe_required, yyjson_mut_str(scu.doc, "kind"));
+            }
+            /* Window identifiers can come from the last targeted step. */
+            result_member(option, "required", observe_required);
+            result_append(choices, option);
+            yyjson_doc_free(input);
+        }
+        result_member(observe, "anyOf", choices);
+        result_string(observe, "description",
+            "Omit for a final image after foreground input; false disables it. "
+            "Use {kind:desktop,display_id,max_image_dimension} for an image, "
+            "or {kind:window,pid,window_id,tree_format} for a tree (kind optional). "
+            "An explicit object replaces automatic observation.");
+        result_member(properties, "observe", observe);
+    }
     if (tool->required != NULL) {
         for (const char *const *name = tool->required; *name != NULL; name++) {
             result_append(required, yyjson_mut_strcpy(scu.doc, *name));
@@ -3464,6 +3652,17 @@ static yyjson_doc *build_tool_schema(const Tool *tool)
 
 static gboolean validate_schema(JsonValue *v, JsonValue *s)
 {
+    JsonValue *alternatives = json_member(s, "anyOf");
+    if (alternatives != NULL) {
+        size_t index, count;
+        JsonValue *option;
+        yyjson_arr_foreach(alternatives, index, count, option) {
+            if (validate_schema(v, option)) {
+                return TRUE;
+            }
+        }
+        return FALSE;
+    }
     const char *type = json_string(s, "type");
     gboolean ok = type && ((!strcmp(type, "object") && yyjson_is_obj(v)) ||
                               (!strcmp(type, "array") && yyjson_is_arr(v)) ||
@@ -3586,6 +3785,11 @@ static gboolean validate_arguments(const Tool *t, JsonValue *args)
             return FALSE;
         }
     }
+    if (t->action && strcmp(t->name, "run_steps") != 0 && !semantic &&
+        g_strcmp0(json_string(args, "delivery_mode"), "background") == 0) {
+        scu_fail("background_unavailable", "Raw desktop input requires foreground delivery.");
+        return FALSE;
+    }
     return TRUE;
 }
 
@@ -3598,55 +3802,103 @@ static JsonResult *error_payload(void)
     return r;
 }
 
-/* Build merged batch arguments with the same validator and dispatcher as direct calls.
- */
+/* Batch defaults must not retarget an element or reuse a capture on another
+ * monitor. Each merged request still passes the ordinary tool validator. */
 static yyjson_doc *merge_batch_defaults(
-    JsonValue *args, JsonValue *run_steps, gboolean observation)
+    JsonValue *args, JsonValue *batch, gboolean observation)
 {
-    yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
-    JsonResult *o = yyjson_val_mut_copy(d, args);
-    yyjson_mut_doc_set_root(d, o);
+    yyjson_mut_doc *document = yyjson_mut_doc_new(NULL);
+    JsonResult *merged = yyjson_val_mut_copy(document, args);
+    yyjson_mut_doc_set_root(document, merged);
+    gboolean semantic = json_string(args, "element_token") != NULL;
     const char *defaults[] = {"pid", "window_id", "session", "delivery_mode", NULL};
-    for (unsigned i = 0; defaults[i]; i++) {
-        if (!observation &&
-            (!strcmp(defaults[i], "pid") || !strcmp(defaults[i], "window_id")) &&
+    for (unsigned index = 0; defaults[index]; index++) {
+        const char *key = defaults[index];
+        if ((!strcmp(key, "pid") || !strcmp(key, "window_id")) && !observation &&
             (json_member(args, "pid") || json_member(args, "window_id") ||
                 json_member(args, "target"))) {
             continue;
         }
-        if (observation && strcmp(defaults[i], "delivery_mode") == 0) {
+        if (observation && !strcmp(key, "delivery_mode")) {
             continue;
         }
-        if (!json_member(args, defaults[i]) && json_member(run_steps, defaults[i])) {
-            yyjson_mut_obj_add(o, yyjson_mut_strcpy(d, defaults[i]),
-                yyjson_val_mut_copy(d, json_member(run_steps, defaults[i])));
+        if (!json_member(args, key) && json_member(batch, key)) {
+            yyjson_mut_obj_add(merged, yyjson_mut_strcpy(document, key),
+                yyjson_val_mut_copy(document, json_member(batch, key)));
         }
     }
-    size_t n;
-    char *s = yyjson_mut_write(d, 0, &n);
-    yyjson_doc *result = yyjson_read(s, n, 0);
-    free(s);
-    yyjson_mut_doc_free(d);
+    if (!observation && !semantic) {
+        JsonValue *own_target = json_member(args, "target");
+        JsonValue *batch_target = json_member(batch, "target");
+        if (!own_target && batch_target && !json_member(args, "pid") &&
+            !json_member(args, "window_id")) {
+            yyjson_mut_obj_add(merged, yyjson_mut_str(document, "target"),
+                yyjson_val_mut_copy(document, batch_target));
+        }
+        gboolean same_display = !own_target || (batch_target &&
+            g_strcmp0(json_string(own_target, "display_id"),
+                json_string(batch_target, "display_id")) == 0);
+        gboolean pixel = json_member(args, "x") || json_member(args, "from_x");
+        if (pixel && same_display && !json_member(args, "capture_id") &&
+            json_member(batch, "capture_id")) {
+            yyjson_mut_obj_add(merged, yyjson_mut_str(document, "capture_id"),
+                yyjson_val_mut_copy(document, json_member(batch, "capture_id")));
+        }
+    }
+    yyjson_mut_obj_remove_str(merged, "kind"); /* Observation discriminator only. */
+    yyjson_doc *result = yyjson_mut_doc_imut_copy(document, NULL);
+    yyjson_mut_doc_free(document);
     return result;
 }
 
-/* Build and validate every merged step before executing the first one. Once
- * effects begin, failures stop the remainder; nothing is retried or rolled back. */
+static void clear_tool_error(void)
+{
+    g_clear_pointer(&scu.code, g_free);
+    g_clear_pointer(&scu.hint, g_free);
+}
+
+static JsonResult *batch_failure(guint index, const Tool *tool)
+{
+    JsonResult *failure = error_payload();
+    result_integer(failure, "index", index);
+    result_string(failure, "tool", tool->name);
+    return failure;
+}
+
+static JsonResult *compact_observation(JsonResult *observation)
+{
+    JsonResult *result = result_object();
+    const char *fields[] = {"display", "capture_id", "screenshot_width",
+        "screenshot_height", "frame_status", "displays", NULL};
+    for (unsigned index = 0; fields[index]; index++) {
+        JsonResult *value = yyjson_mut_obj_get(observation, fields[index]);
+        if (value != NULL) {
+            result_member(result, fields[index], yyjson_mut_val_mut_copy(scu.doc, value));
+        }
+    }
+    return result;
+}
+
+/* Preflight structure and supported options for the entire batch before effects.
+ * Runtime failure keeps completed counts and one error, never a replayable dump
+ * of successful steps. Observation is independent of action confirmation. */
 static JsonResult *run_steps(JsonValue *args)
 {
     yyjson_doc *steps[64] = {0};
-    const Tool *ts[64] = {0};
-    JsonValue *a = json_member(args, "steps");
-    size_t n = yyjson_arr_size(a), i, m;
-    JsonValue *step;
-    JsonResult *report = result_array(), *result = result_object();
-    gboolean valid = FALSE;
-    JsonValue *last = NULL;
+    const Tool *actions[64] = {0};
+    JsonValue *array = json_member(args, "steps");
+    size_t count = yyjson_arr_size(array), index, length;
+    JsonValue *step, *last_window = NULL;
     yyjson_doc *observation = NULL;
-    yyjson_arr_foreach(a, i, m, step)
-    {
+    const Tool *observer = NULL;
+    JsonValue *observe = json_member(args, "observe");
+    gboolean automatic = observe == NULL, has_foreground = FALSE;
+    gboolean valid = FALSE;
+    JsonResult *result = result_object(), *warnings = result_array();
+
+    yyjson_arr_foreach(array, index, length, step) {
         const char *name = json_string(step, "tool");
-        JsonValue *sub = json_member(step, "args");
+        JsonValue *arguments = json_member(step, "args");
         if (name) {
             if (yyjson_obj_size(step) != 2) {
                 goto invalid;
@@ -3655,91 +3907,118 @@ static JsonResult *run_steps(JsonValue *args)
             if (yyjson_obj_size(step) != 1) {
                 goto invalid;
             }
-            yyjson_obj_iter it = yyjson_obj_iter_with(step);
-            JsonValue *key = yyjson_obj_iter_next(&it);
+            yyjson_obj_iter iterator = yyjson_obj_iter_with(step);
+            JsonValue *key = yyjson_obj_iter_next(&iterator);
             name = yyjson_get_str(key);
-            sub = yyjson_obj_iter_get_val(key);
+            arguments = yyjson_obj_iter_get_val(key);
         }
-        ts[i] = find_tool(name);
-        if (!ts[i] || !ts[i]->action || !strcmp(name, "run_steps") ||
-            !yyjson_is_obj(sub)) {
+        const Tool *action = actions[index] = find_tool(name);
+        if (!action || !action->action || !strcmp(name, "run_steps") ||
+            !yyjson_is_obj(arguments)) {
             goto invalid;
         }
-        steps[i] = merge_batch_defaults(sub, args, FALSE);
-        JsonValue *root = yyjson_doc_get_root(steps[i]);
-        if (!validate_arguments(ts[i], root)) {
+        steps[index] = merge_batch_defaults(arguments, args, FALSE);
+        JsonValue *merged = yyjson_doc_get_root(steps[index]);
+        if (!validate_arguments(action, merged)) {
             goto done;
         }
-        if (json_member(root, "pid") && json_member(root, "window_id")) {
-            last = root;
-        }
-    }
-    if (json_member(args, "observe")) {
-        observation = merge_batch_defaults(
-            json_member(args, "observe"), last ? last : args, TRUE);
-        if (!validate_arguments(
-                find_tool("get_window_state"), yyjson_doc_get_root(observation))) {
-            goto done;
-        }
-        if (json_boolean(yyjson_doc_get_root(observation), "include_screenshot")) {
-            scu_fail("unsupported_feature",
-                "Window screenshots are unsupported; use get_desktop_state.");
-            goto done;
-        }
-    }
-    valid = TRUE;
-    gboolean failed = FALSE;
-    for (i = 0; i < n; i++) {
-        JsonResult *row = result_object();
-        result_integer(row, "index", i);
-        result_string(row, "tool", ts[i]->name);
-        if (failed) {
-            result_string(row, "status", "skipped");
+        has_foreground |= json_string(merged, "element_token") == NULL;
+        if (json_member(merged, "pid") && json_member(merged, "window_id")) {
+            last_window = merged;
         } else {
-            JsonResult *value = execute_tool(ts[i], yyjson_doc_get_root(steps[i]));
-            if (!value) {
-                result_string(row, "status", "failed");
-                result_member(row, "error", error_payload());
-                failed = TRUE;
-                g_clear_pointer(&scu.code, g_free);
-                g_clear_pointer(&scu.hint, g_free);
-            } else {
-                result_string(row, "status", "ok");
-                result_member(row, "result", value);
+            JsonValue *target = json_member(merged, "target");
+            if (g_strcmp0(json_string(target, "kind"), "window") == 0) {
+                last_window = target;
             }
         }
-        result_append(report, row);
-        if (!failed && i + 1 < n &&
-            !scu_pause((unsigned)json_number(args, "delay_ms", 0))) {
+    }
+    if (automatic && has_foreground) {
+        const char *defaults = "{\"max_image_dimension\":1600}";
+        observation = yyjson_read(defaults, strlen(defaults), 0);
+        observer = find_tool("get_desktop_state");
+    } else if (yyjson_is_obj(observe)) {
+        gboolean desktop = g_strcmp0(json_string(observe, "kind"), "desktop") == 0;
+        if (desktop) {
+            /* Desktop observations do not inherit semantic window identifiers. */
+            yyjson_doc *empty = yyjson_read("{}", 2, 0);
+            observation = merge_batch_defaults(observe, yyjson_doc_get_root(empty), TRUE);
+            yyjson_doc_free(empty);
+        } else {
+            observation = merge_batch_defaults(observe, last_window ? last_window : args, TRUE);
+        }
+        observer = find_tool(desktop ? "get_desktop_state" : "get_window_state");
+    }
+    if (observer && !validate_arguments(observer, yyjson_doc_get_root(observation))) {
+        goto done;
+    }
+    valid = TRUE;
+    guint completed = 0, skipped = 0;
+    gboolean failed = FALSE, foreground_attempted = FALSE;
+    for (index = 0; index < count; index++) {
+        JsonValue *merged = yyjson_doc_get_root(steps[index]);
+        foreground_attempted |= json_string(merged, "element_token") == NULL;
+        JsonResult *value = execute_tool(actions[index], merged);
+        if (value == NULL) {
+            release_input();
+            result_member(result, "failed", batch_failure(index, actions[index]));
+            skipped = count - index - 1;
             failed = TRUE;
-            result_member(row, "error", error_payload());
-            result_string(row, "status", "failed");
-            g_clear_pointer(&scu.code, g_free);
-            g_clear_pointer(&scu.hint, g_free);
+            clear_tool_error();
+            break;
+        }
+        completed++;
+        JsonResult *warning = yyjson_mut_obj_get(value, "warning");
+        if (warning) {
+            JsonResult *item = result_object();
+            result_integer(item, "index", index);
+            result_string(item, "tool", actions[index]->name);
+            result_member(item, "warning", yyjson_mut_val_mut_copy(scu.doc, warning));
+            result_append(warnings, item);
+        }
+        if (index + 1 < count && !scu_pause((unsigned)json_number(args, "delay_ms", 0))) {
+            JsonResult *failure = batch_failure(index, actions[index]);
+            result_string(failure, "phase", "delay");
+            result_member(result, "failed", failure);
+            skipped = count - completed;
+            failed = TRUE;
+            clear_tool_error();
+            break;
         }
     }
-    result_member(result, "steps", report);
-    if (observation && !g_atomic_int_get(&scu.cancelled)) {
-        JsonResult *v = execute_tool(
-            find_tool("get_window_state"), yyjson_doc_get_root(observation));
-        if (v) {
-            result_member(result, "observation", v);
+    result_integer(result, "completed", completed);
+    result_integer(result, "skipped", skipped);
+    result_string(result, "effect", "unverifiable");
+    if (yyjson_mut_arr_size(warnings) > 0) {
+        result_member(result, "warnings", warnings);
+    }
+    if (observer && (!automatic || foreground_attempted) &&
+        !g_atomic_int_get(&scu.cancelled) && !g_atomic_int_get(&scu.stopping)) {
+        /* A broken visual session is not reconnected inside the interrupted
+         * batch. Only a subsequent request may establish another grant. */
+        JsonResult *value = NULL;
+        if (visual.broken || (failed && foreground_attempted &&
+                visual.session == NULL && !strcmp(observer->name, "get_desktop_state"))) {
+            scu_fail("visual_session_closed", "Visual session disconnected during the batch.");
+        } else {
+            value = execute_tool(observer, yyjson_doc_get_root(observation));
+        }
+        if (value) {
+            result_member(result, "observation",
+                !strcmp(observer->name, "get_desktop_state")
+                    ? compact_observation(value) : value);
         } else {
             result_member(result, "observation_error", error_payload());
             failed = TRUE;
-            g_clear_pointer(&scu.code, g_free);
-            g_clear_pointer(&scu.hint, g_free);
+            clear_tool_error();
         }
     }
     result_boolean(result, "ok", !failed);
     goto done;
 invalid:
-    scu_fail("invalid_arguments",
-        "Each batch step must be {tool,args} or one supported action-name shorthand. "
-        "Advanced batch options are unsupported.");
+    scu_fail("invalid_arguments", "Each step must be {tool,args} or one supported action-name shorthand.");
 done:
-    for (i = 0; i < n; i++) {
-        yyjson_doc_free(steps[i]);
+    for (index = 0; index < count; index++) {
+        yyjson_doc_free(steps[index]);
     }
     yyjson_doc_free(observation);
     return valid ? result : NULL;
@@ -3872,6 +4151,12 @@ static void send_response(
  * tools must work even when accessibility permission or guest libraries are absent. */
 static void add_server_info(JsonResult *result)
 {
+    result_string(result, "instructions",
+        "Read a tree or desktop image first. Use run_steps for known action sequences; "
+        "foreground batches return one final image. Inspect it to verify effects; "
+        "if loading continues, observe again without replaying actions. "
+        "An explicit display selects the monitor for later operations, not keyboard focus. "
+        "Accessibility permission is required. No browser, shell, JavaScript or window capture tools.");
     JsonResult *capabilities = result_object();
     JsonResult *info = result_object();
     result_member(capabilities, "tools", result_object());
@@ -4042,10 +4327,6 @@ static void handle_request(yyjson_doc *document)
         initialized = TRUE;
         result_string(result, "protocolVersion", version);
         add_server_info(result);
-        result_string(result, "instructions",
-            "Host computer use requires the accessibility tier. Read a tree or desktop "
-            "image first; use run_steps for known sequences. No browser, shell, "
-            "JavaScript or window capture tools are provided.");
     } else if (strcmp(method, "server/discover") == 0 && modern) {
         JsonResult *versions = result_array();
         result_append(versions, yyjson_mut_str(scu.doc, "2026-07-28"));

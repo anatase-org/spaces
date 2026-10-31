@@ -505,7 +505,7 @@ a user action; never run `sync.sh --selinux` as the agent.
 
 ## scu computer use
 
-[`scu mcp`](../docs/scu.md) runs inside the guest, through the existing portal
+`scu mcp` runs inside the guest, through the existing portal
 and accessibility forwarding. Spaces changes for this executable are limited
 to its native bundle and command exposure. There is no added status mount or
 host computer-control service. The accessibility socket gates every desktop
@@ -515,6 +515,49 @@ unusable forwarded registry reports `accessibility_unavailable`. Because there
 is no separate permission record, absence cannot distinguish a disabled tier
 from integration that has not started. `health_report` records that distinction
 as `forwarded` versus actual registry `ready` and reports missing libraries.
+
+### Action and observation contract
+
+Read `get_desktop_state` (or a semantic window tree) before acting. Use
+`run_steps` for a known sequence. A foreground batch returns counts, one final
+PNG image block and observation metadata; it does not return successful step
+dumps or capture between steps. For example, with a browser already focused:
+
+```json
+{"steps":[{"hotkey":{"keys":["ctrl","n"]}},{"hotkey":{"keys":["ctrl","l"]}},{"type_text":{"text":"https://example.com"}},{"press_key":{"key":"Enter"}}]}
+```
+
+`observe:false` disables the final image. `observe:{"kind":"desktop", ...}`
+selects a final monitor and optional `max_image_dimension`;
+`observe:{"kind":"window","pid":123,"window_id":1}` requests a tree instead.
+Legacy tree objects without `kind` remain accepted, and can inherit the last
+explicitly targeted window. Pure semantic batches have no implicit screenshot
+or visual consent request. All structure, defaults and observation options are
+validated before effects. Runtime errors stop the remaining steps without
+retries; `failed` identifies the zero-based index, tool, code and hint. A separate
+`observation_error` preserves the completed/skipped counts when readback fails.
+Clipboard fallback reports `clipboard_paste` and warns that clipboard text was
+replaced. Batch warnings retain the relevant step index.
+
+The first granted monitor is selected initially (`primary` is its alias).
+Explicit monitor observations or desktop targets change the selected monitor
+for subsequent implicit operations, including keyboard-only final observation.
+This does not move keyboard focus. Each image uses its own local coordinates,
+scaling transform and capture ID; monitors are never stitched. Desktop metadata
+lists available IDs and dimensions. Batch `target` and `capture_id` can supply
+pixel defaults, while explicit step targets override them and semantic tokens
+keep their own targeting. A capture default is not inherited across displays.
+Every new image supersedes the previous capture token for that monitor.
+
+Automatic images have a 1600-pixel long-edge cap; explicit observations retain
+their requested size (omitted/zero means full resolution). After input, capture
+attempts an EIS round trip, drains queued frames, allows a 100 ms render interval
+and waits at most one second for a subsequent frame. `frame_status` is `new`,
+`cached`, or `unknown` when input synchronization is unavailable. Frame receipt
+is tracked separately from display geometry, so ordinary new frames do not
+invalidate coordinate mappings. New pixels are not proof of application
+completion: action batches remain `effect:"unverifiable"`. Inspect the inline
+image; if navigation is still loading, observe again without replaying actions.
 
 Build and run the isolated tests from a Fedora development Space:
 
@@ -539,6 +582,11 @@ fixtures run with graphical/session variables absent, and with deliberately
 stale bus/runtime variables, to verify direct guest runtime discovery. Invalid,
 oversized and Unicode JSON, both MCP eras, missing optional libraries and clean
 EOF shutdown are also covered.
+The same short workflow instructions are advertised by legacy initialization
+and modern discovery. Nested batch schemas cover named and shorthand actions,
+explicit observation and opt-out. Tests also verify compact success/failure
+responses, semantic-only batches, preflight rejection of invalid final
+observations/background input, and observation failures after successful effects.
 
 `scu_backend_fixture.c` includes the production translation unit and drives a
 real libei client against a private libeis peer. It checks delivered pointer,
@@ -548,6 +596,11 @@ encoding code, validate truncation rejection, monitor pairing, negative origins,
 mixed scaling, resized-image coordinates, stale captures, ambiguous mappings,
 and private rotating restore-token files. These buffer/geometry cases are
 isolated fixtures, not an end-to-end multi-monitor PipeWire compositor test.
+The EIS case additionally verifies final PNG MCP content, persistent monitor
+selection, shared pixel defaults, partial batch completion, delayed/new versus
+queued/cached frames, missing round-trip support, resize invalidation,
+cancellation and accessibility revocation during observation. Refused visual
+grants must not trigger another prompt for automatic batch observation.
 
 For live testing on `win5`, deploy without modifying SELinux policy:
 
@@ -597,8 +650,8 @@ proof of delivery.
 Read the **host** state file independently after each run. Expect a button count
 increment, checkbox toggle, text exactly `Visual Unicode 世界 scu-live-gtk!`
 (or `scu-live-qt!`), and positive `scrolls`/`drags`. Semantic-only runs write
-`Héllo 世界 <token>`. Screenshots are explicit observation calls; batches do not
-capture automatically. Clipboard fallback replaces regular clipboard text and
+`Héllo 世界 <token>`. Foreground batches also return a final image; use its new
+capture token for subsequent pixel actions. Clipboard fallback replaces regular clipboard text and
 uses Ctrl+V; Shift+Insert can address PRIMARY on Linux.
 
 For recovery, hold one MCP process open, capture, restart the host's
@@ -629,3 +682,28 @@ started client after a live downgrade to `basic` returned the correct
 `spaces configure fedora` instruction; accessibility was restored afterward.
 Configuration hints use `spaces configure <space>`; scu does not discover or
 publish the Space name. Consent tokens are scoped by guest machine ID and UID.
+
+Response/observation update, 2026-11-01: the 12-test scu suite passes with the
+expanded batch, monitor-selection, real EIS, PNG and freshness checks above.
+The affected launch/session/packaging/native-ABI regression run passed 165 tests
+with two skips; `make -C native check-guest-abi` passed the GLIBC <= 2.17 and
+architecture checks. `tests/manual_scu_probe.py` now consumes each foreground
+batch's final observation token before sending subsequent pixel actions.
+
+Current-host acceptance, 2026-11-01: the initial attempts initialized and reported
+`forwarded:true`, `ready:true` with all optional libraries present, but timed out
+waiting for the host portal response. After the user requested another attempt,
+a fresh `native/scu mcp` process captured successfully. Two monitors were granted:
+2560x1600 with logical bounds 1707x1067 at (3840,1093), and 3840x2160 with logical
+bounds 3840x2160 at (0,0). The first image was returned inline at 1600x1000.
+
+From that image, one `run_steps` batch used desktop target `display-1`, its
+capture ID, and `delay_ms:150`: click the visible Chrome address bar at (420,58),
+Ctrl+N, Ctrl+L, type `https://example.com`, Enter. The batch took 1120 ms and
+returned `completed:5`, `skipped:0`, `ok:true`, `effect:"unverifiable"`, and one
+automatic 1600x1000 PNG with `frame_status:"new"`. Visual inspection of that
+same response confirmed a new Chrome window with one Example Domain tab,
+`example.com` in its address bar, and the loaded page. No additional observation
+or action replay was needed. Live pointer actions were exercised on display-1;
+this run does not establish cross-monitor input/hotplug behavior. The temporary
+MCP process was closed cleanly afterward. No SELinux policy was deployed.

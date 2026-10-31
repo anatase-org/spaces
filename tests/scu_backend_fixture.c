@@ -126,6 +126,8 @@ static void test_frame(void)
     Display display = {
         .width = 2, .height = 1, .format = {.format = SPA_VIDEO_FORMAT_BGRx}};
     stream_process(&display);
+    assert(display.frame_sequence == 1 && display.frame_received > 0);
+    assert(display.revision == 0); /* Frame receipt must not change geometry. */
     gsize size;
     const unsigned char *result = g_bytes_get_data(display.pixels, &size);
     const unsigned char expected[] = {255, 0, 0, 0, 255, 0};
@@ -271,6 +273,169 @@ static gpointer cancel_input(gpointer unused)
     return NULL;
 }
 
+static JsonResult *batch(const char *json)
+{
+    yyjson_doc *request = yyjson_read(json, strlen(json), 0);
+    JsonValue *args = yyjson_doc_get_root(request);
+    const Tool *tool = find_tool("run_steps");
+    assert(validate_arguments(tool, args));
+    JsonResult *result = execute_tool(tool, args);
+    assert(result != NULL);
+    yyjson_doc_free(request);
+    return result;
+}
+
+static gboolean receive_frame(gpointer pointer)
+{
+    Display *display = pointer;
+    display->frame_sequence++;
+    display->frame_received = g_get_monotonic_time();
+    return G_SOURCE_REMOVE;
+}
+
+static gboolean resize_display(gpointer pointer)
+{
+    Display *display = pointer;
+    /* Same geometry invalidation performed by stream_format_changed. */
+    display->revision++;
+    display->capture_revision = 0;
+    receive_frame(pointer);
+    return G_SOURCE_REMOVE;
+}
+
+static gboolean revoke_permission(gpointer unused)
+{
+    (void)unused;
+    unlink(SCU_ATSPI_SOCKET);
+    return G_SOURCE_REMOVE;
+}
+
+static void test_batch_observation(InputOracle *oracle)
+{
+    static const unsigned char pixels[] = {255, 0, 0, 0, 255, 0};
+    for (unsigned index = 0; index < 2; index++) {
+        Display *display = &visual.displays[index];
+        *display = (Display){.width = 2, .height = 1, .revision = 1, .frame_sequence = 1};
+        g_snprintf(display->id, sizeof(display->id), "display-%u", index + 1);
+        display->pixels = g_bytes_new_static(pixels, sizeof(pixels));
+        display->mapping_id = g_strdup(index ? "other" : "fixture");
+    }
+    visual.displays[1].width = 2000;
+    g_bytes_unref(visual.displays[1].pixels);
+    visual.displays[1].pixels = g_bytes_new_take(g_malloc0(6000), 6000);
+    visual.display_count = 2;
+    assert(selected_display("display-2") == &visual.displays[1]);
+    assert(selected_display(NULL) == &visual.displays[1]);
+    assert(selected_display("primary") == &visual.displays[0]);
+    assert(selected_display("missing") == NULL);
+    clear_tool_error();
+    assert(selected_display(NULL) == &visual.displays[0]);
+
+    /* A frame queued before delivery is drained, not called a new observation. */
+    Display *display = selected_display("display-2");
+    guint64 before_images = yyjson_mut_arr_size(scu.images);
+    guint64 before_frames = display->frame_sequence;
+    receive_frame(display);
+    g_timeout_add(150, receive_frame, display);
+    JsonResult *result = batch("{\"steps\":[{\"press_key\":{\"key\":\"a\"}}]}");
+    assert(yyjson_mut_is_true(yyjson_mut_obj_get(result, "ok")));
+    assert(yyjson_mut_obj_get(result, "steps") == NULL);
+    assert(yyjson_mut_get_uint(yyjson_mut_obj_get(result, "completed")) == 1);
+    JsonResult *observation = yyjson_mut_obj_get(result, "observation");
+    assert(strcmp(yyjson_mut_get_str(yyjson_mut_obj_get(observation, "display")), "display-2") == 0);
+    assert(strcmp(yyjson_mut_get_str(yyjson_mut_obj_get(observation, "frame_status")), "new") == 0);
+    assert(yyjson_mut_get_uint(yyjson_mut_obj_get(observation, "screenshot_width")) == 1600);
+    assert(display->frame_sequence > before_frames);
+    assert(yyjson_mut_arr_size(scu.images) == before_images + 1);
+    JsonResult *envelope = result_object();
+    add_tool_result(envelope, find_tool("run_steps"), result);
+    assert(yyjson_mut_is_false(yyjson_mut_obj_get(envelope, "isError")));
+    JsonResult *content = yyjson_mut_obj_get(envelope, "content");
+    assert(yyjson_mut_arr_size(content) == 2);
+    assert(strcmp(yyjson_mut_get_str(yyjson_mut_obj_get(
+        yyjson_mut_arr_get(content, 1), "type")), "image") == 0);
+
+    result = batch("{\"steps\":[{\"press_key\":{\"key\":\"a\"}}],\"observe\":false}");
+    assert(yyjson_mut_obj_get(result, "observation") == NULL);
+    assert(yyjson_mut_arr_size(scu.images) == before_images + 1);
+    const char *status = observation_frame(display);
+    assert(status && strcmp(status, "cached") == 0); /* Static desktop, bounded wait. */
+
+    /* An older libei still captures; it cannot prove input synchronization. */
+    __typeof__(ei_api.new_ping) saved_ping = ei_api.new_ping;
+    ei_api.new_ping = NULL;
+    visual.input_sequence++;
+    visual.last_input_time = g_get_monotonic_time();
+    g_timeout_add(120, receive_frame, display);
+    status = observation_frame(display);
+    assert(status && strcmp(status, "unknown") == 0);
+    ei_api.new_ping = saved_ping;
+
+    result = batch("{\"steps\":[{\"press_key\":{\"key\":\"a\"}}],"
+        "\"observe\":{\"kind\":\"desktop\",\"display_id\":\"primary\",\"max_image_dimension\":1}}");
+    observation = yyjson_mut_obj_get(result, "observation");
+    assert(yyjson_mut_get_uint(yyjson_mut_obj_get(observation, "screenshot_width")) == 1);
+    assert(visual.selected_display == 0);
+
+    /* Pixel defaults are shared within a batch; no intermediate capture replaces
+     * their token. Explicit targets on other displays do not inherit that token. */
+    char *json = g_strdup_printf("{\"target\":{\"kind\":\"desktop\",\"display_id\":\"primary\"},"
+        "\"capture_id\":\"%s\",\"steps\":[{\"click\":{\"x\":0,\"y\":0}},"
+        "{\"click\":{\"x\":0,\"y\":0}}],\"observe\":false}", visual.displays[0].capture_id);
+    gint clicks = g_atomic_int_get(&oracle->clicks);
+    result = batch(json);
+    assert(yyjson_mut_is_true(yyjson_mut_obj_get(result, "ok")));
+    assert(scu_pause(20));
+    assert(g_atomic_int_get(&oracle->clicks) == clicks + 2);
+    yyjson_doc *defaults = yyjson_read(json, strlen(json), 0);
+    const char *override = "{\"target\":{\"kind\":\"desktop\",\"display_id\":\"display-2\"},\"x\":0,\"y\":0}";
+    yyjson_doc *step = yyjson_read(override, strlen(override), 0);
+    yyjson_doc *merged = merge_batch_defaults(yyjson_doc_get_root(step), yyjson_doc_get_root(defaults), FALSE);
+    assert(json_member(yyjson_doc_get_root(merged), "capture_id") == NULL);
+    yyjson_doc_free(merged);
+    yyjson_doc_free(step);
+    yyjson_doc_free(defaults);
+    g_free(json);
+
+    result = batch("{\"steps\":[{\"press_key\":{\"key\":\"a\"}},"
+        "{\"press_key\":{\"key\":\"not-a-real-keysym\"}},"
+        "{\"press_key\":{\"key\":\"b\"}}],\"observe\":false}");
+    assert(yyjson_mut_is_false(yyjson_mut_obj_get(result, "ok")));
+    assert(yyjson_mut_get_uint(yyjson_mut_obj_get(result, "completed")) == 1);
+    assert(yyjson_mut_get_uint(yyjson_mut_obj_get(result, "skipped")) == 1);
+    assert(yyjson_mut_get_uint(yyjson_mut_obj_get(yyjson_mut_obj_get(result, "failed"), "index")) == 1);
+
+    /* Observation failure never erases a successful action. */
+    result = batch("{\"steps\":[{\"press_key\":{\"key\":\"a\"}}],"
+        "\"observe\":{\"kind\":\"desktop\",\"display_id\":\"missing\"}}");
+    assert(yyjson_mut_is_false(yyjson_mut_obj_get(result, "ok")));
+    assert(yyjson_mut_get_uint(yyjson_mut_obj_get(result, "completed")) == 1);
+    assert(yyjson_mut_obj_get(result, "observation_error") != NULL);
+    assert(yyjson_mut_obj_get(result, "failed") == NULL);
+
+    display = &visual.displays[0];
+    visual.input_sequence++;
+    visual.last_input_time = g_get_monotonic_time();
+    g_timeout_add(150, resize_display, display);
+    status = observation_frame(display);
+    assert(status && strcmp(status, "new") == 0 && display->capture_revision == 0);
+
+    visual.input_sequence++;
+    GThread *canceller = g_thread_new("cancel-observation", cancel_input, NULL);
+    assert(observation_frame(display) == NULL);
+    g_thread_join(canceller);
+    g_atomic_int_set(&scu.cancelled, 0);
+    assert(strcmp(scu.code, "cancelled") == 0);
+    clear_tool_error();
+
+    visual.input_sequence++;
+    g_timeout_add(30, revoke_permission, NULL);
+    assert(observation_frame(display) == NULL);
+    assert(strcmp(scu.code, "accessibility_permission_required") == 0);
+    assert(visual.session == NULL); /* Revocation also disposes captures/input. */
+    clear_tool_error();
+}
+
 static void test_input(void)
 {
     /* The gate checks this isolated endpoint; no host bus is contacted. */
@@ -288,7 +453,7 @@ static void test_input(void)
     visual.devices = g_ptr_array_new_with_free_func(free_input_device);
     visual.input = ei_api.new_sender(NULL);
     assert(ei_api.setup_backend_fd(visual.input, fd) == 0);
-    scu.deadline = g_get_monotonic_time() + 5 * G_USEC_PER_SEC;
+    scu.deadline = g_get_monotonic_time() + 20 * G_USEC_PER_SEC;
     InputDevice *keyboard = wait_for_device(EI_DEVICE_CAP_KEYBOARD);
     assert(keyboard != NULL);
     guint codes[] = {KEY_LEFTCTRL, KEY_A};
@@ -331,6 +496,8 @@ static void test_input(void)
     assert(g_atomic_int_get(&oracle.clicks) == 3);
     assert(g_atomic_int_get(&oracle.scrolls) == 1);
     yyjson_doc_free(arguments);
+    clear_tool_error();
+    test_batch_observation(&oracle);
     scu_visual_close();
     g_atomic_int_set(&oracle.stop, 1);
     g_thread_join(thread);

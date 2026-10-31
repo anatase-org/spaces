@@ -85,13 +85,15 @@ def main():
                 image = captures[display_id]
                 x, y = args.entry_point
                 pixel_target = {"kind": "desktop", "display_id": display_id}
-                tool("run_steps", delivery_mode="foreground", steps=[
+                performed = tool("run_steps", delivery_mode="foreground", steps=[
                     {"click": {"target": pixel_target, "capture_id": image["capture_id"], "x": x, "y": y}},
                     {"hotkey": {"keys": ["ctrl", "a"]}},
                     {"type_text": {"text": "Visual Unicode 世界 " + args.token}},
                     {"press_key": {"key": "End"}},
                     {"type_text": {"text": "!"}},
                 ])
+                # Automatic final observation supersedes this monitor's capture.
+                image = performed["observation"]
                 if args.surface_point is not None:
                     x, y = args.surface_point
                     tool("run_steps", delivery_mode="foreground", steps=[
