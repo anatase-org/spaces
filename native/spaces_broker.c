@@ -104,6 +104,13 @@ typedef struct {
     GPtrArray *staged_files;
     char *space_name;
     char *app_id;
+    char *portal_owner;
+    gboolean portal_registered;
+    guint portal_watch;
+    guint portal_retry;
+    guint portal_retry_delay;
+    GCancellable *portal_registration;
+    int exit_status;
 } Broker;
 
 typedef struct {
@@ -113,6 +120,142 @@ typedef struct {
     gboolean received;
     GVariant *results;
 } Response;
+
+/* The ready FD describes the integration transport. Portal operations remain
+ * unavailable until this connection has registered with the current owner.
+ * Always address that unique owner: a replacement must never receive a call
+ * using the previous owner's registration, even before its watch is dispatched. */
+static char *portal_destination(Broker *broker, GError **error)
+{
+    GVariant *reply;
+    char *owner = NULL;
+
+    reply = g_dbus_connection_call_sync(broker->bus,
+        "org.freedesktop.DBus", "/org/freedesktop/DBus",
+        "org.freedesktop.DBus", "GetNameOwner",
+        g_variant_new("(s)", PORTAL_NAME), G_VARIANT_TYPE("(s)"),
+        G_DBUS_CALL_FLAGS_NO_AUTO_START, 5000, NULL, NULL);
+    if (reply != NULL) {
+        g_variant_get(reply, "(s)", &owner);
+        g_variant_unref(reply);
+    }
+    if (owner != NULL && broker->portal_registered
+        && g_strcmp0(owner, broker->portal_owner) == 0)
+        return owner;
+    g_free(owner);
+    g_set_error(error, G_DBUS_ERROR, G_DBUS_ERROR_SERVICE_UNKNOWN,
+        "The host portal identity is not registered; waiting for portal registration");
+    return NULL;
+}
+
+typedef struct {
+    Broker *broker;
+    GCancellable *cancellable;
+    char *owner;
+} PortalRegistration;
+
+static gboolean register_portal_identity(gpointer data);
+
+static void portal_registration_done(GObject *source, GAsyncResult *result,
+    gpointer data)
+{
+    PortalRegistration *registration = data;
+    Broker *broker = registration->broker;
+    GError *error = NULL;
+    GVariant *reply = g_dbus_connection_call_finish(
+        G_DBUS_CONNECTION(source), result, &error);
+
+    /* A reply to a cancelled attempt must not certify a replacement owner. */
+    if (broker->portal_registration != registration->cancellable)
+        goto out;
+    g_clear_object(&broker->portal_registration);
+    if (reply != NULL) {
+        broker->portal_registered = TRUE;
+        g_printerr("spaces-broker: registered %s with host portal %s\n",
+            broker->app_id, registration->owner);
+    } else {
+        g_printerr("spaces-broker: could not register %s with host portal %s: "
+            "%s\n", broker->app_id, registration->owner, error->message);
+        /* Register is one-shot. After a lost reply, retrying this connection
+         * could fail forever because the portal already accepted it. Let the
+         * supervisor replace us with a fresh connection in that ambiguous case. */
+        if (g_error_matches(error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT)
+            || g_error_matches(error, G_DBUS_ERROR, G_DBUS_ERROR_NO_REPLY)
+            || g_error_matches(error, G_DBUS_ERROR, G_DBUS_ERROR_TIMEOUT)
+            || g_error_matches(error, G_DBUS_ERROR, G_DBUS_ERROR_TIMED_OUT)) {
+            g_printerr("spaces-broker: registration outcome unknown; "
+                "exiting to retry with a fresh D-Bus connection\n");
+            broker->exit_status = 1;
+            g_main_loop_quit(broker->loop);
+            goto out;
+        }
+        g_printerr("spaces-broker: retrying portal registration in %u seconds\n",
+            broker->portal_retry_delay);
+        broker->portal_retry = g_timeout_add_seconds(
+            broker->portal_retry_delay, register_portal_identity, broker);
+        broker->portal_retry_delay = MIN(broker->portal_retry_delay * 2, 30U);
+    }
+out:
+    g_clear_pointer(&reply, g_variant_unref);
+    g_clear_error(&error);
+    g_object_unref(registration->cancellable);
+    g_free(registration->owner);
+    g_free(registration);
+}
+
+static gboolean register_portal_identity(gpointer data)
+{
+    Broker *broker = data;
+    PortalRegistration *registration = g_new0(PortalRegistration, 1);
+
+    broker->portal_retry = 0;
+    broker->portal_registration = g_cancellable_new();
+    registration->broker = broker;
+    registration->cancellable = g_object_ref(broker->portal_registration);
+    registration->owner = g_strdup(broker->portal_owner);
+    g_dbus_connection_call(broker->bus, registration->owner, PORTAL_PATH,
+        "org.freedesktop.host.portal.Registry", "Register",
+        g_variant_new("(s@a{sv})", broker->app_id,
+            g_variant_new_array(G_VARIANT_TYPE("{sv}"), NULL, 0)),
+        G_VARIANT_TYPE_UNIT, G_DBUS_CALL_FLAGS_NO_AUTO_START, 5000,
+        registration->cancellable, portal_registration_done, registration);
+    return G_SOURCE_REMOVE;
+}
+
+static void clear_portal_identity(Broker *broker)
+{
+    if (broker->portal_registration != NULL) {
+        g_cancellable_cancel(broker->portal_registration);
+        g_clear_object(&broker->portal_registration);
+    }
+    if (broker->portal_retry != 0) {
+        g_source_remove(broker->portal_retry);
+        broker->portal_retry = 0;
+    }
+    broker->portal_registered = FALSE;
+    broker->portal_retry_delay = 1;
+    g_clear_pointer(&broker->portal_owner, g_free);
+}
+
+static void portal_appeared(GDBusConnection *connection, const char *name,
+    const char *owner, gpointer data)
+{
+    Broker *broker = data;
+    (void)connection;
+    (void)name;
+    clear_portal_identity(broker);
+    broker->portal_owner = g_strdup(owner);
+    register_portal_identity(broker);
+}
+
+static void portal_vanished(GDBusConnection *connection, const char *name,
+    gpointer data)
+{
+    (void)connection;
+    (void)name;
+    clear_portal_identity(data);
+    g_printerr("spaces-broker: host portal unavailable; waiting for its owner\n");
+}
 
 static char *new_token(void)
 {
@@ -269,6 +412,8 @@ static gboolean call_host_portal(
     GError **error
 )
 {
+    g_autofree char *destination = portal_destination(broker, error);
+    if (destination == NULL) return FALSE;
     GUnixFDList *fd_list = g_unix_fd_list_new();
     GVariantBuilder options;
     GVariant *reply;
@@ -302,12 +447,12 @@ static gboolean call_host_portal(
         );
     pending.loop = g_main_loop_new(NULL, FALSE);
     subscription = g_dbus_connection_signal_subscribe(
-        broker->bus, PORTAL_NAME, "org.freedesktop.portal.Request",
+        broker->bus, destination, "org.freedesktop.portal.Request",
         "Response", NULL, NULL, G_DBUS_SIGNAL_FLAGS_NONE,
         response_signal, &pending, NULL
     );
     reply = g_dbus_connection_call_with_unix_fd_list_sync(
-        broker->bus, PORTAL_NAME, PORTAL_PATH,
+        broker->bus, destination, PORTAL_PATH,
         "org.freedesktop.portal.OpenURI", method,
         g_variant_new("(sh@a{sv})", "", handle,
                       g_variant_builder_end(&options)),
@@ -354,6 +499,8 @@ static gboolean screenshot_request(
     GError **error
 )
 {
+    g_autofree char *destination = portal_destination(broker, error);
+    if (destination == NULL) return FALSE;
     GVariantDict dictionary;
     GVariant *updated;
     GVariant *reply;
@@ -369,12 +516,12 @@ static gboolean screenshot_request(
     updated = g_variant_dict_end(&dictionary);
     pending.loop = g_main_loop_new(NULL, FALSE);
     subscription = g_dbus_connection_signal_subscribe(
-        broker->bus, PORTAL_NAME, "org.freedesktop.portal.Request",
+        broker->bus, destination, "org.freedesktop.portal.Request",
         "Response", NULL, NULL, G_DBUS_SIGNAL_FLAGS_NONE,
         response_signal, &pending, NULL
     );
     reply = g_dbus_connection_call_sync(
-        broker->bus, PORTAL_NAME, PORTAL_PATH,
+        broker->bus, destination, PORTAL_PATH,
         "org.freedesktop.portal.Screenshot", "Screenshot",
         g_variant_new("(s@a{sv})", parent_window,
             g_variant_ref_sink(updated)),
@@ -413,17 +560,19 @@ static gboolean wait_portal_request(Broker *broker, const char *interface,
     const char *method, GVariant *parameters, guint *response,
     GVariant **results, GUnixFDList *fds, GError **error)
 {
+    g_autofree char *destination = portal_destination(broker, error);
+    if (destination == NULL) return FALSE;
     GVariant *reply;
     const char *request_path;
     Response pending = {0};
     guint subscription;
     guint timeout;
     pending.loop = g_main_loop_new(NULL, FALSE);
-    subscription = g_dbus_connection_signal_subscribe(broker->bus, PORTAL_NAME,
+    subscription = g_dbus_connection_signal_subscribe(broker->bus, destination,
         "org.freedesktop.portal.Request", "Response", NULL, NULL,
         G_DBUS_SIGNAL_FLAGS_NONE, response_signal, &pending, NULL);
     reply = g_dbus_connection_call_with_unix_fd_list_sync(broker->bus,
-        PORTAL_NAME, PORTAL_PATH, interface, method, parameters,
+        destination, PORTAL_PATH, interface, method, parameters,
         G_VARIANT_TYPE("(o)"), G_DBUS_CALL_FLAGS_NO_AUTO_START, -1, fds,
         NULL, NULL, error);
     if (reply == NULL) {
@@ -843,6 +992,7 @@ static void dynamic_launcher_method(Broker *broker, GVariant *parameters,
     GVariant *input;
     GVariant *host_parameters = NULL;
     const GVariantType *reply_type = G_VARIANT_TYPE_UNIT;
+    g_autofree char *destination = NULL;
     GVariant *reply;
     GError *error = NULL;
     g_variant_get(parameters, "(&s@v)", &method, &wrapped);
@@ -885,7 +1035,9 @@ static void dynamic_launcher_method(Broker *broker, GVariant *parameters,
         reply_type = g_str_equal(method, "GetDesktopEntry")
             ? G_VARIANT_TYPE("(s)") : G_VARIANT_TYPE("(vsu)");
     } else goto invalid;
-    reply = g_dbus_connection_call_sync(broker->bus, PORTAL_NAME, PORTAL_PATH,
+    destination = portal_destination(broker, &error);
+    if (destination == NULL) goto failed;
+    reply = g_dbus_connection_call_sync(broker->bus, destination, PORTAL_PATH,
         "org.freedesktop.portal.DynamicLauncher", method, host_parameters,
         reply_type, G_DBUS_CALL_FLAGS_NO_AUTO_START, -1, NULL, &error);
     if (reply == NULL) goto failed;
@@ -1128,6 +1280,7 @@ static void game_mode_method(Broker *broker, GVariant *parameters,
 {
     const char *method;
     gint target_handle, requester_handle;
+    g_autofree char *destination = NULL;
     int target_fd = -1, requester_fd = -1;
     GUnixFDList *fds = g_dbus_message_get_unix_fd_list(
         g_dbus_method_invocation_get_message(invocation));
@@ -1151,8 +1304,10 @@ static void game_mode_method(Broker *broker, GVariant *parameters,
     if (target_fd < 0 || requester_fd < 0) goto failed;
     close(target_fd); target_fd = -1;
     close(requester_fd); requester_fd = -1;
+    destination = portal_destination(broker, &error);
+    if (destination == NULL) goto failed;
     reply = g_dbus_connection_call_with_unix_fd_list_sync(broker->bus,
-        PORTAL_NAME, PORTAL_PATH, "org.freedesktop.portal.GameMode", method,
+        destination, PORTAL_PATH, "org.freedesktop.portal.GameMode", method,
         g_variant_new("(hh)", target_handle, requester_handle),
         G_VARIANT_TYPE("(i)"), G_DBUS_CALL_FLAGS_NO_AUTO_START, -1, fds, NULL, NULL,
         &error);
@@ -1547,12 +1702,6 @@ int main(int argc, char **argv)
     broker.system_bus = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, &error);
     if (broker.system_bus == NULL)
         goto failed;
-    reply = g_dbus_connection_call_sync(broker.bus, PORTAL_NAME, PORTAL_PATH,
-        "org.freedesktop.host.portal.Registry", "Register",
-        g_variant_new("(s@a{sv})", broker.app_id,
-            g_variant_new_array(G_VARIANT_TYPE("{sv}"), NULL, 0)),
-        G_VARIANT_TYPE_UNIT, G_DBUS_CALL_FLAGS_NO_AUTO_START, 5000, NULL, NULL);
-    if (reply != NULL) g_variant_unref(reply);
     node = g_dbus_node_info_new_for_xml(open_xml, &error);
     if (node == NULL)
         goto failed;
@@ -1586,12 +1735,16 @@ int main(int argc, char **argv)
         g_dbus_node_info_unref(node);
         goto failed;
     }
+    broker.portal_watch = g_bus_watch_name_on_connection(broker.bus,
+        PORTAL_NAME, G_BUS_NAME_WATCHER_FLAGS_NONE,
+        portal_appeared, portal_vanished, &broker, NULL);
     if (write(ready_fd, "1", 1) != 1) {
         g_dbus_connection_unregister_object(broker.bus, registration);
         g_dbus_node_info_unref(node);
         goto failed;
     }
     close(ready_fd);
+    ready_fd = -1;
     broker.loop = g_main_loop_new(NULL, FALSE);
     sigterm_source = g_unix_signal_add(SIGTERM, stop_broker, broker.loop);
     sigint_source = g_unix_signal_add(SIGINT, stop_broker, broker.loop);
@@ -1601,6 +1754,8 @@ int main(int argc, char **argv)
     g_main_loop_unref(broker.loop);
     g_dbus_connection_unregister_object(broker.bus, registration);
     g_dbus_node_info_unref(node);
+    g_bus_unwatch_name(broker.portal_watch);
+    clear_portal_identity(&broker);
     g_object_unref(broker.system_bus);
     g_object_unref(broker.bus);
     for (index = 0; index < (int)broker.staged_files->len; index++)
@@ -1608,9 +1763,12 @@ int main(int argc, char **argv)
     g_ptr_array_unref(broker.staged_files);
     g_ptr_array_unref(broker.mappings);
     g_free(broker.app_id); g_free(broker.space_name);
-    return 0;
+    return broker.exit_status;
 
 failed:
+    if (broker.portal_watch != 0)
+        g_bus_unwatch_name(broker.portal_watch);
+    clear_portal_identity(&broker);
     if (error != NULL) {
         g_printerr("spaces-broker: %s\n", error->message);
         g_clear_error(&error);

@@ -11,6 +11,57 @@ guest caller can close every request or session it owns.  A host portal response
 such as `cancelled`, `not allowed`, or `service unavailable` is not a routing
 failure when the same call has the same result directly on the host.
 
+## Broker identity and login races
+
+`test_broker_registration.py` compiles the production broker and runs it against
+`broker_portal_fixture.py` on a private D-Bus daemon. The fixture keys secrets
+by the caller's registered application ID, records registration and secret
+requests, and can delay or reject registration. It never opens the real desktop
+portal or accesses a user's wallet. Requirements: a C compiler, pkg-config,
+GLib development files, dbus-daemon, and Python GI/Gio.
+
+Run inside the test checkout in the Fedora Space:
+
+```sh
+PYTHONPATH=src python3 -m unittest tests.test_broker_registration -v
+```
+
+To reproduce issue #4 with the original broker, export its source from the
+pre-fix checkout and put it in the test environment, then run:
+
+```sh
+git show 8a07f9d:native/spaces_broker.c > /tmp/spaces-broker-before.c
+SPACES_BROKER_SOURCE=/tmp/spaces-broker-before.c python3 -m unittest \
+  tests.test_broker_registration.BrokerRegistrationTests.test_broker_before_portal_never_uses_unregistered_identity -v
+```
+
+On `win5`'s Fedora 44 Space, the original broker served a 64-byte derived secret
+after starting before the portal; the fixture recorded an empty application ID
+instead of `org.anatase.Spaces.fedora`. The regression fails on that assertion.
+The corrected broker rejects requests until registration succeeds. Coverage also
+includes transient errors, a slow registration, owner replacement, a late reply
+from an old owner, portal disappearance/reappearance, and an ambiguous timeout.
+Because [Registry.Register is one-shot](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.host.portal.Registry.html),
+a timeout requires supervisor replacement
+with a fresh D-Bus connection; known failures retry with exponential backoff
+capped at 30 seconds. The ready FD describes the integration transport, rather
+than claiming that the optional host portal is ready.
+
+Live validation on 2026-10-31, `win5`, SELinux enforcing: installed the test broker
+in a temporary `/usr` overlay; stopped the host portal, started brokers while it
+was absent, and verified prompt registration errors and no portal activation.
+Starting and restarting the host portal restored secret retrieval without
+restarting brokers, with the same derived secret. A freshly started unmodified
+broker returned the same secret as the correction. The existing Fedora managed
+wallet rejected that key; with the user's authorization, retained its encrypted
+files and metadata in
+`/home/dev/.local/share/kwalletd/spaces-issue4-backup-3rbrqfmd` and recreated the
+managed wallet. Repeated KWallet activation/unlock then passed, including after
+a host portal restart. The installed test broker is discarded on host reboot;
+these checks do not establish reliability across subsequent desktop logins.
+The full Fedora test suite passed with 519 tests run and 20 skips; native build
+and guest ABI checks passed too.
+
 ## Host accessibility (AT-SPI)
 
 Desktop permissions have three levels: `disabled`, `basic`, and

@@ -877,7 +877,8 @@ def _start_open_broker(
             group=user.gid,
             pass_fds=(*descriptors, ready_write),
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            # Keep registration failures visible in the supervising service journal.
+            stderr=None,
         )
     except Exception:
         os.close(ready_read)
