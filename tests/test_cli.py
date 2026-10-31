@@ -878,7 +878,7 @@ class CliTests(unittest.TestCase):
                     "preset": "custom",
                     "home": ["Documents"],
                     "administrator": False,
-                    "desktop": True,
+                    "desktop": "basic",
                     "credential_agents": False,
                     "mounted_drives": True,
                 },

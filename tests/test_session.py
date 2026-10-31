@@ -365,6 +365,7 @@ class DesktopPathTests(unittest.TestCase):
                 "XDG_RUNTIME_DIR": f"/run/user/{desktop_user.uid}",
                 "DBUS_SESSION_BUS_ADDRESS": "unix:path=/host/bus",
                 "WAYLAND_DISPLAY": "wayland-0",
+                "AT_SPI_BUS_ADDRESS": "unix:path=/host/a11y",
                 "PULSE_SERVER": (
                     f"unix:/run/user/{desktop_user.uid}/pulse/native"
                 ),
@@ -416,6 +417,7 @@ class DesktopPathTests(unittest.TestCase):
                 "/run/spaces-host/config:/etc/xdg",
             )
             self.assertNotIn("DBUS_SESSION_BUS_ADDRESS", plan.environment)
+            self.assertNotIn("AT_SPI_BUS_ADDRESS", plan.environment)
             self.assertNotIn("XDG_RUNTIME_DIR", plan.environment)
             self.assertNotIn("XDG_SESSION_ID", plan.environment)
             self.assertTrue(
@@ -1207,6 +1209,7 @@ class DesktopControllerTests(unittest.TestCase):
                         "--systemd",
                         "DISPLAY",
                         "XDG_DATA_DIRS",
+                        "AT_SPI_BUS_ADDRESS=",
                     ],
                     environment=plan.environment,
                 ),

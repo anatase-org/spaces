@@ -570,6 +570,7 @@ class LaunchTests(unittest.TestCase):
         self.assertEqual(user.permitted_home, ("Téléchargements",))
         self.assertTrue(user.administrator)
         self.assertTrue(user.desktop)
+        self.assertFalse(user.accessibility)
         self.assertFalse(user.credential_agents)
         self.assertTrue(user.mounted_drives)
         self.assertEqual(
@@ -578,6 +579,7 @@ class LaunchTests(unittest.TestCase):
         )
         self.assertTrue(developer.administrator)
         self.assertTrue(developer.desktop)
+        self.assertTrue(developer.accessibility)
         self.assertTrue(developer.credential_agents)
         self.assertTrue(developer.mounted_drives)
         (self.host_home / ".config/user-dirs.dirs").write_text(

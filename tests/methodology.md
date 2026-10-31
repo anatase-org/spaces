@@ -11,6 +11,97 @@ guest caller can close every request or session it owns.  A host portal response
 such as `cancelled`, `not allowed`, or `service unavailable` is not a routing
 failure when the same call has the same result directly on the host.
 
+## Host accessibility (AT-SPI)
+
+Desktop permissions have three levels: `disabled`, `basic`, and
+`accessibility`. The wizard calls the last level **Plus Accessibility and Agent
+computer use**. Basic/application presets use basic integration; Develop
+presets use accessibility, including existing Develop spaces on their next
+start. Custom legacy boolean grants keep their meaning (`false` is disabled,
+`true` is basic). Configuration saves write the canonical strings.
+
+The accessibility tier forwards the selected host user's dedicated AT-SPI
+bus. It provides the accessible tree, supported semantic actions, text editing,
+and events; it does not provide screenshots or general pointer/keyboard input.
+It does not change host accessibility settings. `org.a11y.Status.IsEnabled`
+being false does not imply that the registry or applications are unavailable.
+Toolkit support and application accessibility exposure remain prerequisites.
+
+Run the automated coverage with:
+
+```sh
+PYTHONPATH=src python3 -m unittest discover -s tests -p test_accessibility.py -v
+```
+
+The private-bus tests need `dbus-daemon`, `busctl`, `xdg-dbus-proxy`, and Python
+GI/Gio in the test environment. They skip explicitly when the proxy/bus or GI
+dependencies are missing. These are test requirements; production forwarding
+adds no Python GI dependency and reuses Spaces' existing host proxy dependency.
+The tests exercise real discovery/proxy traffic with a fake registry and a
+separate application bus connection, including unique-name traversal, Unicode
+editing, actions, events, reverse callbacks, application replacement, and
+disconnecting held connections. Controller tests cover retries, source
+replacement, logout, downgrade, and failed-update rollback.
+
+For a real desktop test, run each fixture from a host graphical terminal:
+
+```sh
+python3 tests/manual_atspi_fixture.py gtk spaces-test-gtk /tmp/spaces-atspi-gtk.json
+```
+
+```sh
+python3 tests/manual_atspi_fixture.py qt spaces-test-qt /tmp/spaces-atspi-qt.json
+```
+
+GTK requires Python GI with GTK 3; Qt requires PySide6. Fixtures do not enable
+host accessibility settings. Use fresh tokens and state files for each run.
+Configure the test Space with accessibility integration and restart it through
+the usual Spaces configuration flow. With the checkout shared into its home,
+run (adjust the checkout path and Space name):
+
+```sh
+spaces enter fedora -- python3 /home/dev/Projects/spaces/tests/manual_atspi_probe.py spaces-test-gtk
+spaces enter fedora -- python3 /home/dev/Projects/spaces/tests/manual_atspi_probe.py spaces-test-qt
+```
+
+The guest probe uses its stock `libatspi.so.0` through Python ctypes, so it
+needs no GI bindings or agent SDK. It must find the uniquely named host window,
+invoke the button and checkbox, enter `Héllo 世界`, and receive state events.
+Independently inspect the **host** JSON files: after queued toolkit callbacks
+settle, both must contain `clicks: 1`, the Unicode text, and `checked: true`.
+A successful method return alone is insufficient.
+
+Downgrade to basic integration and launch a fresh guest process:
+
+```sh
+spaces enter fedora -- python3 /home/dev/Projects/spaces/tests/manual_atspi_probe.py spaces-test-gtk --expect-absent
+```
+
+Confirm that the guest manager/activation environment no longer contains the
+forwarded address (an empty value means native discovery), the private proxy
+has exited, and its socket is no longer mounted. Test logout and replacement
+of the selected graphical login too. Basic and disabled tiers must not create
+the host accessibility bridge. Guest-native accessibility can still work.
+For user isolation, try the host proxy socket as a second ordinary UID: the
+private directory/socket must reject it. Root and guest administrators are
+outside this Unix permission isolation check.
+
+Keep SELinux enforcing during live tests and inspect audit denials. Do not
+disable enforcement or deploy policy using `sync.sh --selinux`; any required
+policy installation is user-operated. Close the fixture windows and remove
+their temporary state files afterwards.
+
+Validation on 2026-10-31: private-bus traffic passed on the KDE/Wayland host;
+GTK and Qt actions, Unicode editing, and events passed through the production
+bridge/controller into the running Fedora Space using a temporary test grant.
+Host state confirmed both button clicks and checkbox changes. A new guest
+process could not discover the host fixture after revocation; a second ordinary
+UID was denied access to the proxy socket. SELinux stayed enforcing with no
+AVC denials. This exercised the running host/guest bridge without installing
+the updated service or changing the Space's persistent permission settings.
+Discovery, proxy startup, guest registry traversal, and cleanup were also
+verified under the service's actual `spaces_t` SELinux domain while enforcing.
+
 ## Probe files
 
 - `manual_portal_probe.sh` performs synchronous property, status, enumeration,

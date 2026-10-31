@@ -35,6 +35,33 @@ def rendered_widget_text(widget: Static) -> str:
 
 
 class TuiTests(unittest.IsolatedAsyncioTestCase):
+
+    async def test_desktop_levels_round_trip_and_develop_default(self) -> None:
+        app = PermissionForm(
+            home=Path("/home/user"),
+            folders=[],
+            network="basic",
+            selected_home=[],
+            include_system=False,
+            distribution_title="",
+            distribution_description="",
+            distribution_options=[],
+            distribution_value=None,
+            desktop="accessibility",
+        )
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            self.assertEqual(app._result()["desktop"], "accessibility")
+            for level in ("disabled", "basic", "accessibility"):
+                app.query_one("#desktop-" + level, CleanRadioButton).value = (
+                    True
+                )
+                await pilot.pause()
+                self.assertEqual(app._result()["desktop"], level)
+            await pilot.click("#preset-develop")
+            await pilot.pause()
+            self.assertEqual(app._result()["desktop"], "accessibility")
+
     def test_permission_form_uses_textual_4_theme_variables(self) -> None:
         self.assertNotIn("$ansi-foreground", PermissionForm.CSS)
         self.assertIn("color: $foreground;", PermissionForm.CSS)
@@ -386,7 +413,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                 "Desktop permissions (10/13)",
             )
             desktop = app.query_one("#desktop", RadioSet)
-            self.assertEqual(desktop.pressed_button.id, "desktop-true")
+            self.assertEqual(desktop.pressed_button.id, "desktop-basic")
             self.assertEqual(
                 [
                     button.label.plain
@@ -395,6 +422,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                 [
                     "Do not enable desktop (GUI) apps for user user",
                     "Enable desktop (GUI) apps to work for user user",
+                    "Plus Accessibility and Agent computer use",
                 ],
             )
             await pilot.press("enter")
@@ -469,7 +497,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                 "Host authentication: Enabled",
                 "Application shortcuts: Enabled",
                 "Administrator: Administrator",
-                "Desktop: Enabled",
+                "Desktop: Basic desktop integration",
                 "Mounted drives: Read-write",
                 "Credential agents: Enabled",
                 "  ~/Projects",
@@ -670,7 +698,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                     "preset": "custom",
                     "home": ["Projects"],
                     "administrator": False,
-                    "desktop": True,
+                    "desktop": "basic",
                     "credential_agents": True,
                     "mounted_drives": True,
                 },

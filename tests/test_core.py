@@ -333,7 +333,7 @@ class CoreTests(unittest.TestCase):
         self.assertNotIn(".bashrc", selected_home)
         self.assertNotIn(".zshrc", selected_home)
         self.assertTrue(administrator)
-        self.assertTrue(desktop)
+        self.assertEqual(desktop, "basic")
         self.assertFalse(credential_agents)
         self.assertTrue(mounted_drives)
 
@@ -352,7 +352,7 @@ class CoreTests(unittest.TestCase):
                     "user": {
                         "home": ["Downloads"],
                         "administrator": True,
-                        "desktop": True,
+                        "desktop": "basic",
                         "credential_agents": False,
                         "mounted_drives": True,
                     },
@@ -375,7 +375,7 @@ class CoreTests(unittest.TestCase):
                             ".ssh/config",
                         ],
                         "administrator": True,
-                        "desktop": True,
+                        "desktop": "accessibility",
                         "credential_agents": True,
                         "mounted_drives": True,
                     },
@@ -689,15 +689,19 @@ class CoreTests(unittest.TestCase):
         with self.assertRaises(core.SpacesError):
             core.validate_info(info)
 
-    def test_desktop_permission_defaults_true_and_requires_boolean(self) -> None:
+    def test_desktop_permission_defaults_basic_and_rejects_integer(
+        self,
+    ) -> None:
         identity = core.Identity(1000, 1000, Path("/home/user"))
         info = core.create_info(
             "work", {"id": "custom"}, identity, "basic", [], desktop=False
         )
-        self.assertFalse(core.defaults_from_info(info, identity)[7])
+        self.assertEqual(
+            core.defaults_from_info(info, identity)[7], "disabled"
+        )
         del info["permissions"]["users"]["1000"]["permissions"]["desktop"]
         core.validate_info(info)
-        self.assertTrue(core.defaults_from_info(info, identity)[7])
+        self.assertEqual(core.defaults_from_info(info, identity)[7], "basic")
         info["permissions"]["users"]["1000"]["permissions"]["desktop"] = 1
         with self.assertRaises(core.SpacesError):
             core.validate_info(info)

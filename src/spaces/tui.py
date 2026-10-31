@@ -37,10 +37,10 @@ from .core import (
     NETWORK_LEVELS,
     PERMISSION_PRESETS,
     SpacesError,
+    desktop_level,
     preset_user_permissions,
     validate_space_name,
 )
-
 
 class PermissionOption(NamedTuple):
     """A short choice name and its expanded explanation."""
@@ -443,13 +443,19 @@ class PermissionForm(
         ),
     }
     DESKTOP_OPTIONS = {
-        False: PermissionOption(
+        "disabled": PermissionOption(
             _("Disabled"),
             _("Do not share the host graphical login with this user."),
         ),
-        True: PermissionOption(
-            _("Enabled"),
+        "basic": PermissionOption(
+            _("Basic desktop integration"),
             _("Allow graphical applications to use the host login session."),
+        ),
+        "accessibility": PermissionOption(
+            _("Plus Accessibility and Agent computer use"),
+            _(
+                "Also allow applications to inspect and operate accessible host interfaces."
+            ),
         ),
     }
     CREDENTIAL_AGENT_OPTIONS = {
@@ -502,7 +508,7 @@ class PermissionForm(
         distribution_multiple: bool = False,
         distribution_values: list[str] | None = None,
         administrator: bool = True,
-        desktop: bool = True,
+        desktop: str | bool = "basic",
         credential_agents: bool = True,
         mounted_drives: bool = True,
         administrator_group: str = "wheel",
@@ -524,7 +530,7 @@ class PermissionForm(
         self.initial_shortcuts = shortcuts
         self.initial_home = set(selected_home)
         self.initial_administrator = administrator
-        self.initial_desktop = desktop
+        self.initial_desktop = desktop_level(desktop)
         self.initial_credential_agents = credential_agents
         self.initial_mounted_drives = mounted_drives
         self.initial_preset = preset
@@ -799,17 +805,28 @@ class PermissionForm(
                             "Do not enable desktop (GUI) apps for {user} user",
                             user=self.home.name,
                         ),
-                        value=not self.initial_desktop,
-                        id="desktop-false",
+                        value=self.initial_desktop == "disabled",
+                        id="desktop-disabled",
                     )
                     yield CleanRadioButton(
                         _(
                             "Enable desktop (GUI) apps to work for {user} user",
                             user=self.home.name,
                         ),
-                        value=self.initial_desktop,
-                        id="desktop-true",
+                        value=self.initial_desktop == "basic",
+                        id="desktop-basic",
                     )
+                    yield CleanRadioButton(
+                        _("Plus Accessibility and Agent computer use"),
+                        value=self.initial_desktop == "accessibility",
+                        id="desktop-accessibility",
+                    )
+                yield Label(
+                    _(
+                        "Accessibility also allows applications to inspect and operate accessible host interfaces."
+                    ),
+                    classes="description",
+                )
             with Vertical(id="credential-agents-step", classes="step"):
                 yield Static(
                     _(
@@ -1242,8 +1259,7 @@ class PermissionForm(
                     "desktop": self._radio_value(
                         self.query_one("#desktop", RadioSet),
                         "desktop-",
-                    )
-                    == "true",
+                    ),
                     "credential_agents": self._radio_value(
                         self.query_one("#credential-agents", RadioSet),
                         "credential-agents-",

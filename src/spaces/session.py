@@ -20,6 +20,7 @@ import stat
 import subprocess
 import tempfile
 import time
+from urllib.parse import quote, unquote
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Protocol
@@ -31,6 +32,7 @@ from . import core
 MAX_ENVIRONMENT_VALUE = 4096
 MACHINECTL = "/usr/bin/machinectl"
 SYSTEMCTL = "/usr/bin/systemctl"
+BUSCTL = "/usr/bin/busctl"
 SYSTEMD_RUN = "/usr/bin/systemd-run"
 XDG_DBUS_PROXY = "/usr/bin/xdg-dbus-proxy"
 DCONF = "/usr/bin/dconf"
@@ -59,9 +61,11 @@ STATUS_STATES = frozenset({"active", "inactive", "pending"})
 # Do not add DBUS_SESSION_BUS_ADDRESS, XDG_RUNTIME_DIR, or XDG_SESSION_ID here.
 # Those identify the host login and must remain guest-native values established
 # by pam_systemd. Every entry in this set is safe to copy from a selected host
-# graphical session into a PAM-backed command environment.
+# graphical session into a PAM-backed command environment, except
+# AT_SPI_BUS_ADDRESS, which is synthesized only for a ready accessibility bridge.
 DESKTOP_ENVIRONMENT = frozenset(
     {
+        "AT_SPI_BUS_ADDRESS",
         "BROWSER",
         "COLORTERM",
         "DCONF_PROFILE",
@@ -201,6 +205,7 @@ class DesktopUser(Protocol):
     space_home: Path
     guest_home: PurePosixPath
     desktop: bool
+    accessibility: bool
     credential_agents: bool
 
 
@@ -252,6 +257,7 @@ class DesktopPlan:
     mime_sources: tuple[tuple[Path, Path], ...] = ()
     open_data_root: Path | None = None
     desktop: bool = True
+    accessibility: bool = False
 
 
 class DesktopSetupError(Exception):
@@ -272,11 +278,15 @@ class _ActiveDesktop:
     portal: PortalProxy | None = None
     portal_binding: DesktopBind | None = None
     graphical_session: bool = False
+    accessibility: PortalProxy | None = None
+    accessibility_binding: DesktopBind | None = None
+    accessibility_source: DesktopBind | None = None
+    accessibility_environment_dirty: bool = False
 
 
 @dataclass
 class PortalProxy:
-    """One login-scoped filtered connection to the host session bus."""
+    """A login-scoped D-Bus proxy, optionally with a portal broker."""
 
     process: subprocess.Popen[bytes]
     control_fd: int
@@ -898,12 +908,16 @@ def _start_open_broker(
         os.close(ready_read)
 
 
-def _prepare_portal_directory(space_name: str, user: DesktopUser) -> Path:
+def _prepare_portal_directory(
+    space_name: str, user: DesktopUser, *, component: str = "portal"
+) -> Path:
     core.validate_space_name(space_name)
     space = RUNTIME_ROOT / space_name
     desktop = space / "desktop"
     parent = desktop / str(user.uid)
-    directory = parent / "portal"
+    if component not in {"portal", "a11y"}:
+        raise ValueError(component)
+    directory = parent / component
     expected_owner = 0 if os.geteuid() == 0 else os.getuid()
     for path in (space, desktop, parent):
         if path.is_symlink():
@@ -1052,6 +1066,165 @@ def start_portal_proxy(
             inode=metadata.st_ino,
         )
         return proxy, binding
+    except Exception:
+        proxy.close()
+        socket_path.unlink(missing_ok=True)
+        raise
+
+
+def discover_accessibility_bus(user: DesktopUser) -> DesktopBind:
+    """Discover only the selected user's local, dedicated accessibility bus."""
+    completed = subprocess.run(
+        [
+            BUSCTL,
+            f"--address=unix:path=/run/user/{user.uid}/bus",
+            "--timeout=5",
+            "--json=short",
+            "call",
+            "org.a11y.Bus",
+            "/org/a11y/bus",
+            "org.a11y.Bus",
+            "GetAddress",
+        ],
+        user=user.uid,
+        group=user.gid,
+        env={
+            "PATH": "/usr/bin",
+            "LANG": "C.UTF-8",
+            "XDG_RUNTIME_DIR": f"/run/user/{user.uid}",
+        },
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=6,
+    )
+    reply = json.loads(completed.stdout)
+    if not isinstance(reply, dict) or reply.get("type") != "s":
+        raise core.SpacesError(_("Invalid host accessibility bus reply."))
+    data = reply.get("data")
+    if (
+        not isinstance(data, list)
+        or len(data) != 1
+        or not isinstance(data[0], str)
+    ):
+        raise core.SpacesError(_("Invalid host accessibility bus reply."))
+    # Accept a single filesystem Unix address (optionally with a bus GUID).
+    # Never let the discovery service redirect the privileged proxy to TCP,
+    # an abstract socket, another bus, or outside this user's runtime.
+    match = re.fullmatch(
+        r"unix:path=([^,;]+)(?:,guid=[0-9a-fA-F]{32})?", data[0]
+    )
+    if match is None:
+        raise core.SpacesError(
+            _("Unsupported host accessibility bus address.")
+        )
+    encoded = match.group(1)
+    if re.search(r"%(?![0-9a-fA-F]{2})", encoded):
+        raise core.SpacesError(_("Invalid host accessibility bus path."))
+    path = Path(unquote(encoded, errors="strict"))
+    runtime = Path(f"/run/user/{user.uid}")
+    if not path.is_absolute() or path == runtime / "bus":
+        raise core.SpacesError(_("Invalid host accessibility bus path."))
+    # Accessibility sockets must not be supplied through symlink aliases.
+    if any(item.is_symlink() for item in (path, *path.parents)):
+        raise core.SpacesError(_("Unsafe host accessibility bus path."))
+    checked = _validated_source(
+        path,
+        roots=(runtime,),
+        kinds=(stat.S_IFSOCK,),
+        user=pwd.getpwuid(user.uid),
+        owner=user.uid,
+    )
+    if checked is None:
+        raise core.SpacesError(_("Host accessibility bus is unavailable."))
+    source, metadata = checked
+    if source == runtime.resolve() / "bus":
+        raise core.SpacesError(
+            _("The host session bus is not an accessibility bus.")
+        )
+    return DesktopBind(str(source), source, metadata.st_dev, metadata.st_ino)
+
+
+def start_accessibility_proxy(
+    space_name: str,
+    user: DesktopUser,
+    session_id: str,
+    source: DesktopBind,
+) -> tuple[PortalProxy, DesktopBind]:
+    """Forward a dedicated AT-SPI bus, including bidirectional callbacks."""
+    metadata = source.source.lstat()
+    if (
+        not stat.S_ISSOCK(metadata.st_mode)
+        or metadata.st_uid != user.uid
+        or (metadata.st_dev, metadata.st_ino) != (source.device, source.inode)
+    ):
+        raise SessionResourceChangedError(_("Host accessibility bus changed."))
+    socket_path = _prepare_portal_directory(space_name, user, component="a11y")
+    generation = hashlib.sha256(session_id.encode()).hexdigest()[:16]
+    control_read, control_write = os.pipe2(os.O_CLOEXEC | os.O_NONBLOCK)
+    # D-Bus address escaping differs from shell quoting.
+    address = "unix:path=" + quote(str(source.source), safe="/._-")
+    try:
+        process = subprocess.Popen(
+            [
+                SYSTEMD_RUN,
+                "--user",
+                "--scope",
+                "--quiet",
+                f"--unit=app-spaces-a11y-{space_name}-{generation}.scope",
+                "--description=Spaces accessibility proxy",
+                "--",
+                XDG_DBUS_PROXY,
+                address,
+                str(socket_path),
+                f"--fd={control_write}",
+            ],
+            env={
+                "DBUS_SESSION_BUS_ADDRESS": f"unix:path=/run/user/{user.uid}/bus",
+                "XDG_RUNTIME_DIR": f"/run/user/{user.uid}",
+                "PATH": "/usr/bin",
+                "LANG": "C.UTF-8",
+            },
+            user=user.uid,
+            group=user.gid,
+            pass_fds=(control_write,),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        os.close(control_read)
+        raise
+    finally:
+        os.close(control_write)
+    proxy = PortalProxy(process, control_read, socket_path)
+    poller = select.poll()
+    poller.register(
+        control_read, select.POLLIN | select.POLLHUP | select.POLLERR
+    )
+    try:
+        if (
+            not poller.poll(round(PORTAL_READY_TIMEOUT * 1000))
+            or process.poll() is not None
+        ):
+            raise core.SpacesError(
+                _("Timed out starting the host accessibility proxy.")
+            )
+        if not os.read(control_read, 1):
+            raise core.SpacesError(
+                _("Host accessibility proxy exited before readiness.")
+            )
+        metadata = socket_path.lstat()
+        if not stat.S_ISSOCK(metadata.st_mode) or metadata.st_uid != user.uid:
+            raise core.SpacesError(
+                _("Unsafe host accessibility proxy socket.")
+            )
+        os.chmod(socket_path, 0o600)
+        return proxy, DesktopBind(
+            str(DESKTOP_ROOT / str(user.uid) / "a11y" / "bus"),
+            socket_path,
+            metadata.st_dev,
+            metadata.st_ino,
+        )
     except Exception:
         proxy.close()
         socket_path.unlink(missing_ok=True)
@@ -1467,6 +1640,7 @@ def _plan(
         if name in DESKTOP_ENVIRONMENT and _safe_value(value)
     }
     for forbidden in (
+        "AT_SPI_BUS_ADDRESS",
         "DBUS_SESSION_BUS_ADDRESS",
         "DCONF_PROFILE",
         "FONTCONFIG_FILE",
@@ -1806,6 +1980,7 @@ def _plan(
         open_mappings=open_mappings,
         mime_sources=tuple(mime_sources),
         open_data_root=open_data_root,
+        accessibility=getattr(user, "accessibility", False),
     )
 
 
@@ -2101,13 +2276,23 @@ class DesktopController:
             if user.uid in self.active or user.uid in self.guest_sessions:
                 self.deactivate(user)
             return
+        current = self.active.get(user.uid)
+        if current is not None and (
+            not user.desktop or not getattr(user, "accessibility", False)
+        ):
+            self._revoke_accessibility(user, current)
         environment = host_manager_environment(user)
         selected = (
             select_graphical_session(sessions, environment)
             if user.desktop
             else None
         )
-        current = self.active.get(user.uid)
+        if current is not None and (
+            selected is None or selected.session_id != current.plan.session_id
+        ):
+            # Revoke before planning: an unrelated setup failure must never
+            # preserve access to a superseded login or permission grant.
+            self._revoke_accessibility(user, current)
         if selected is None and not credential_agents:
             self.deactivate(user)
             return
@@ -2174,6 +2359,7 @@ class DesktopController:
             raise DesktopSetupError(str(error)) from error
         if current is not None and current.plan == plan:
             self._repair_portal(user, current)
+            self._repair_accessibility(user, current)
             return
         set_status(self.space_name, user.uid, "pending")
         if previous is not None:
@@ -2193,7 +2379,19 @@ class DesktopController:
                 self._remove_generated(plan)
             if previous is not None:
                 try:
-                    self.active[user.uid] = self._activate(user, previous.plan)
+                    self.active[user.uid] = self._activate(
+                        user,
+                        replace(
+                            previous.plan,
+                            accessibility=(
+                                previous.plan.accessibility
+                                and getattr(user, "accessibility", False)
+                                and selected is not None
+                                and selected.session_id
+                                == previous.plan.session_id
+                            ),
+                        ),
+                    )
                 except DesktopRevocationError:
                     set_status(self.space_name, user.uid, "inactive")
                     raise
@@ -2242,7 +2440,7 @@ class DesktopController:
                 self.deactivate(user)
 
     def reconcile_portals(self) -> None:
-        """Retry portal-only failures without rebuilding desktop forwarding."""
+        """Retry optional bus bridges without rebuilding desktop forwarding."""
 
         for current in self.active.values():
             if (
@@ -2255,17 +2453,19 @@ class DesktopController:
                 logger.info(
                     _("Refreshed guest MIME defaults for {space}.", space=self.space_name)
                 )
-        if not self.portals_enabled:
-            return
         for uid, current in tuple(self.active.items()):
             user = self.users.get(uid)
             if user is not None:
                 self._repair_portal(user, current)
+                self._repair_accessibility(user, current)
 
     def abandon(self) -> None:
         """Forget state after the machine has already removed its namespaces."""
 
         for current in self.active.values():
+            if current.accessibility is not None:
+                current.accessibility.close()
+                current.accessibility.socket_path.unlink(missing_ok=True)
             if current.portal is not None:
                 current.portal.close()
                 current.portal.socket_path.unlink(missing_ok=True)
@@ -2358,12 +2558,171 @@ class DesktopController:
                     )
                 ) from cleanup_error
             raise
-        return _ActiveDesktop(
+        current = _ActiveDesktop(
             plan=plan,
             portal=portal,
             portal_binding=portal_binding,
             graphical_session=graphical_session,
         )
+        self._repair_accessibility(user, current)
+        return current
+
+    @staticmethod
+    def _active_environment(current: _ActiveDesktop) -> dict[str, str]:
+        environment = dict(current.plan.environment)
+        if (
+            current.accessibility is not None
+            and current.accessibility_binding is not None
+        ):
+            environment["AT_SPI_BUS_ADDRESS"] = (
+                "unix:path=" + current.accessibility_binding.destination
+            )
+        return environment
+
+    def _publish_accessibility(
+        self, user: DesktopUser, current: _ActiveDesktop
+    ) -> None:
+        current.accessibility_environment_dirty = True
+        environment = self._active_environment(current)
+        # The D-Bus activation API has no unset operation. Empty means native
+        # discovery to libatspi, and removes the stale host address everywhere.
+        address = environment.get("AT_SPI_BUS_ADDRESS", "")
+        self._machine_user(
+            user,
+            [
+                DBUS_UPDATE_ACTIVATION_ENVIRONMENT,
+                "--systemd",
+                f"AT_SPI_BUS_ADDRESS={address}",
+            ],
+        )
+        _write_record(
+            self.space_name,
+            user.uid,
+            "active",
+            current.plan.session_id,
+            environment,
+        )
+        current.accessibility_environment_dirty = False
+
+    def _revoke_accessibility(
+        self,
+        user: DesktopUser,
+        current: _ActiveDesktop,
+    ) -> None:
+        if (
+            current.accessibility is None
+            and current.accessibility_binding is None
+            and not current.accessibility_environment_dirty
+        ):
+            return
+        if current.accessibility is not None:
+            # Closing the proxy revokes already-open connections, even if
+            # unmounting fails. Never roll this back during a downgrade.
+            current.accessibility.close()
+            current.accessibility.socket_path.unlink(missing_ok=True)
+            current.accessibility = None
+        current.accessibility_source = None
+        try:
+            self._publish_accessibility(user, current)
+        except Exception as error:
+            logger.warning(
+                _(
+                    "Could not clear accessibility environment for {user}: {error}",
+                    user=user.name,
+                    error=error,
+                )
+            )
+            _write_record(
+                self.space_name,
+                user.uid,
+                "active",
+                current.plan.session_id,
+                current.plan.environment,
+            )
+        if current.accessibility_binding is not None:
+            try:
+                self._unmount(user.uid, current.accessibility_binding)
+            except Exception as error:
+                raise DesktopRevocationError(
+                    _(
+                        "Could not remove the revoked accessibility socket: {error}",
+                        error=error,
+                    )
+                ) from error
+            current.accessibility_binding = None
+
+    def _repair_accessibility(
+        self, user: DesktopUser, current: _ActiveDesktop
+    ) -> None:
+        if not (
+            current.plan.desktop
+            and current.plan.accessibility
+            and getattr(user, "accessibility", False)
+            and user.uid != 0
+        ):
+            try:
+                self._revoke_accessibility(user, current)
+            except Exception as cleanup_error:
+                logger.warning(
+                    _(
+                        "Could not remove accessibility bridge for {user}: {error}",
+                        user=user.name,
+                        error=cleanup_error,
+                    )
+                )
+            return
+        proxy: PortalProxy | None = None
+        try:
+            source = discover_accessibility_bus(user)
+            if (
+                current.accessibility is not None
+                and current.accessibility.process.poll() is None
+                and current.accessibility_source == source
+                and current.accessibility_binding is not None
+            ):
+                metadata = current.accessibility.socket_path.lstat()
+                binding = current.accessibility_binding
+                if (
+                    stat.S_ISSOCK(metadata.st_mode)
+                    and metadata.st_uid == user.uid
+                    and (metadata.st_dev, metadata.st_ino)
+                    == (binding.device, binding.inode)
+                ):
+                    return
+            self._revoke_accessibility(user, current)
+            proxy, binding = start_accessibility_proxy(
+                self.space_name,
+                user,
+                current.plan.session_id,
+                source,
+            )
+            self._mount(user.uid, binding)
+            current.accessibility = proxy
+            current.accessibility_binding = binding
+            current.accessibility_source = source
+            self._publish_accessibility(user, current)
+        except Exception as error:
+            if proxy is not None and current.accessibility is not proxy:
+                proxy.close()
+                proxy.socket_path.unlink(missing_ok=True)
+            try:
+                self._revoke_accessibility(user, current)
+            except Exception as cleanup_error:
+                logger.warning(
+                    _(
+                        "Could not remove failed accessibility bridge for {user}: {error}",
+                        user=user.name,
+                        error=cleanup_error,
+                    )
+                )
+            logger.warning(
+                _(
+                    "Could not enable host accessibility for {user}; retrying "
+                    "without affecting desktop forwarding: {error}",
+                    user=user.name,
+                    error=error,
+                )
+            )
 
     def _repair_portal(
         self,
@@ -2397,7 +2756,13 @@ class DesktopController:
             ):
                 if not current.graphical_session:
                     try:
-                        self._start_graphical_session(user, current.plan)
+                        self._start_graphical_session(
+                            user,
+                            replace(
+                                current.plan,
+                                environment=self._active_environment(current),
+                            ),
+                        )
                         current.graphical_session = True
                     except Exception as error:
                         logger.warning(
@@ -2456,7 +2821,12 @@ class DesktopController:
             return
         graphical_session = False
         try:
-            self._start_graphical_session(user, current.plan)
+            self._start_graphical_session(
+                user,
+                replace(
+                    current.plan, environment=self._active_environment(current)
+                ),
+            )
             graphical_session = True
         except Exception as error:
             logger.warning(
@@ -2478,6 +2848,7 @@ class DesktopController:
         *,
         remove_generated: bool = True,
     ) -> None:
+        self._revoke_accessibility(user, current)
         if self.portals_enabled and current.plan.desktop:
             try:
                 self._machine_user(
@@ -2532,6 +2903,8 @@ class DesktopController:
                 DBUS_UPDATE_ACTIVATION_ENVIRONMENT,
                 "--systemd",
                 *sorted(plan.environment),
+                "AT_SPI_BUS_ADDRESS="
+                + plan.environment.get("AT_SPI_BUS_ADDRESS", ""),
             ],
             environment=plan.environment,
         )

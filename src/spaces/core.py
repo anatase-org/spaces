@@ -29,6 +29,7 @@ KERNEL_CAPABILITY_LEVELS = (
     "admin",
 )
 DEVICE_LEVELS = ("disabled", "basic", "admin", "full")
+DESKTOP_LEVELS = ("disabled", "basic", "accessibility")
 DEFAULT_HOME_FOLDERS = ("Projects", "Downloads")
 DEFAULT_HOME_FILES = (
     ".gitconfig",
@@ -49,7 +50,7 @@ PERMISSION_PRESETS: dict[str, dict[str, dict[str, Any]]] = {
         "user": {
             "home": ["Downloads"],
             "administrator": True,
-            "desktop": True,
+            "desktop": "basic",
             "credential_agents": False,
             "mounted_drives": True,
         },
@@ -72,7 +73,7 @@ PERMISSION_PRESETS: dict[str, dict[str, dict[str, Any]]] = {
                 ".ssh/config",
             ],
             "administrator": True,
-            "desktop": True,
+            "desktop": "accessibility",
             "credential_agents": True,
             "mounted_drives": True,
         },
@@ -83,6 +84,17 @@ SPACE_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
 
 class SpacesError(ValueError):
     """A user-facing Spaces configuration error."""
+
+
+def desktop_level(value: object = "basic") -> str:
+    """Normalize legacy desktop grants without accepting truthy values."""
+    if isinstance(value, bool):
+        return "basic" if value else "disabled"
+    if isinstance(value, str) and value in DESKTOP_LEVELS:
+        return value
+    raise SpacesError(
+        _("Invalid desktop integration permission: {value}.", value=value)
+    )
 
 
 @dataclass(frozen=True)
@@ -417,11 +429,7 @@ def _validate_user_record(value: object, uid_key: str) -> dict[str, Any]:
         raise SpacesError(
             _("User {uid} administrator permission must be a boolean.", uid=uid_key)
         )
-    desktop = permissions.get("desktop", True)
-    if not isinstance(desktop, bool):
-        raise SpacesError(
-            _("User {uid} desktop permission must be a boolean.", uid=uid_key)
-        )
+    desktop_level(permissions.get("desktop", "basic"))
     mounted_drives = permissions.get("mounted_drives", True)
     if not isinstance(mounted_drives, bool):
         raise SpacesError(
@@ -598,7 +606,7 @@ def defaults_from_info(
     identity: Identity,
     *,
     config_home: Path | None = None,
-) -> tuple[str, str, str, bool, bool, list[str], bool, bool, bool, bool]:
+) -> tuple[str, str, str, bool, bool, list[str], bool, str, bool, bool]:
     network = "basic"
     kernel_capabilities = "basic"
     devices = "basic"
@@ -608,7 +616,7 @@ def defaults_from_info(
         config_home = user_config_home(identity)
     selected_home = preset_user_permissions("basic", identity.home, config_home)["home"]
     administrator = True
-    desktop = True
+    desktop = "basic"
     credential_agents = False
     mounted_drives = True
     if not info:
@@ -665,9 +673,7 @@ def defaults_from_info(
     existing_administrator = user_permissions.get("administrator")
     if isinstance(existing_administrator, bool):
         administrator = existing_administrator
-    existing_desktop = user_permissions.get("desktop")
-    if isinstance(existing_desktop, bool):
-        desktop = existing_desktop
+    desktop = desktop_level(user_permissions.get("desktop", "basic"))
     existing_credential_agents = user_permissions.get("credential_agents")
     if isinstance(existing_credential_agents, bool):
         credential_agents = existing_credential_agents
@@ -699,7 +705,7 @@ def create_info(
     administrator: bool = True,
     host_authentication: bool = True,
     shortcuts: bool = True,
-    desktop: bool = True,
+    desktop: str | bool = "basic",
     credential_agents: bool = True,
     mounted_drives: bool = True,
     devices: str = "basic",
@@ -726,7 +732,7 @@ def create_info(
                         "preset": preset,
                         "home": sorted(home, key=str.casefold),
                         "administrator": administrator,
-                        "desktop": desktop,
+                        "desktop": desktop_level(desktop),
                         "credential_agents": credential_agents,
                         "mounted_drives": mounted_drives,
                     },

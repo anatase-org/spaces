@@ -208,6 +208,7 @@ class SpaceUser:
     desktop: bool = True
     credential_agents: bool = False
     mounted_drives: bool = False
+    accessibility: bool = False
 
 
 @dataclass(frozen=True, order=True)
@@ -481,6 +482,7 @@ def _resolve_users(info: dict[str, Any], home: Path) -> tuple[SpaceUser, ...]:
         name = host_user.pw_name
         space_home = home / ("root" if is_root else name)
         guest_home = PurePosixPath("/root" if is_root else f"/home/{name}")
+        desktop = core.desktop_level(user_permissions.get("desktop", "basic"))
         users.append(
             SpaceUser(
                 uid=uid,
@@ -491,13 +493,12 @@ def _resolve_users(info: dict[str, Any], home: Path) -> tuple[SpaceUser, ...]:
                 guest_home=guest_home,
                 permitted_home=tuple(user_permissions["home"]),
                 administrator=user_permissions.get("administrator", True),
-                desktop=user_permissions.get("desktop", True),
+                desktop=desktop != "disabled",
+                accessibility=desktop == "accessibility",
                 credential_agents=user_permissions.get(
                     "credential_agents", True
                 ),
-                mounted_drives=user_permissions.get(
-                    "mounted_drives", True
-                ),
+                mounted_drives=user_permissions.get("mounted_drives", True),
             )
         )
     return tuple(users)

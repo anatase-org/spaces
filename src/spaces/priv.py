@@ -133,6 +133,12 @@ def _space_lock(space: Path, *, create: bool = False) -> Iterator[None]:
 
 
 def _write_info(space: Path, info: dict[str, Any]) -> None:
+    # Preserve legacy grants while writing the canonical permission format.
+    for record in info["permissions"]["users"].values():
+        permissions = record["permissions"]
+        permissions["desktop"] = core.desktop_level(
+            permissions.get("desktop", "basic")
+        )
     descriptor, temporary_name = tempfile.mkstemp(prefix=".info.", dir=space)
     temporary = Path(temporary_name)
     try:
@@ -369,6 +375,9 @@ def _machine_shell(
     launcher: bool = False,
     agent: str | None = None,
 ) -> int:
+    # Override any stale address inherited from the guest user manager,
+    # including when this launch has no desktop forwarding at all.
+    environment = {"AT_SPI_BUS_ADDRESS": "", **(environment or {})}
     actual_command = command
     launch_id = secrets.token_hex(16) if caller_pidfd is not None else None
     if launcher:
@@ -497,7 +506,11 @@ def enter(
             command,
             **launch_options,
         )
-    desktop = user_permissions.get("desktop", True) and caller_uid != 0
+    desktop = (
+        core.desktop_level(user_permissions.get("desktop", "basic"))
+        != "disabled"
+        and caller_uid != 0
+    )
     credential_agents = (
         user_permissions.get("credential_agents", True)
         and caller_uid != 0
