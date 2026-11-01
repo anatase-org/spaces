@@ -272,7 +272,10 @@ static const Tool tools[] = {
 /* Actions are steps of computer, never standalone MCP tools. */
 static const Tool action_tools[] = {
     {.name = "click",
-        "Invoke an accessible element or click desktop image coordinates. Use button:right for a context menu and count:2 for a pixel double click.",
+        "Invoke an accessible element or click desktop image coordinates. "
+        "Use button:right for a context menu and count:2 for a double click. "
+        "Middle click or repeated clicks with an element target require it "
+        "to be on-screen.",
         ARGS_ACTION | ARGS_POINT,
         click_arguments,
         .action = TRUE},

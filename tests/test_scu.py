@@ -982,6 +982,81 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         result = client.tool("computer", steps=[{"tool": "click", "args": {"element_token": row["element_token"]}}])
         self.assertEqual(result["structuredContent"]["failed"]["code"], "accessible_action_failed")
 
+    def test_token_pointer_clicks_preserve_button_and_count(self):
+        self.start_host()
+        client = self.client()
+        row = next(row for row in self.snapshot(client)["elements"] if row["label"] == "Fixture button")
+        clicks = 0
+        for button, count, code in (("middle", 1, 274), ("left", 2, 272),
+                                    ("right", 3, 273), ("middle", 2, 274)):
+            with self.subTest(button=button, count=count):
+                result = client.tool("computer", steps=[{"tool": "click", "args": {
+                    "element_token": row["element_token"], "button": button, "count": count}}])["structuredContent"]
+                self.assertEqual(result["status"], "ok", result)
+                clicks += count
+                received = json.loads(self.state.read_text())["input"]
+                self.assertEqual(received["clicks"], clicks)
+                self.assertEqual(received["button"], code)
+                self.assertEqual(received["buttons_down"], 0)
+                self.assertEqual(json.loads(self.atspi_state.read_text())["clicks"], 0)
+
+    def test_token_pointer_click_uses_fresh_bounds_and_document_scale(self):
+        self.start_accessibility(browser=True)
+        self.start_host()
+        client = self.client()
+        row = next(row for row in self.snapshot(client)["elements"] if row["label"] == "Fixture button")
+        self.atspi_state.with_suffix(".bounds.json").write_text(json.dumps([20, 15, 10, 5]))
+        result = client.tool("computer", steps=[{"tool": "click", "args": {
+            "element_token": row["element_token"], "button": "middle"}}])["structuredContent"]
+        self.assertEqual(result["status"], "ok", result)
+        received = json.loads(self.state.read_text())["input"]
+        # The EIS receiver maps 80x60 logical desktop units to 1920x1080.
+        self.assertEqual((received["x"], received["y"]), (840, 495))
+        self.assertEqual(received["button"], 274)
+
+    def test_token_pointer_click_rejects_offscreen_but_semantic_click_works(self):
+        self.start_accessibility(offscreen=True)
+        self.start_host()
+        client = self.client()
+        row = next(row for row in self.snapshot(client)["elements"] if row["label"] == "Fixture button")
+        for options in ({"button": "middle"}, {"count": 2}):
+            result = client.tool("computer", steps=[{"tool": "click", "args": {
+                "element_token": row["element_token"], **options}}], observe=False)["structuredContent"]
+            self.assertEqual(result["failed"]["code"], "element_off_screen", result)
+        result = client.tool("computer", steps=[{"tool": "click", "args": {
+            "element_token": row["element_token"]}}], observe=False)["structuredContent"]
+        self.assertEqual(result["status"], "ok", result)
+        self.assertEqual(json.loads(self.atspi_state.read_text())["clicks"], 1)
+        self.assertEqual(json.loads(self.state.read_text())["input"]["clicks"], 0)
+
+    def test_token_pointer_click_requires_active_window_and_usable_bounds(self):
+        self.start_host()
+        client = self.client()
+        row = next(row for row in self.snapshot(client)["elements"] if row["label"] == "Fixture button")
+        for bounds, active in (([5, 5, 0, 0], True), ([5, 5, 10, 5], False), ([5, 300, 10, 5], True)):
+            with self.subTest(bounds=bounds, active=active):
+                self.atspi_state.with_suffix(".bounds.json").write_text(json.dumps(bounds))
+                self.configure(active=active)
+                result = client.tool("computer", steps=[{"tool": "click", "args": {
+                    "element_token": row["element_token"], "button": "middle"}}], observe=False)["structuredContent"]
+                self.assertEqual(result["failed"]["code"], "element_off_screen", result)
+                self.assertEqual(json.loads(self.state.read_text())["input"]["clicks"], 0)
+
+    def test_token_pointer_click_unlocks_and_rejects_stale_tokens(self):
+        self.start_shared()
+        client = self.client()
+        row = next(row for row in self.snapshot(client)["elements"] if row["label"] == "Fixture button")
+        self.login_call("SetLocked", "true")
+        result = client.tool("computer", steps=[{"tool": "click", "args": {
+            "element_token": row["element_token"], "count": 2}}], observe=False)["structuredContent"]
+        self.assertEqual(result["status"], "ok", result)
+        self.assertFalse(json.loads(self.login_state.read_text())["locked"])
+        self.snapshot(client)
+        result = client.tool("computer", steps=[{"tool": "click", "args": {
+            "element_token": row["element_token"], "button": "middle"}}], observe=False)["structuredContent"]
+        self.assertEqual(result["failed"]["code"], "stale_element", result)
+        self.assertEqual(json.loads(self.state.read_text())["input"]["clicks"], 2)
+
     def test_keyboard_text_target_and_readback(self):
         self.start_accessibility(keyboard=True)
         self.start_host()

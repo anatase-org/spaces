@@ -181,7 +181,7 @@ static void test_images(void)
 typedef struct {
     struct eis *server;
     gint stop, keys_down, buttons_down, keys, clicks, scrolls, motions, dragged_motions;
-    gint x, y;
+    gint x, y, button;
     int control;
     GPtrArray *clients;
     GHashTable *bound_seats;
@@ -230,9 +230,9 @@ static gpointer serve_input(gpointer pointer)
                 yyjson_mut_doc *document=yyjson_mut_doc_new(NULL);
                 yyjson_mut_val *encoded=yyjson_mut_str(document,oracle->text->str);
                 char *text=yyjson_mut_val_write(encoded,0,NULL);
-                char *json=g_strdup_printf("{\"keys_down\":%d,\"buttons_down\":%d,\"keys\":%d,\"clicks\":%d,\"scrolls\":%d,\"motions\":%d,\"dragged_motions\":%d,\"x\":%d,\"y\":%d,\"text\":%s,\"selected\":%s,\"numeric_value\":%d}",
+                char *json=g_strdup_printf("{\"keys_down\":%d,\"buttons_down\":%d,\"keys\":%d,\"clicks\":%d,\"scrolls\":%d,\"motions\":%d,\"dragged_motions\":%d,\"x\":%d,\"y\":%d,\"button\":%d,\"text\":%s,\"selected\":%s,\"numeric_value\":%d}",
                     oracle->keys_down,oracle->buttons_down,oracle->keys,oracle->clicks,oracle->scrolls,
-                    oracle->motions,oracle->dragged_motions,oracle->x,oracle->y,text,oracle->selected?"true":"false",oracle->numeric_value);
+                    oracle->motions,oracle->dragged_motions,oracle->x,oracle->y,oracle->button,text,oracle->selected?"true":"false",oracle->numeric_value);
                 free(text);yyjson_mut_doc_free(document);
                 assert(send(oracle->control,json,strlen(json),0)>0);g_free(json);
             } else if(command=='D') {
@@ -355,6 +355,7 @@ static gpointer serve_input(gpointer pointer)
                 }
             } else if (type == EIS_EVENT_BUTTON_BUTTON) {
                 gboolean down = eis_event_button_get_is_press(event);
+                g_atomic_int_set(&oracle->button, eis_event_button_get_button(event));
                 g_atomic_int_add(&oracle->buttons_down, down ? 1 : -1);
                 if (down) {
                     oracle->buttons_client = eis_device_get_client(eis_event_get_device(event));

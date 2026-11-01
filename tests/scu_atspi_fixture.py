@@ -279,6 +279,8 @@ def main():
             if path == WINDOW and geometry_after_attributes and not frame_ready:
                 rectangle = (0, 0, 23, 17)
             if args[0] != 0:
+                bounds_file = Path(state_path).with_suffix(".bounds.json")
+                if path == BUTTON and bounds_file.exists(): rectangle = tuple(json.loads(bounds_file.read_text()))
                 if path == BUTTON and offscreen: rectangle = (5, 300, 10, 5)
                 if browser and path in (DOCUMENT, BUTTON, ENTRY, PASSWORD):
                     rectangle = tuple(v * 2 for v in rectangle)
@@ -414,7 +416,10 @@ def main():
         if name == "ToolkitName" and browser: return GLib.Variant("s", "Chromium")
         if name in ("Description", "ToolkitName", "Version"): return GLib.Variant("s", "fixture")
         if name == "ChildCount": return GLib.Variant("i", len(children(connection, path)))
-        if name == "Parent": return GLib.Variant("(so)", (app.get_unique_name(), ROOT if path in window_paths else WINDOW))
+        if name == "Parent":
+            parent = ROOT if path in window_paths else WINDOW
+            if browser: parent = {PANEL: WINDOW, DOCUMENT: PANEL, BUTTON: DOCUMENT, ENTRY: DOCUMENT, PASSWORD: DOCUMENT}.get(path, parent)
+            return GLib.Variant("(so)", (app.get_unique_name(), parent))
         if name == "NActions": return GLib.Variant("i", len(actions()))
         if name == "CharacterCount": return GLib.Variant("i", len(text_value()))
         if name == "CaretOffset": return GLib.Variant("i", len(text_value()))

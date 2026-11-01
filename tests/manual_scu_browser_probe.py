@@ -65,7 +65,8 @@ def main():
         title = label + "-" + uuid.uuid4().hex[:8]
         page = (f"data:text/html,<title>{title}</title><h1>SCU browser probe</h1>"
                 + '<div role="group">' * 48 +
-                '<button onclick="document.getElementById(\'result\').textContent=\'Button clicked\'">Probe button</button>'
+                '<button onclick="document.getElementById(\'result\').textContent=\'Button clicked\'" '
+                'ondblclick="document.getElementById(\'result\').textContent=\'Button double clicked\'">Probe button</button>'
                 '<input aria-label="Probe field">'
                 '<a href="about:blank" onclick="event.preventDefault();document.getElementById(\'result\').textContent=\'Link clicked\'">Probe link</a>'
                 '<p id="result">Ready</p>'
@@ -109,6 +110,30 @@ def main():
 
         def snapshot():
             return probe.tool("computer", observe={"kind": "window", **target})["observation"]
+
+        tree = snapshot()
+        button = next(row for row in tree["elements"] if row["label"] == "Probe button")
+        result = probe.tool("computer", steps=[{"tool": "click", "args": {
+            "element_token": button["element_token"], "count": 2}}], observe={"kind": "window", **target})
+        assert result["status"] == "ok", result
+        assert any(row["label"] == "Button double clicked" for row in result["observation"]["elements"]), result
+        record("double-click", status=result["status"])
+        link = next(row for row in result["observation"]["elements"] if row["label"] == "Probe link")
+        result = probe.tool("computer", steps=[
+            {"tool": "click", "args": {"element_token": link["element_token"], "button": "middle"}},
+            {"tool": "press_keys", "args": {"keys": ["CTRL", "Tab"]}},
+            {"tool": "delay_ms", "args": {"ms": 500}}], observe={"kind": "window", **target})
+        assert result["status"] == "ok", result
+        assert any(row["label"] == "Address and search bar" and row.get("value") == "about:blank"
+                   for row in result["observation"]["elements"]), result
+        record("middle-click", new_tab="about:blank", status=result["status"])
+        probe.tool("computer", steps=[{"tool": "press_keys", "args": {"keys": ["CTRL", "w"]}}], observe=False)
+        tree = snapshot()
+        offscreen = next(row for row in tree["elements"] if row["label"] == "Offscreen button")
+        result = probe.tool("computer", steps=[{"tool": "click", "args": {
+            "element_token": offscreen["element_token"], "button": "middle"}}], observe=False)
+        assert result.get("failed", {}).get("code") == "element_off_screen", result
+        record("offscreen-middle-click", error="element_off_screen")
 
         for label, text in (("Probe button", "Button clicked"), ("Probe link", "Link clicked"),
                             ("Offscreen button", "Offscreen button clicked")):

@@ -151,6 +151,7 @@ typedef struct {
     __typeof__(&atspi_accessible_clear_cache) accessible_clear_cache;
     __typeof__(&atspi_accessible_get_child_count) accessible_get_child_count;
     __typeof__(&atspi_accessible_get_child_at_index) accessible_get_child_at_index;
+    __typeof__(&atspi_accessible_get_parent) accessible_get_parent;
     __typeof__(&atspi_accessible_get_name) accessible_get_name;
     __typeof__(&atspi_accessible_get_role) accessible_get_role;
     __typeof__(&atspi_accessible_get_role_name) accessible_get_role_name;
@@ -263,6 +264,7 @@ static gboolean load_atspi(void)
     LOAD_ATSPI(accessible_clear_cache);
     LOAD_ATSPI(accessible_get_child_count);
     LOAD_ATSPI(accessible_get_child_at_index);
+    LOAD_ATSPI(accessible_get_parent);
     LOAD_ATSPI(accessible_get_name);
     LOAD_ATSPI(accessible_get_role);
     LOAD_ATSPI(accessible_get_role_name);
@@ -963,20 +965,14 @@ static JsonResult *read_window_state(JsonValue *args)
     return scu.code ? NULL : r;
 }
 
-/* A semantic click invokes an advertised action. It must not silently fall
- * back to moving the pointer or raising a window when no such action exists. */
+/* A semantic click invokes an advertised action. Middle and repeated clicks take the
+ * separate pointer path so their browser behavior is preserved. */
 static JsonResult *invoke_accessible_action(
     AtspiAccessible *node, JsonValue *arguments)
 {
     GError *error = NULL;
     gboolean completed = FALSE;
     gboolean context_menu = g_strcmp0(json_string(arguments, "button"), "right") == 0;
-
-    if (json_number(arguments, "count", 1) != 1 ||
-        g_strcmp0(json_string(arguments, "button"), "middle") == 0) {
-        return scu_fail("unsupported_feature",
-            "Repeated or middle clicks require desktop pixel coordinates.");
-    }
 
     AtspiAction *action = atspi.accessible_get_action_iface(node);
     if (action != NULL) {
@@ -1312,6 +1308,93 @@ static JsonResult *accessible_target_input(AtspiAccessible *node, Element *eleme
     return result;
 }
 
+/* Resolve fresh window-relative bounds, including Chromium's document scale
+ * and clipping viewports. Offscreen elements stay available to semantic actions
+ * but cannot receive physical clicks. Never scroll or activate them as
+ * a substitute: that changes the requested action. */
+static JsonResult *accessible_pointer_target(AtspiAccessible *node, Element *element,
+    JsonValue *arguments)
+{
+    Window *window = NULL;
+    for (guint i = 0; i < windows->len; i++) {
+        Window *candidate = g_ptr_array_index(windows, i);
+        if (candidate->id == element->window) { window = candidate; break; }
+    }
+    if (!window) return scu_fail("stale_element", "The target window disappeared. Observe again.");
+    GPtrArray *parents = g_ptr_array_new_with_free_func(g_object_unref);
+    AtspiAccessible *parent = g_object_ref(node);
+    while (parent && parents->len <= TREE_DEPTH) {
+        g_ptr_array_add(parents, parent);
+        if (parent == window->accessible) { parent = NULL; break; }
+        parent = atspi.accessible_get_parent(parent, NULL);
+        if (!scu_tick()) { g_clear_object(&parent); break; }
+    }
+    gboolean rooted = parents->len &&
+        g_ptr_array_index(parents, parents->len - 1) == window->accessible;
+    g_clear_object(&parent); /* Release an ancestor beyond the traversal limit. */
+    if (!rooted || scu.code) {
+        g_ptr_array_unref(parents);
+        return scu.code ? NULL : scu_fail("element_off_screen", "The element has no usable on-screen target.");
+    }
+    Walk state = {.window = window, .scales = json_member(arguments, "device_scales")};
+    JsonResult *previous = NULL, *root = NULL, *target = NULL;
+    double scale = 1, left = 0, top = 0, right = 0, bottom = 0;
+    gboolean usable = TRUE;
+    for (guint i = parents->len; i > 0 && usable; i--) {
+        AtspiAccessible *current = g_ptr_array_index(parents, i - 1);
+        atspi.accessible_clear_cache(current);
+        JsonResult *frame = accessible_frame(current);
+        AtspiRole role = atspi.accessible_get_role(current, NULL);
+        if (role == ATSPI_ROLE_DOCUMENT_WEB)
+            scale = accessible_document_scale(&state, frame, previous, scale);
+        if (frame && !yyjson_mut_is_null(frame)) {
+            const char *fields[] = {"x", "y", "width", "height"};
+            for (guint f = 0; f < G_N_ELEMENTS(fields); f++)
+                result_number(frame, fields[f], yyjson_mut_get_num(yyjson_mut_obj_get(frame, fields[f])) * scale);
+        }
+        gboolean clip = i == parents->len || i == 1 || role == ATSPI_ROLE_DOCUMENT_WEB ||
+            role == ATSPI_ROLE_SCROLL_PANE || role == ATSPI_ROLE_VIEWPORT;
+        if (clip) {
+            double x = yyjson_mut_get_num(yyjson_mut_obj_get(frame, "x"));
+            double y = yyjson_mut_get_num(yyjson_mut_obj_get(frame, "y"));
+            double width = yyjson_mut_get_num(yyjson_mut_obj_get(frame, "width"));
+            double height = yyjson_mut_get_num(yyjson_mut_obj_get(frame, "height"));
+            usable = frame && !yyjson_mut_is_null(frame) && width > 0 && height > 0;
+            if (i == parents->len) {
+                root = frame;
+                left = x; top = y; right = x + width; bottom = y + height;
+            } else {
+                left = MAX(left, x); top = MAX(top, y);
+                right = MIN(right, x + width); bottom = MIN(bottom, y + height);
+            }
+            usable &= right > left && bottom > top;
+        }
+        previous = frame;
+        if (i == 1) target = frame;
+        if (!scu_tick()) { usable = FALSE; break; }
+    }
+    usable &= accessible_has_state(node, ATSPI_STATE_SHOWING) &&
+        accessible_has_state(node, ATSPI_STATE_ENABLED);
+    JsonResult *result = NULL;
+    if (usable && target) {
+        result = result_object();
+        char *title = atspi.accessible_get_name(window->accessible, NULL);
+        result_string(result, "title", title);
+        g_free(title);
+        result_integer(result, "pid", window->pid);
+        result_string(result, "toolkit", window->toolkit);
+        result_member(result, "bounds", root);
+        JsonResult *visible = result_object();
+        result_number(visible, "x", left); result_number(visible, "y", top);
+        result_number(visible, "width", right - left); result_number(visible, "height", bottom - top);
+        result_member(result, "frame", visible);
+    } else if (!scu.code) {
+        scu_fail("element_off_screen", "The element has no usable on-screen target. Scroll it into view before clicking.");
+    }
+    g_ptr_array_unref(parents);
+    return result;
+}
+
 /* Tokens resolve only within this process and the snapshot that created them.
  * Retain the object while acting; a failed/defunct target is never retargeted. */
 static JsonResult *operate_on_element(const char *tool, JsonValue *arguments)
@@ -1332,7 +1415,10 @@ static JsonResult *operate_on_element(const char *tool, JsonValue *arguments)
     } else if (g_str_has_prefix(tool, "target_input_")) {
         result = accessible_target_input(node, element, tool, arguments);
     } else if (strcmp(tool, "click") == 0) {
-        result = invoke_accessible_action(node, arguments);
+        if (!g_strcmp0(json_string(arguments, "button"), "middle") ||
+            json_number(arguments, "count", 1) != 1)
+            result = accessible_pointer_target(node, element, arguments);
+        else result = invoke_accessible_action(node, arguments);
     } else if (strcmp(tool, "set_value") == 0 || strcmp(tool, "type_text") == 0) {
         result = edit_accessible_text(node, tool, arguments);
     } else {
@@ -3818,7 +3904,7 @@ static JsonResult *type_foreground_text(JsonValue *arguments)
         "result.");
 }
 
-static gboolean keyboard_fallback;
+static gboolean foreground_fallback;
 
 /* Focus is checked in both independent inventories before each input chunk.
  * In particular, Flatpak bus PIDs need not equal compositor PIDs. */
@@ -3878,7 +3964,7 @@ static JsonResult *type_target_number(JsonValue *args, JsonResult *readback)
 
 static JsonResult *type_target_value(const char *tool, JsonValue *args, gboolean numeric)
 {
-    keyboard_fallback = TRUE;
+    foreground_fallback = TRUE;
     if (!ensure_visual_session()) return NULL;
     gboolean replace = !strcmp(tool, "set_value");
     const char *contents = json_string(args, replace ? "value" : "text");
@@ -3971,6 +4057,74 @@ static JsonResult *scu_visual(const char *tool, JsonValue *arguments)
     if (result == NULL) {
         release_input();
     }
+    return result;
+}
+
+static JsonResult *click_target_pointer(JsonValue *arguments)
+{
+    foreground_fallback = TRUE;
+    if (!ensure_visual_session() || !visual_step() || !refresh_geometry()) return NULL;
+    if (yyjson_mut_is_null(canvas_status())) {
+        guint images = yyjson_mut_arr_size(scu.images);
+        if (!capture_desktop(NULL)) return NULL;
+        yyjson_mut_arr_remove_range(scu.images, images, yyjson_mut_arr_size(scu.images) - images);
+    }
+    if (!wait_for_device(EI_DEVICE_CAP_POINTER_ABSOLUTE)) return NULL;
+    JsonResult *parameters = yyjson_val_mut_copy(scu.doc, arguments), *scales = result_array();
+    for (guint i = 0; i < visual.display_count; i++)
+        result_append(scales, yyjson_mut_real(scu.doc,
+            (double)visual.displays[i].width / visual.displays[i].logical_width));
+    result_member(parameters, "device_scales", scales);
+    yyjson_doc *request = yyjson_mut_val_imut_copy(parameters, NULL);
+    JsonResult *resolved = atspi_worker_call("click", yyjson_doc_get_root(request));
+    yyjson_doc_free(request);
+    if (!resolved) return NULL;
+    yyjson_doc *target = yyjson_mut_val_imut_copy(resolved, NULL);
+    if (!refresh_geometry()) { yyjson_doc_free(target); return NULL; }
+    JsonValue *candidate = yyjson_doc_get_root(target), *window, *selected = NULL;
+    CanvasRect anchor = {0}, client = {0}, frame;
+    double ratio = 1;
+    guint matches = 0;
+    size_t i, n;
+    yyjson_arr_foreach(json_member(yyjson_doc_get_root(visual.geometry), "windows"), i, n, window) {
+        CanvasRect root, origin;
+        double scale;
+        if (accessibility_geometry(window, candidate, &root, &origin, &scale)) {
+            matches++;
+            selected = window; anchor = root; client = origin; ratio = scale;
+        }
+    }
+    gboolean usable = matches == 1 && json_boolean(selected, "active") &&
+        json_boolean(selected, "shown") && read_rect(json_member(candidate, "frame"), &frame);
+    double x = 0, y = 0, area = 0;
+    if (usable) {
+        frame.x = client.x + (frame.x - anchor.x) * ratio;
+        frame.y = client.y + (frame.y - anchor.y) * ratio;
+        frame.width *= ratio; frame.height *= ratio;
+        for (guint d = 0; d < visual.canvas.layout.count; d++) {
+            CanvasRect tile = visual.canvas.layout.tiles[d];
+            double left = MAX(MAX(frame.x, client.x), tile.x);
+            double top = MAX(MAX(frame.y, client.y), tile.y);
+            double right = MIN(MIN(frame.x + frame.width, client.x + client.width), tile.x + tile.width);
+            double bottom = MIN(MIN(frame.y + frame.height, client.y + client.height), tile.y + tile.height);
+            if (right > left && bottom > top && (right - left) * (bottom - top) > area) {
+                area = (right - left) * (bottom - top);
+                x = (left + right) / 2; y = (top + bottom) / 2;
+            }
+        }
+    }
+    yyjson_doc_free(target);
+    if (!area) return scu_fail("element_off_screen",
+        "The element has no usable target in the active on-screen window. Bring it into view before clicking.");
+    JsonResult *point = result_object();
+    result_number(point, "x", (x - visual.canvas.layout.x) * visual.canvas.width / visual.canvas.layout.width);
+    result_number(point, "y", (y - visual.canvas.layout.y) * visual.canvas.height / visual.canvas.layout.height);
+    result_integer(point, "id", visual.canvas.id);
+    result_string(point, "button", json_string(arguments, "button") ? json_string(arguments, "button") : "left");
+    result_integer(point, "count", json_number(arguments, "count", 1));
+    yyjson_doc *input = yyjson_mut_val_imut_copy(point, NULL);
+    JsonResult *result = scu_visual("click", yyjson_doc_get_root(input));
+    yyjson_doc_free(input);
     return result;
 }
 
@@ -4112,11 +4266,11 @@ static JsonResult *computer(JsonValue *args)
         /* A delay step supplies its own gap. Other action boundaries retain
          * their default wait, including after an earlier explicit delay. */
         JsonResult *value = NULL;
-        keyboard_fallback = FALSE;
+        foreground_fallback = FALSE;
         if (!index || delay || previous_delay || wait_for_delay(150)) {
             value = execute_tool(actions[index], merged);
         }
-        if (keyboard_fallback) {
+        if (foreground_fallback) {
             foreground_attempted = TRUE;
             if (automatic && !observer) {
                 const char *defaults = "{}";
@@ -4207,6 +4361,9 @@ static JsonResult *execute_tool(const Tool *t, JsonValue *args)
         }
         return result_object();
     }
+    if (!strcmp(t->name, "click") && json_string(args, "element_token") &&
+        (!g_strcmp0(json_string(args, "button"), "middle") || json_number(args, "count", 1) != 1))
+        return click_target_pointer(args);
     if (!strcmp(t->name, "set_value") || json_string(args, "element_token")) {
         JsonResult *result = scu_atspi(t->name, args);
         if (result && yyjson_mut_is_true(yyjson_mut_obj_get(result, "keyboard_required")))

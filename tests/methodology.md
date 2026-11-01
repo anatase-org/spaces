@@ -1202,3 +1202,24 @@ the `/tmp/scu-youtube-tree.txt` and `.json` copies were refreshed. Five focused
 tests passed, covering an untruncated 1,001-row tree, a result near the 512 KiB
 limit, usable tokens, depth limits and screenshot metadata. Native ABI checks
 also passed.
+
+### Middle and repeated clicks on element tokens
+
+Single left/right token clicks invoke the advertised accessibility action.
+Middle clicks and repeated clicks use foreground pointer input, preserving the
+requested button and count. SCU queries fresh element and ancestor bounds,
+normalizes Chromium document coordinates and clips the target to its viewports,
+window and desktop outputs. The uniquely matched window must be shown and
+active. An element without a usable on-screen target returns
+`element_off_screen`; SCU does not substitute a left click or scroll it into
+view. Ordinary semantic clicks remain usable on offscreen elements.
+
+The browser probe checks the distinction with a page double-click handler and
+a link opened in a new tab using token middle-click, followed by Ctrl+Tab and
+address-bar readback. It also verifies that an offscreen middle-click returns
+`element_off_screen` before the same button is invoked semantically. Run with:
+
+```sh
+venv/bin/python tests/manual_scu_browser_probe.py \
+  --artifacts .build/scu-token-pointer-browser
+```
