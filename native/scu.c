@@ -3577,7 +3577,7 @@ static const Argument hotkey_arguments[] = {
 };
 static const Argument delay_arguments[] = {
     {.name = "ms", .type = ARG_INTEGER, .minimum = 0, .maximum = 30000,
-        .description = "Milliseconds to wait at this position in the sequence, including before the final screenshot."},
+        .description = "Milliseconds to wait."},
     {NULL},
 };
 static const Argument batch_arguments[] = {
@@ -3585,7 +3585,7 @@ static const Argument batch_arguments[] = {
         .description = "Optional ordered {tool,args} actions. Omit or pass [] to observe without acting."},
     {.name = "observe", .type = ARG_OBJECT},
     {.name = "id", .type = ARG_INTEGER, .minimum = 1, .maximum = MAX_CAPTURE_ID,
-        .description = "Optional full-overview capture used for pixel steps and zoom. Steps may override it; omission uses the latest valid overview."},
+        .description = "Optional full-overview capture used for pixel steps and zoom. Omission uses the latest overview."},
     {NULL},
 };
 
@@ -3613,41 +3613,32 @@ static const Tool window_observation = {
 };
 
 static const Tool tools[] = {
+    {.name = "status",
+        "Run first for health checks, canvas metadata, apps/windows and a full desktop screenshot. "
+        "Window bounds, element frames and pixel actions share the full screenshot's coordinates. "
+        ARGS_NONE},
     {.name = "computer",
-        "Observe the combined desktop canvas with {} or {steps:[]}; no action is sent. "
-        "Otherwise execute up to 64 JSON steps shaped {tool,args}, in order; stop "
-        "on failure. Foreground batches return one final overview image. "
+        "Execute up to 64 JSON steps shaped {tool,args}, in order and stop "
+        "on failure. Returns one final overview image. "
         "Responses report status:ok/failed and the completed step count. "
-        "Insert {tool:delay_ms,args:{ms:500}} to pause anywhere; the final image waits for all steps, including trailing delays. "
-        "observe:false skips it; a desktop or window-tree object replaces it. "
+        "Insert {tool:delay_ms,args:{ms:500}} to pause anywhere, the final image waits for all steps including trailing delays. "
+        "use observe:false to skip it or specify a window. "
         "All pixel coordinates are global to the full overview, including after observe.zoom. "
         "Use zoom:[left,top,right,bottom] to read native detail on large desktops. "
-        "Inspect the image to verify effects; actions are never retried. "
-        "All use requires the Spaces accessibility tier and a KWin host session. "
-        "Call status first for a screenshot and accessible window discovery.",
         ARGS_NONE,
         batch_arguments,
         .action = TRUE},
-    {.name = "status",
-        "Return canvas metadata, apps/windows and a full desktop screenshot. "
-        "Missing dependencies or an unavailable accessibility bridge return an error; no partial results. "
-        "All window bounds, element frames and pixel actions share the full overview's coordinates. "
-        "Requires the Spaces accessibility tier and KWin; no consent prompts. "
-        "Canvas contains overview width, height and id. "
-        "Capture failures return an error within 30 seconds.",
-        ARGS_NONE},
 };
 
 /* Actions are steps of computer, never standalone MCP tools. */
 static const Tool action_tools[] = {
     {.name = "click",
-        "Invoke an accessible element or click desktop image coordinates with "
-        "foreground delivery.",
+        "Invoke an accessible element or click desktop image coordinates.",
         ARGS_ACTION | ARGS_POINT,
         click_arguments,
         .action = TRUE},
     {.name = "double_click",
-        "Double click foreground desktop coordinates.",
+        "Double click on desktop coordinates.",
         ARGS_ACTION | ARGS_POINT,
         .action = TRUE},
     {.name = "right_click",
@@ -3666,27 +3657,25 @@ static const Tool action_tools[] = {
         require_drag,
         TRUE},
     {.name = "scroll",
-        "Scroll at desktop coordinates. amount counts lines; page scrolling is "
-        "unsupported.",
+        "Scroll at desktop coordinates for a number of lines.",
         ARGS_ACTION | ARGS_POINT,
         scroll_arguments,
         require_scroll,
         TRUE},
     {.name = "type_text",
-        "Insert UTF-8 without submitting. Clipboard fallback replaces clipboard text.",
+        "Insert UTF-8 without submitting.",
         ARGS_ACTION,
         text_arguments,
         require_text,
         TRUE},
     {.name = "set_value",
-        "Replace an accessible text/numeric value and check it through independent "
-        "readback.",
+        "Replace an accessible text/numeric value and check it with readback.",
         ARGS_ACTION,
         value_arguments,
         require_value,
         TRUE},
     {.name = "press_key",
-        "Press/release one key in the foreground application; modifiers are optional.",
+        "Press/release one key in the foreground application with optional modifiers.",
         ARGS_ACTION,
         key_arguments,
         require_key,
@@ -3698,8 +3687,7 @@ static const Tool action_tools[] = {
         require_keys,
         TRUE},
     {.name = "delay_ms",
-        "Wait 0–30000 milliseconds before continuing. A trailing delay finishes before observation. "
-        "Delay-only calls observe afterward; adding a delay to semantic actions does not open a visual session.",
+        "Wait 0-30000 milliseconds before continuing. Use a trailing delay to wait before the final observation.",
         ARGS_NONE,
         delay_arguments,
         require_delay,
