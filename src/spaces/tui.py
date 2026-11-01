@@ -415,7 +415,7 @@ class PermissionForm(
         ),
         "develop": PermissionOption(
             _("Development"),
-            _("Develop with access to VMs, docker."),
+            _("Develop with access to VMs, Docker and agent computer use."),
         ),
         "custom": PermissionOption(
             _("Customise"),

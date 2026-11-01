@@ -60,7 +60,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(app._result()["desktop"], level)
             await pilot.click("#preset-develop")
             await pilot.pause()
-            self.assertEqual(app._result()["desktop"], "basic")
+            self.assertEqual(app._result()["desktop"], "accessibility")
 
     def test_permission_form_uses_textual_4_theme_variables(self) -> None:
         self.assertNotIn("$ansi-foreground", PermissionForm.CSS)
@@ -138,7 +138,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                 ],
                 [
                     "Basic — Install applications.",
-                    "Development — Develop with access to VMs, docker.",
+                    "Development — Develop with access to VMs, Docker and agent computer use.",
                     "Customise — Select permissions settings based on your usage.",
                 ],
             )
