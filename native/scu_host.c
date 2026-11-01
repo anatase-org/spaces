@@ -42,6 +42,9 @@ static JsonResult *scu_visual(const char *tool, JsonValue *args);
 static void scu_visual_close(void);
 static void poll_backend(void);
 static gboolean desktop_ready(void);
+static gboolean desktop_refresh_lock(void);
+static gboolean desktop_is_locked(void);
+static gboolean desktop_foreground_ready(void);
 static void desktop_check_lock(void);
 static gboolean desktop_input_allowed(void);
 static gboolean verify_target_input(void);
@@ -89,6 +92,7 @@ static gboolean scu_tick(void)
     while (g_main_context_iteration(NULL, FALSE)) {
     }
     desktop_check_lock();
+    if (scu.vision_request && !desktop_input_allowed()) return FALSE;
     if (g_atomic_int_get(&scu.cancelled) || g_atomic_int_get(&scu.stopping)) {
         scu_fail("cancelled",
             "Operation cancelled; completed actions were not rolled back.");
@@ -1610,6 +1614,8 @@ static gboolean start_atspi_worker(void)
 
 static JsonResult *atspi_worker_call(const char *tool, JsonValue *args)
 {
+    if ((!strcmp(tool, "target_input_prepare") || !strcmp(tool, "target_input_select")) &&
+        !desktop_foreground_ready()) return NULL;
     if (!start_atspi_worker()) {
         return NULL;
     }
@@ -1624,6 +1630,11 @@ static JsonResult *atspi_worker_call(const char *tool, JsonValue *args)
     gsize length = strlen(line), offset = 0;
     GString *response = g_string_new(NULL);
     gboolean complete = FALSE;
+    /* Drain an already submitted semantic read after a lock. Killing this
+     * helper would destroy every client's element ring. No foreground effects
+     * run here; the parent still monitors locks and releases held input. */
+    gboolean vision_request = scu.vision_request;
+    scu.vision_request = FALSE;
     while (!complete) {
         if (!scu_tick() || !require_computer_access()) {
             break;
@@ -1672,6 +1683,8 @@ static JsonResult *atspi_worker_call(const char *tool, JsonValue *args)
     }
     yyjson_doc_free(document);
     g_string_free(response, TRUE);
+    scu.vision_request = vision_request;
+    if (vision_request && scu.lock_seen) return scu_fail("desktop_locked", desktop_locked_warning);
     return result;
 }
 
@@ -2532,7 +2545,7 @@ static JsonResult *canvas_status(void)
  * before requesting pixels, but never claim that the application has finished. */
 static gboolean prepare_capture(void)
 {
-    if (!desktop_ready() || !visual_step()) {
+    if (!desktop_ready() || !scu_tick() || !require_computer_access()) {
         return FALSE;
     }
     if (!visual.input_sequence || visual.observed_input_sequence == visual.input_sequence) {
@@ -2849,6 +2862,10 @@ static JsonResult *kwin_status(void)
     }
     result_member(result, "canvas", canvas);
     result_member(result, "apps", kwin_apps());
+    if (!desktop_refresh_lock()) return NULL;
+    gboolean locked = desktop_is_locked() || scu.lock_seen;
+    result_boolean(result, "locked", locked);
+    if (locked) scu.images = result_array();
     return result;
 }
 
@@ -3865,7 +3882,7 @@ static JsonResult *type_target_number(JsonValue *args, JsonResult *readback)
 static JsonResult *type_target_value(const char *tool, JsonValue *args, gboolean numeric)
 {
     keyboard_fallback = TRUE;
-    if (!ensure_visual_session()) return NULL;
+    if (!desktop_foreground_ready() || !ensure_visual_session() || !desktop_foreground_ready()) return NULL;
     gboolean replace = !strcmp(tool, "set_value");
     const char *contents = json_string(args, replace ? "value" : "text");
     JsonResult *parameters = result_object();
@@ -3944,7 +3961,7 @@ done:
 
 static JsonResult *scu_visual(const char *tool, JsonValue *arguments)
 {
-    if (!ensure_visual_session() || !visual_step()) {
+    if (!desktop_foreground_ready() || !ensure_visual_session() || !visual_step()) {
         return NULL;
     }
     if (strcmp(tool, "press_keys") == 0) {
@@ -4053,6 +4070,11 @@ static JsonResult *run_batch(const Tool *batch, JsonValue *args)
             goto done;
         }
     }
+    if (!desktop_refresh_lock()) goto done;
+    if (!accessibility) {
+        scu.vision_request = TRUE;
+        if (!desktop_input_allowed()) goto done;
+    }
     if (!require_computer_ready()) {
         goto done;
     }
@@ -4096,6 +4118,7 @@ static JsonResult *run_batch(const Tool *batch, JsonValue *args)
     }
     JsonResult *observations = result_array();
     result_member(result, "observations", observations);
+    if (!accessibility && (scu.lock_seen || !desktop_foreground_ready())) goto observed;
     if (yyjson_is_false(requested)) goto observed;
     if (!accessibility) {
         /* Only a completed trailing delay replaces the final rendering wait.
@@ -4140,7 +4163,7 @@ static JsonResult *run_batch(const Tool *batch, JsonValue *args)
         for (size_t i = 0; i < seen_count; i++) duplicate |= seen[i] == id;
         if (duplicate) continue;
         seen[seen_count++] = id;
-        if (!scu_tick() || !require_computer_access()) {
+        if (!scu_tick() || !require_computer_access() || !desktop_refresh_lock()) {
             JsonResult *item = result_object();
             result_integer(item, "window_id", id);
             result_member(item, "error", error_payload());
@@ -4174,6 +4197,19 @@ static JsonResult *run_batch(const Tool *batch, JsonValue *args)
         }
     }
 observed:
+    if (!accessibility && (scu.lock_seen || !desktop_foreground_ready())) {
+        release_input();
+        scu.images = result_array();
+        if (scu.lock_seen) scu_fail("desktop_locked", desktop_locked_warning);
+        JsonResult *failure = yyjson_mut_obj_get(result, "failed");
+        if (!failure) result_member(result, "failed", error_payload());
+        else if (scu.lock_seen) {
+            result_string(failure, "code", "desktop_locked");
+            result_string(failure, "hint", desktop_locked_warning);
+        }
+        failed = TRUE;
+        clear_tool_error();
+    }
     result_string(result, "status", failed ? "failed" : "ok");
     goto done;
 invalid:
@@ -4196,7 +4232,7 @@ static JsonResult *execute_tool(const Tool *t, JsonValue *args)
     if (t->batch != BATCH_NONE) {
         return run_batch(t, args);
     }
-    if (!require_computer_access()) {
+    if (!require_computer_access() || !desktop_refresh_lock()) {
         return NULL;
     }
     if (!strcmp(t->name, "delay_ms")) {

@@ -362,6 +362,14 @@ def main():
             if path == WINDOW and activation is not None and not activation_pending:
                 activation_pending = True
                 GLib.timeout_add(activation, activate)
+            hold = Path(state_path).with_suffix(".hold-attributes")
+            if hold.exists():
+                def finish():
+                    if hold.exists(): return GLib.SOURCE_CONTINUE
+                    invocation.return_value(GLib.Variant("(a{ss})", ({},)))
+                    return GLib.SOURCE_REMOVE
+                GLib.timeout_add(10, finish)
+                return
             reply = GLib.Variant("(a{ss})", ({},))
         elif name == "GetIndexInParent": reply = GLib.Variant("(i)", (0,))
         elif name == "GetLocale": reply = GLib.Variant("(s)", ("en_US.UTF-8",))

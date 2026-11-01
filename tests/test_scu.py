@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import array
 import io
 import json
@@ -361,34 +362,52 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.host.wait(timeout=5)
         self.wait_until(lambda: not json.loads(self.atspi_state.read_text())["listeners"])
 
-    def test_shared_unlock_is_visual_only_and_accessibility_stays_locked(self):
+    def assert_locked_status(self, client):
+        result = self.status(client)
+        data = result["structuredContent"]
+        self.assertEqual(set(data), {"canvas", "apps", "locked"})
+        self.assertTrue(data["locked"])
+        self.assertGreater(data["canvas"]["id"], 0)
+        self.assertTrue(data["apps"])
+        self.assertIn({"type": "text", "text": "The screen is locked. Vision tools are unavailable."}, result["content"])
+        self.assertFalse(any(block["type"] == "image" for block in result["content"]))
+        return data
+
+    def test_shared_locked_status_and_native_accessibility_preserve_clients(self):
         self.start_shared()
         self.atspi_state.with_suffix(".actions.json").write_text(json.dumps(["click", "showContextMenu"]))
-        client = self.client()
-        tree = self.snapshot(client)
-        button = next(row for row in tree["elements"] if row["label"] == "Fixture button")
+        clients = [self.client(), self.client(no_vision=True)]
+        window = clients[0].windows()[0]["window_id"]
+        trees = [self.snapshot_accessibility(client, window) for client in clients]
+        self.assertEqual(trees[0]["elements"][0]["element_id"], 0)
         self.login_call("SetLocked", "true")
-        result = client.tool("accessibility", steps=[{"tool": "activate", "args": {
-            "element_id": button["element_id"]}}, {"tool": "open_context_menu", "args": {
-            "element_id": button["element_id"]}}])
-        self.assertFalse(result["isError"], result)
-        self.assertEqual(json.loads(self.atspi_state.read_text())["last_action"], "showContextMenu")
-        self.assertTrue(json.loads(self.login_state.read_text())["locked"])
+        for client, tree in zip(clients, trees):
+            for _ in range(2):
+                self.assert_locked_status(client)
+            button = next(row for row in tree["elements"] if row["label"] == "Fixture button")
+            entry = next(row for row in tree["elements"] if row["label"] == "Fixture entry")
+            result = client.tool("accessibility", steps=[
+                {"tool": "activate", "args": {"element_id": button["element_id"]}},
+                {"tool": "open_context_menu", "args": {"element_id": button["element_id"]}},
+                {"tool": "set_value", "args": {"element_id": entry["element_id"], "value": "locked"}},
+                {"tool": "type_text", "args": {"element_id": entry["element_id"], "text": "!"}},
+                {"tool": "delay_ms", "args": {"ms": 10}}], observations=[window])
+            self.assertFalse(result["isError"], result)
+            self.assertEqual([r["element_id"] for r in result["structuredContent"]["observations"][0]["elements"]],
+                             [r["element_id"] for r in tree["elements"]])
+        registrations = json.loads(self.atspi_state.read_text())["registrations"]
+        self.login_call("SetLocked", "false")
+        for client, tree in zip(clients, trees):
+            self.assertFalse(self.status(client)["structuredContent"]["locked"])
+            result = client.tool("accessibility", observations=[window])
+            self.assertEqual([r["element_id"] for r in result["structuredContent"]["observations"][0]["elements"]],
+                             [r["element_id"] for r in tree["elements"]])
+        self.assertEqual(json.loads(self.atspi_state.read_text())["registrations"], registrations)
         self.assertEqual(json.loads(self.login_state.read_text())["unlocks"], 0)
-        captures = json.loads(self.state.read_text())["captures"]
-        result = client.tool("accessibility", observations=[tree["window_id"]])
-        self.assertEqual(result["structuredContent"]["status"], "ok", result)
-        self.assertIn("elements", result["structuredContent"]["observations"][0])
-        self.assertFalse(any(block["type"] == "image" for block in result["content"]))
-        self.assertEqual(json.loads(self.state.read_text())["captures"], captures)
-        self.assertTrue(json.loads(self.login_state.read_text())["locked"])
-        self.assertEqual(json.loads(self.login_state.read_text())["unlocks"], 0)
+
+    def snapshot_accessibility(self, client, window):
         self.status(client)
-        self.assertFalse(json.loads(self.login_state.read_text())["locked"])
-        self.login_call("SetLocked", "true")
-        result = client.tool("vision", steps=[{"tool": "press_keys", "args": {"keys": ["a"]}}], observations=False)
-        self.assertFalse(result["isError"], result)
-        self.assertEqual(json.loads(self.login_state.read_text())["unlocks"], 2)
+        return client.tool("accessibility", observations=[window])["structuredContent"]["observations"][0]
 
     def test_shared_duplicate_ids_cancel_only_the_originating_connection(self):
         self.start_shared()
@@ -442,19 +461,158 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
             self.assertIsNone(self.host.poll())
             self.status(self.client())
 
-    def test_shared_unlock_denial_and_timeout_submit_no_input(self):
-        self.start_shared(locked=True, deny_unlock=True)
+    def test_fresh_locked_status_initializes_canvas_in_both_frontends(self):
+        self.start_shared(locked=True)
+        for no_vision in (False, True):
+            client = self.client(no_vision=no_vision)
+            data = self.assert_locked_status(client)
+            window = data["apps"][0]["windows"][0]["window_id"]
+            result = client.tool("accessibility", observations=[window])
+            self.assertFalse(result["isError"], result)
+            self.assertIn("elements", result["structuredContent"]["observations"][0])
+        self.assertEqual(json.loads(self.state.read_text())["captures"], 2)
+        self.assertEqual(json.loads(self.login_state.read_text())["unlocks"], 0)
+
+    def test_locked_vision_rejects_every_observation_form_before_effects(self):
+        self.start_shared(locked=True)
         client = self.client()
-        result = client.tool("vision", steps=[{"tool": "press_keys", "args": {"keys": ["a"]}}], observations=False)
+        forms = ({}, {"observations": []}, {"observations": [1]}, {"observations": False})
+        for form in forms:
+            for steps in ([], [{"tool": "delay_ms", "args": {"ms": 1}}],
+                          [{"tool": "press_keys", "args": {"keys": ["a"]}},
+                           {"tool": "type_text", "args": {"text": "unsafe"}}]):
+                with self.subTest(form=form, steps=steps):
+                    result = client.tool("vision", steps=steps, **form)
+                    self.assertTrue(result["isError"], result)
+                    self.assertEqual(result["structuredContent"], {"code": "desktop_locked",
+                        "hint": "The screen is locked. Vision tools are unavailable."})
+                    self.assertFalse(any(b["type"] == "image" for b in result["content"]))
+        state = json.loads(self.state.read_text())
+        self.assertEqual((state["connections"], state["captures"]), (0, 0))
+        self.assertEqual(json.loads(self.login_state.read_text())["unlocks"], 0)
+        self.login_call("SetLocked", "false")
+        self.assertFalse(client.tool("vision", steps=[{"tool": "press_keys", "args": {"keys": ["a"]}}],
+                                     observations=False)["isError"])
+
+    def test_locked_keyboard_fallback_does_not_focus_or_select(self):
+        self.start_accessibility(keyboard=True, selection=True)
+        self.start_shared()
+        client = self.client(no_vision=True)
+        tree = self.snapshot_accessibility(client, client.windows()[0]["window_id"])
+        entry = next(r for r in tree["elements"] if r["label"] == "Fixture entry")
+        before = json.loads(self.atspi_state.read_text())
+        self.login_call("SetLocked", "true")
+        for name, extra in (("type_text", {"text": "blocked"}), ("set_value", {"value": "blocked"})):
+            result = client.tool("accessibility", steps=[{"tool": name, "args": {
+                "element_id": entry["element_id"], **extra}}])
+            self.assertEqual(result["structuredContent"]["failed"]["code"], "desktop_locked", result)
+            self.assertFalse(any(b["type"] == "image" for b in result["content"]))
+        after = json.loads(self.atspi_state.read_text())
+        self.assertEqual(after["focus_requests"], before["focus_requests"])
+        self.assertEqual(after["selection_restores"], before["selection_restores"])
+        self.assertEqual(after["text"], before["text"])
+        self.assertEqual(json.loads(self.state.read_text())["input"]["text"], "")
+        self.login_call("SetLocked", "false")
+        result = client.tool("accessibility", steps=[{"tool": "type_text", "args": {
+            "element_id": entry["element_id"], "text": "allowed"}}])
+        self.assertFalse(result["isError"], result)
+
+    def test_independent_lock_indicators_and_inspection_failure_recover(self):
+        self.start_shared()
+        client = self.client()
+        for method in ("SetScreenLocked", "SetLockedHint"):
+            self.login_call(method, "true")
+            self.assert_locked_status(client)
+            result = client.tool("vision", observations=False)
+            self.assertEqual(result["structuredContent"]["code"], "desktop_locked")
+            self.login_call(method, "false")
+            self.assertFalse(self.status(client)["structuredContent"]["locked"])
+        self.configure(lock_query_error=True)
+        for name in ("status", "vision", "accessibility"):
+            result = client.tool(name)
+            self.assertEqual(result["structuredContent"]["code"], "desktop_session_unavailable", result)
+            self.assertFalse(any(b["type"] == "image" for b in result["content"]))
+        self.configure(lock_query_error=False)
+        self.assertFalse(self.status(client)["structuredContent"]["locked"])
+        self.assertEqual(json.loads(self.login_state.read_text())["unlocks"], 0)
+
+    def test_lock_during_vision_delay_preserves_completed_and_stops_batch(self):
+        self.start_shared()
+        client = self.client()
+        self.status(client)
+        with ThreadPoolExecutor(1) as pool:
+            pending = pool.submit(client.tool, "vision", steps=[
+                {"tool": "press_keys", "args": {"keys": ["a"]}},
+                {"tool": "delay_ms", "args": {"ms": 2000}},
+                {"tool": "type_text", "args": {"text": "blocked"}}], observations=False)
+            time.sleep(.4)
+            self.login_call("SetLocked", "true")
+            result = pending.result(timeout=5)
+        data = result["structuredContent"]
+        self.assertEqual((data["completed"], data["failed"]["code"]), (1, "desktop_locked"), result)
+        self.assertEqual(json.loads(self.state.read_text())["input"]["text"], "")
+        self.assertFalse(any(b["type"] == "image" for b in result["content"]))
+
+    def test_lock_during_multiwindow_capture_suppresses_partial_images(self):
+        self.start_accessibility(two_windows=True)
+        self.start_shared()
+        client = self.client()
+        windows = [w["window_id"] for w in client.windows()]
+        captures = json.loads(self.state.read_text())["captures"]
+        self.configure(hold_capture_at=captures + 2)
+        with ThreadPoolExecutor(1) as pool:
+            pending = pool.submit(client.tool, "vision", observations=windows)
+            self.wait_until(lambda: json.loads(self.state.read_text())["captures"] == captures + 2)
+            self.login_call("SetScreenLocked", "true")
+            result = pending.result(timeout=5)
+        data = result["structuredContent"]
+        self.assertEqual((data["status"], data["completed"], data["failed"]["code"]), ("failed", 0, "desktop_locked"), result)
+        self.assertEqual(len(data["observations"]), 2)
+        self.assertFalse(any(b["type"] == "image" for b in result["content"]))
+        self.login_call("SetScreenLocked", "false")
+        self.assertFalse(client.tool("vision", observations=windows)["isError"])
+
+    def test_lock_during_tree_read_keeps_helper_and_element_rings(self):
+        self.start_shared()
+        clients = [self.client(), self.client(no_vision=True)]
+        window = clients[0].windows()[0]["window_id"]
+        trees = [self.snapshot_accessibility(client, window) for client in clients]
+        before = json.loads(self.atspi_state.read_text())
+        hold = self.atspi_state.with_suffix(".hold-attributes")
+        hold.touch()
+        with ThreadPoolExecutor(1) as pool:
+            pending = pool.submit(clients[0].tool, "vision", observations=[window])
+            self.wait_until(lambda: json.loads(self.atspi_state.read_text())["attribute_queries"] > before["attribute_queries"])
+            self.login_call("SetLocked", "true")
+            hold.unlink()
+            result = pending.result(timeout=5)
         self.assertTrue(result["isError"], result)
-        self.assertEqual(result["structuredContent"]["failed"]["code"], "desktop_unlock_failed")
-        self.assertEqual(json.loads(self.state.read_text())["connections"], 0)
-        self.configure(deny_unlock=False, hold_unlock=True)
-        start = time.monotonic()
-        result = client.tool("status")
-        self.assertTrue(result["isError"], result)
-        self.assertLess(time.monotonic() - start, 6)
-        self.assertEqual(json.loads(self.state.read_text())["captures"], 0)
+        self.assertFalse(any(b["type"] == "image" for b in result["content"]))
+        for client, tree in zip(clients, trees):
+            new = client.tool("accessibility", observations=[window])["structuredContent"]["observations"][0]
+            self.assertEqual([r["element_id"] for r in new["elements"]], [r["element_id"] for r in tree["elements"]])
+            button = next(r for r in tree["elements"] if r["label"] == "Fixture button")
+            self.assertFalse(client.tool("accessibility", steps=[{"tool": "activate", "args": {
+                "element_id": button["element_id"]}}])["isError"])
+        self.assertEqual(json.loads(self.atspi_state.read_text())["registrations"], before["registrations"])
+
+    def test_lock_during_drag_releases_held_input(self):
+        self.start_shared(triple=True)
+        client = self.client()
+        self.status(client)
+        with ThreadPoolExecutor(1) as pool:
+            pending = pool.submit(client.tool, "vision", steps=[
+                {"tool": "drag", "args": {"from_x": 40, "from_y": 60,
+                    "to_x": 400, "to_y": 60, "duration_ms": 2000}},
+                {"tool": "type_text", "args": {"text": "blocked"}}])
+            time.sleep(.3)
+            self.login_call("SetLocked", "true")
+            result = pending.result(timeout=5)
+        self.assertEqual(result["structuredContent"]["failed"]["code"], "desktop_locked", result)
+        self.assertEqual(result["structuredContent"]["completed"], 0)
+        self.assert_locked_status(client)  # refresh the independent input oracle
+        state = json.loads(self.state.read_text())["input"]
+        self.assertEqual((state["buttons_down"], state["keys_down"], state["text"]), (0, 0, ""))
 
     def test_socket_demand_starts_one_host_and_reactivates_without_remounting(self):
         from types import SimpleNamespace
@@ -1169,7 +1327,8 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.start_host(two_windows=True)
         result = self.status(self.client())
         data = result["structuredContent"]
-        self.assertEqual(set(data), {"canvas", "apps"})
+        self.assertEqual(set(data), {"canvas", "apps", "locked"})
+        self.assertFalse(data["locked"])
         self.assertEqual(self.image(result).size, (160, 120))
         canvas = data["canvas"]
         self.assertEqual(set(canvas), {"width", "height", "id"})

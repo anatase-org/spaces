@@ -39,6 +39,9 @@ static const char usage[] =
     "Host permission: run `sudo spaces configure <space>` on the host and\n"
     "enable Accessibility and Agent computer use or use the Development preset.\n";
 
+static const char desktop_locked_warning[] =
+    "The screen is locked. Vision tools are unavailable.";
+
 static const char server_instructions[] =
     "Computer use MCP server. Control the host desktop: screenshots, mouse, "
     "keyboard, and accessibility. Use `status` to inspect the desktop, "
@@ -63,25 +66,21 @@ static const char vision_description[] =
     "Insert {tool:delay_ms,args:{ms:500}} to pause anywhere, the final "
     "observations wait for all steps including trailing delays (there are "
     "some default delays if not provided). "
-    "Use observations:false to skip observation or observations:[window_id,...] for screenshots and accessibility trees of Windows. "
+    "Use observations:false to skip observation or observations:[window_id,...] "
+    "for screenshots and accessibility trees of Windows. "
     "Omit observations or pass [] for a desktop screenshot. "
     "Prefer the accessibility tree to locate controls when working with a "
-    "single application, especially browsers. "
-    "When the tree provides the controls you need, use "
-    "accessibility with observations:[window_id] for subsequent trees "
-    "to skip the screenshot. "
-    "All pixel coordinates are global to the full overview. "
-    "Screenshots and foreground input unlock the host desktop when needed; "
-    "tree-only observations leave it locked. ";
+    "single application without the need for vision feedback, especially browsers. "
+    "When the tree provides the controls you need, use accessibility with "
+    "observations:[window_id] for subsequent trees to skip screenshots. "
+    "All pixel coordinates are global to the full overview. ";
 static const char accessibility_description[] =
     "Execute up to 64 JSON steps shaped {tool,args}, in order and stop "
     "on failure. Responses report status:ok/failed and the completed step count. "
     "Insert {tool:delay_ms,args:{ms:500}} to pause anywhere. "
     "Use observations:[window_id,...] for accessibility trees after all steps, "
     "including trailing delays. Omit observations or pass [] to skip tree reads. "
-    "Returns observations without images. Element actions can target offscreen controls. "
-    "Accessibility-only steps and tree-only observations leave the host desktop locked; "
-    "keyboard editing unlocks it when needed. ";
+    "Returns observations without images. Element actions can target offscreen controls. ";
 
 typedef enum {
     ARG_STRING,
@@ -286,6 +285,7 @@ typedef struct {
     yyjson_mut_doc *doc;
     JsonResult *images;
     char *code, *hint;
+    gboolean vision_request, lock_seen, lock_monitor;
     gint cancelled, stopping;
     gint64 deadline;
 } Scu;
@@ -798,6 +798,13 @@ static void add_tool_result(JsonResult *result, const Tool *tool, JsonResult *ou
     JsonResult *text = result_object();
     JsonResult *structured = output != NULL ? output : error_payload();
     char *body = yyjson_mut_val_write(structured, 0, NULL);
+    if (output && tool && !strcmp(tool->name, "status") &&
+        yyjson_mut_is_true(yyjson_mut_obj_get(output, "locked"))) {
+        JsonResult *warning = result_object();
+        result_string(warning, "type", "text");
+        result_string(warning, "text", desktop_locked_warning);
+        result_append(content, warning);
+    }
 
     result_string(text, "type", "text");
     result_string(text, "text", body);
@@ -901,6 +908,7 @@ static void handle_request(yyjson_doc *document)
     /* Everything constructed for this response shares one allocation arena. */
     scu.doc = yyjson_mut_doc_new(NULL);
     scu.images = result_array();
+    scu.vision_request = scu.lock_seen = scu.lock_monitor = FALSE;
     scu.deadline = g_get_monotonic_time() + 60 * G_USEC_PER_SEC;
     g_clear_pointer(&scu.code, g_free);
     g_clear_pointer(&scu.hint, g_free);
@@ -981,6 +989,7 @@ cleanup:
     yyjson_mut_doc_free(scu.doc);
     scu.doc = NULL;
     scu.images = NULL;
+    scu.vision_request = scu.lock_seen = scu.lock_monitor = FALSE;
     scu.deadline = 0;
 }
 

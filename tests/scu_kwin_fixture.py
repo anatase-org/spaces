@@ -196,7 +196,7 @@ def method(connection, sender, path, interface, name, parameters, invocation):
     elif name in ("CaptureWorkspace", "CaptureArea", "CaptureWindow"):
         state["captures"] += 1
         state["capture_times"].append(time.monotonic())
-        if config.get("hold_capture"):
+        if config.get("hold_capture") or state["captures"] == config.get("hold_capture_at"):
             held.append(invocation)
             save()
             return

@@ -537,19 +537,30 @@ when the selected desktop returns. Executable replacement restarts the common
 service when needed, disconnecting clients without replaying actions.
 
 One event loop executes complete MCP requests sequentially while continuing to
-receive cancellation and disconnect notifications. EIS, geometry, the current
-full-overview capture and accessibility handles are shared. JSON-RPC request IDs
+receive cancellation and disconnect notifications. EIS, geometry and the current
+full-overview capture are shared; element rings belong to individual clients. JSON-RPC request IDs
 are scoped to their originating connection. A later overview supersedes the
 current capture for every client. The existing restartable AT-SPI helper and its
 private pipe protocol are unchanged.
 
-Before screenshots or EIS input, the host checks the selected session through
-logind, requests `Unlock()` when needed and waits for both logind and the screen
-locker. The unlock wait is bounded to five seconds and the request deadline.
-It leaves the desktop unlocked afterward. Semantic accessibility actions,
-accessibility observations, vision window observations with `screenshot:false`,
-and pure delays do not unlock the desktop. Verified keyboard editing may unlock.
-Vision window observations include screenshots by default and require unlocking.
+SCU never unlocks the desktop. It checks logind's `LockedHint` and KDE's
+ScreenSaver `GetActive` independently; either reporting locked blocks vision.
+Both indicators are refreshed at request/effect boundaries and monitored during
+work. Inspection failures remain errors rather than implying an unlocked screen.
+Locked `status` succeeds with canvas/apps metadata, `locked:true`, and the text
+“The screen is locked. Vision tools are unavailable.” It still captures internally
+to initialize a valid canvas, including on a fresh connection, but returns no
+image. Unlocked status reports `locked:false` and keeps its normal image behavior.
+
+Every valid vision request is rejected with `desktop_locked` before effects while
+locked, including delay-only batches and every observation form. A lock during
+work releases held input, stops remaining work, keeps completed counts, and
+suppresses all accumulated images. No action resumes or replays after unlocking.
+Native accessibility actions, observations and delays remain usable. Keyboard
+editing fallback is blocked before focus preparation, selection changes or input.
+Locking does not invalidate the helper or any client's 20,000-entry element ring,
+including element ID `0`. An in-flight tree read is drained to preserve those
+rings, then its interrupted vision request reports the lock error.
 
 While MCP clients are connected, `kscreen-doctor` supplies the output inventory.
 If none is usable, the host supervises one `krfb-virtualmonitor` at 1280x720,
@@ -597,8 +608,8 @@ release input and close the host connection.
 `scu mcp --no-vision` exposes only `status` and `accessibility`, rejects direct
 `vision` calls, and returns no status image blocks. This flag belongs to the MCP
 frontend; a normal client on the same shared host still has vision and images.
-Status still captures internally, initializes the canvas, and may unlock. Tree
-reads require that valid overview. Discovery and server instructions reflect the
+Status still captures internally and initializes the canvas while locked; it never
+unlocks. Tree reads require that valid overview. Discovery and server instructions reflect the
 flag. Empty modern client capabilities still expose vision by default: the
 [MCP client capability schema](https://modelcontextprotocol.io/specification/2026-07-28/schema#clientcapabilities)
 has no standard flag describing model vision support. SCU performs no inference
@@ -1358,9 +1369,9 @@ Diagnostic artifacts are in `.build/scu-split-browser`,
 `.build/scu-split-browser-diagnostic` and `.build/scu-split-browser-active-first`;
 the accepted complete run is `.build/scu-split-browser-final`.
 
-### Why SCU unlocks the screen
+### Locked-screen diagnostic before removal of automatic unlocking
 
-A locked-screen diagnostic on win5, 2026-11-01, distinguished SCU's current
+A locked-screen diagnostic on win5, 2026-11-01, distinguished SCU's then-current
 unlock policy from compositor requirements. The installed `scu-host` was run
 through its existing private `--host-service` fixture harness, with an owned
 socket and GTK/Qt oracle windows. This harness leaves `desktop.session` unset,
@@ -1393,7 +1404,7 @@ consumes input while locked and restricts delivery to locker/input-method/locker
 overlay surfaces. Ordinary application surfaces are excluded. This matches the
 observed successful input submission to the locker rather than the fixture.
 
-SCU currently applies `desktop_ready()` before both foreground input and
+At the time, SCU applied `desktop_ready()` before both foreground input and
 captures, including status. That is a broader policy than the backend requires:
 window screenshots and native accessibility operations can work without
 unlocking. An unobscured desktop overview needs unlocking; otherwise its image
@@ -1407,3 +1418,58 @@ Evidence, oracle state, the driver, and screenshots are retained under
 initially unlocked session and removed its remote fixture directory, processes
 and sockets. Final checks: `LockedHint=no`, shared SCU `MainPID=0`, and SELinux
 `Enforcing`.
+
+
+### Removal of automatic unlocking (2026-11-01)
+
+Reproduce the owned-fixture lock check from this checkout with:
+
+```sh
+./sync.sh win5
+python tests/manual_scu_session_probe.py lock --artifacts .build/scu-lock-policy-live-final
+```
+
+Normal deployment and the revised probe passed on `win5` through `win5f`, with
+SELinux enforcing. The Qt fixture confirmed native button activation and text
+replacement while both lock indicators remained locked. Existing normal and
+fresh `--no-vision` frontends received successful status metadata with
+`locked:true`, the exact natural-text warning, and no image blocks. Omitted,
+empty, false and window-array vision observations all returned `desktop_locked`
+before their delay/text batches could send input. Element IDs `0` through `4`
+remained unchanged across repeated status, vision rejection, lock and external
+unlock. After the test harness explicitly unlocked the session, the same client
+and EIS connection delivered the expected foreground text to the fixture.
+
+After all clients closed, the host stopped. A new client activated a fresh host
+while already locked; status initialized a usable canvas without returning an
+image, and accessibility read the owned window. The probe re-enumerates window
+IDs from status after host replacement: those IDs belong to the host lifetime.
+An initial probe attempt reused the retired host's window ID and correctly
+received `window_unavailable`; the corrected probe passed end to end.
+
+Evidence includes full MCP responses, independent fixture state, output
+configuration and timestamped transitions in `.build/scu-lock-policy-live-final`.
+Cleanup removed `/tmp/scu-session-2992995116` and its process, restored the
+initial unlocked session and display configuration, and left SCU `MainPID=0`.
+Final checks reported `LockedHint=no` and SELinux `Enforcing`. No browser profile
+or SELinux override was used. `/tmp/scu-schema.json` was refreshed from the
+deployed `win5f` frontend.
+
+Private fixtures assert that `Unlock` is never called and cover independent
+logind/locker indications, inspection failure/recovery, blocked keyboard fallback
+before focus or selection, locked native editing, and locks during delays,
+held-button drags, tree reads and multi-window captures. They check preserved
+completed counts, suppressed partial images, unchanged helper registration and
+independent client element rings, including ID `0`. Existing ring rollover,
+headless-display, cancellation, revocation and lifecycle coverage remains active.
+
+Validation passed: **242 tests** across SCU, computer integration, launch and
+native ABI coverage in 254.908 seconds. Five focused lock/helper/editing tests
+passed again against the final boundary guards (28.599 seconds), and
+`make -C native check-guest-abi` passed. Commands:
+
+```sh
+PYTHONPATH=src python -m unittest \
+  tests.test_scu tests.test_computer_integration tests.test_launch tests.test_native_abi
+make -C native check-guest-abi
+```

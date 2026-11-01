@@ -4,8 +4,8 @@
 typedef struct {
     char *session, *path, *wayland, *output_name, *display_error;
     GDBusConnection *system;
-    guint properties_watch, removed_watch, owner_watch, timer;
-    gboolean locked, lock_known, valid, query_ready, helper_stopping;
+    guint properties_watch, removed_watch, owner_watch, locker_watch, locker_owner_watch, timer;
+    gboolean locked, lock_known, screen_locked, screen_known, valid, query_ready, helper_stopping;
     guint clients, outputs, physical_outputs;
     GSubprocess *query, *helper;
     gint64 query_started, queried, helper_started, helper_stop_started;
@@ -45,6 +45,7 @@ static void desktop_properties(GDBusConnection *bus, const char *sender, const c
         gboolean locked, active;
         if (g_variant_lookup(changed, "LockedHint", "b", &locked)) {
             desktop.locked = locked;
+            if (locked && scu.lock_monitor) scu.lock_seen = TRUE;
             desktop.lock_known = TRUE;
         }
         if (g_variant_lookup(changed, "Active", "b", &active) && !active) desktop.valid = FALSE;
@@ -57,6 +58,24 @@ static void desktop_properties(GDBusConnection *bus, const char *sender, const c
         }
     }
     g_variant_unref(changed); g_variant_unref(invalidated);
+}
+
+static void desktop_locker_changed(GDBusConnection *bus, const char *sender, const char *path,
+    const char *interface, const char *signal, GVariant *args, gpointer unused)
+{
+    (void)bus; (void)sender; (void)path; (void)interface; (void)signal; (void)unused;
+    g_variant_get(args, "(b)", &desktop.screen_locked);
+    desktop.screen_known = TRUE;
+    if (desktop.screen_locked && scu.lock_monitor) scu.lock_seen = TRUE;
+    desktop_check_lock();
+}
+
+static void desktop_locker_owner_changed(GDBusConnection *bus, const char *sender, const char *path,
+    const char *interface, const char *signal, GVariant *args, gpointer unused)
+{
+    (void)bus; (void)sender; (void)path; (void)interface; (void)signal; (void)args; (void)unused;
+    desktop.screen_known = FALSE;
+    release_input();
 }
 
 static void desktop_session_removed(GDBusConnection *bus, const char *sender, const char *path,
@@ -136,6 +155,12 @@ static gboolean desktop_bind(const char *session, const char *wayland, GError **
     desktop.owner_watch = g_dbus_connection_signal_subscribe(desktop.system, "org.freedesktop.DBus",
         "org.freedesktop.DBus", "NameOwnerChanged", "/org/freedesktop/DBus", "org.freedesktop.login1",
         G_DBUS_SIGNAL_FLAGS_NONE, desktop_owner_changed, NULL, NULL);
+    desktop.locker_watch = g_dbus_connection_signal_subscribe(session_bus, "org.kde.screensaver",
+        "org.freedesktop.ScreenSaver", "ActiveChanged", "/ScreenSaver", NULL,
+        G_DBUS_SIGNAL_FLAGS_NONE, desktop_locker_changed, NULL, NULL);
+    desktop.locker_owner_watch = g_dbus_connection_signal_subscribe(session_bus, "org.freedesktop.DBus",
+        "org.freedesktop.DBus", "NameOwnerChanged", "/org/freedesktop/DBus", "org.kde.screensaver",
+        G_DBUS_SIGNAL_FLAGS_NONE, desktop_locker_owner_changed, NULL, NULL);
     desktop.timer = g_timeout_add(250, desktop_timer, NULL);
     return TRUE;
 }
@@ -146,16 +171,60 @@ static void desktop_check_lock(void)
     if (!desktop.valid || (desktop.system && g_dbus_connection_is_closed(desktop.system))) {
         g_atomic_int_set(&scu.stopping, 1);
         release_input();
-    } else if (desktop.locked) release_input();
+    } else if (desktop.locked || desktop.screen_locked) {
+        if (scu.lock_monitor) scu.lock_seen = TRUE;
+        release_input();
+    } else if (!desktop.lock_known || !desktop.screen_known) release_input();
+}
+
+static gboolean desktop_is_locked(void)
+{
+    return desktop.session && (desktop.locked || desktop.screen_locked);
+}
+
+/* Fresh reads guard request/effect boundaries; notifications guard input chunks.
+ * The two lock indicators are independent, and either one can deny input. */
+static gboolean desktop_refresh_lock(void)
+{
+    if (!desktop.session) return TRUE;
+    GError *error = NULL;
+    if (!desktop.valid) {
+        scu_fail("desktop_session_unavailable", "The selected graphical login is no longer active.");
+        return FALSE;
+    }
+    if (!desktop_read_session(&error)) goto unavailable;
+    GVariant *reply = bounded_call(session_bus, "org.kde.screensaver", "/ScreenSaver",
+        "org.freedesktop.ScreenSaver", "GetActive", NULL, NULL, NULL, &error);
+    if (!reply) { desktop.screen_known = FALSE; goto unavailable; }
+    g_variant_get(reply, "(b)", &desktop.screen_locked);
+    g_variant_unref(reply);
+    desktop.screen_known = TRUE;
+    scu.lock_monitor = TRUE;
+    desktop_check_lock();
+    return TRUE;
+unavailable:
+    release_input();
+    scu_fail("desktop_session_unavailable", error ? error->message : "Cannot inspect the host session lock.");
+    g_clear_error(&error);
+    return FALSE;
 }
 
 static gboolean desktop_input_allowed(void)
 {
-    if (desktop.session && desktop.locked) {
-        scu_fail("desktop_locked", "The session locked during input. Inspect status before continuing; no action was replayed.");
+    if (desktop_is_locked() || scu.lock_seen) {
+        scu_fail("desktop_locked", desktop_locked_warning);
+        return FALSE;
+    }
+    if (desktop.session && (!desktop.lock_known || !desktop.screen_known)) {
+        scu_fail("desktop_session_unavailable", "Cannot inspect the host session lock.");
         return FALSE;
     }
     return TRUE;
+}
+
+static gboolean desktop_foreground_ready(void)
+{
+    return desktop_refresh_lock() && desktop_input_allowed();
 }
 
 static void desktop_child_setup(gpointer unused)
@@ -286,39 +355,10 @@ static gboolean desktop_ready(void)
 {
     if (!desktop.session) return TRUE;
     if (!desktop.valid) { scu_fail("desktop_session_unavailable", "The selected graphical login is no longer active."); return FALSE; }
-    GError *error = NULL;
+    if (!desktop_refresh_lock()) return FALSE;
     if (g_get_monotonic_time() - desktop.queried > 200000) {
         desktop.query_ready = FALSE;
         desktop.queried = 0;
-    }
-    /* Refresh at the effect boundary as well as monitoring notifications. */
-    if (!desktop_read_session(&error)) goto unavailable;
-    GVariant *reply = bounded_call(session_bus, "org.kde.screensaver", "/ScreenSaver",
-        "org.freedesktop.ScreenSaver", "GetActive", NULL, NULL, NULL, &error);
-    gboolean screen_locked = desktop.locked;
-    if (reply) { g_variant_get(reply, "(b)", &screen_locked); g_variant_unref(reply); }
-    if (error) goto unavailable;
-    if (desktop.locked || screen_locked) {
-        gint64 saved_deadline = scu.deadline;
-        scu.deadline = MIN(saved_deadline, g_get_monotonic_time() + 5 * G_USEC_PER_SEC);
-        reply = desktop_call(desktop.path, "org.freedesktop.login1.Session", "Unlock", NULL, &error);
-        if (reply) g_variant_unref(reply);
-        while (reply && scu_tick()) {
-            if (!desktop_read_session(&error)) break;
-            GVariant *state = bounded_call(session_bus, "org.kde.screensaver", "/ScreenSaver",
-                "org.freedesktop.ScreenSaver", "GetActive", NULL, NULL, NULL, &error);
-            if (!state) break;
-            g_variant_get(state, "(b)", &screen_locked); g_variant_unref(state);
-            if (!desktop.locked && !screen_locked) break;
-            if (!scu_pause(10)) break;
-        }
-        gboolean unlocked = reply && !error && !desktop.locked && !screen_locked && scu_tick();
-        scu.deadline = saved_deadline;
-        if (!unlocked) {
-            scu_fail("desktop_unlock_failed", error ? error->message : "The session did not unlock within five seconds.");
-            g_clear_error(&error);
-            return FALSE;
-        }
     }
     gint64 until = MIN(scu.deadline, g_get_monotonic_time() + 5 * G_USEC_PER_SEC);
     do {
@@ -327,10 +367,6 @@ static gboolean desktop_ready(void)
         if (!scu_pause(10)) return FALSE;
     } while (g_get_monotonic_time() < until);
     scu_fail("virtual_display_unavailable", desktop.display_error ? desktop.display_error : "No usable desktop output became available.");
-    return FALSE;
-unavailable:
-    scu_fail("desktop_session_unavailable", error ? error->message : "Cannot inspect the host session lock.");
-    g_clear_error(&error);
     return FALSE;
 }
 
@@ -344,6 +380,10 @@ static void desktop_close(void)
     if (desktop.query) {
         g_subprocess_force_exit(desktop.query);
         g_subprocess_wait(desktop.query, NULL, NULL);
+    }
+    if (session_bus) {
+        if (desktop.locker_watch) g_dbus_connection_signal_unsubscribe(session_bus, desktop.locker_watch);
+        if (desktop.locker_owner_watch) g_dbus_connection_signal_unsubscribe(session_bus, desktop.locker_owner_watch);
     }
     if (desktop.system) {
         if (desktop.properties_watch) g_dbus_connection_signal_unsubscribe(desktop.system, desktop.properties_watch);

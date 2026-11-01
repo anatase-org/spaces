@@ -35,17 +35,25 @@ class Probe:
         assert reply["id"] == self.serial and "result" in reply, reply
         return reply["result"]
 
-    def tool(self, name, **arguments):
+    def tool(self, name, *, expect_error=None, **arguments):
         reply = self.call("tools/call", {"name": name, "arguments": arguments})
         if name == "accessibility":
             assert not any(block["type"] == "image" for block in reply.get("content", [])), reply
+        self.last_reply = reply
         prefix = f"{self.label}-{self.serial:02d}-{name}"
         for index, block in enumerate(reply.get("content", [])):
             if block["type"] == "image":
                 (self.artifacts / f"{prefix}-{index}.png").write_bytes(base64.b64decode(block["data"]))
         metadata = reply.get("structuredContent", {})
         (self.artifacts / f"{prefix}.json").write_text(json.dumps(metadata, indent=2, ensure_ascii=False))
-        assert not reply.get("isError"), metadata
+        (self.artifacts / f"{prefix}-response.json").write_text(json.dumps(reply, indent=2, ensure_ascii=False))
+        if expect_error:
+            assert reply.get("isError"), metadata
+            error = metadata.get("failed", metadata)
+            assert error.get("code") == expect_error, metadata
+            assert error.get("hint") == "The screen is locked. Vision tools are unavailable.", metadata
+        else:
+            assert not reply.get("isError"), metadata
         return metadata
 
     def close(self):
@@ -149,8 +157,8 @@ def main():
     def host_pid():
         return host("systemctl", "--user", "show", "spaces-scu-host.service", "-p", "MainPID", "--value")
 
-    def new_probe(label):
-        probe = Probe(args.guest, args.artifacts, label)
+    def new_probe(label, *, no_vision=False):
+        probe = Probe(args.guest, args.artifacts, label, no_vision=no_vision)
         probes.append(probe)
         return probe
 
@@ -255,26 +263,65 @@ def main():
             record("physical-return-cleanup")
         else:
             rows = focus_entry(first)
+            window = next(window["window_id"] for app in first.tool("status")["apps"]
+                          for window in app["windows"] if window["title"] == "Spaces AT-SPI fixture " + token)
+            tree = first.tool("accessibility", observations=[window])["observations"][0]
+            original_ids = {row["label"]: row["element_id"] for row in tree["elements"]}
+            assert 0 in original_ids.values(), original_ids
             clicks = fixture_state()["clicks"]
             lock_visible()
-            first.tool("accessibility", steps=[{"tool": "activate", "args": {
-                "element_id": rows["Spaces fixture button"]["element_id"]}}])
+
+            def locked_status(probe):
+                current = probe.tool("status")
+                assert current["locked"] and current["canvas"]["id"] and current["apps"], current
+                assert not any(block["type"] == "image" for block in probe.last_reply["content"])
+                assert {"type": "text", "text": "The screen is locked. Vision tools are unavailable."} in probe.last_reply["content"]
+                assert locked(), "SCU changed the session lock"
+                return current
+
+            locked_status(first)
+            second = new_probe("no-vision", no_vision=True)
+            locked_status(second)
+            first.tool("accessibility", steps=[
+                {"tool": "activate", "args": {"element_id": rows["Spaces fixture button"]["element_id"]}},
+                {"tool": "set_value", "args": {"element_id": rows["Spaces fixture entry"]["element_id"], "value": "Locked " + token}},
+                {"tool": "delay_ms", "args": {"ms": 10}}], observations=[window])
             assert fixture_state()["clicks"] == clicks + 1
+            assert fixture_state()["text"] == "Locked " + token
             assert locked(), "accessibility action unlocked the session"
-            record("accessibility-stayed-locked", fixture=fixture_state())
-            first.tool("status")
-            wait(lambda: not locked(), "screenshot did not unlock")
-            record("screenshot-unlocked")
+            record("native-accessibility-stayed-locked", fixture=fixture_state())
+            for observation in ({}, {"observations": []}, {"observations": False}, {"observations": [window]}):
+                first.tool("vision", expect_error="desktop_locked", steps=[
+                    {"tool": "delay_ms", "args": {"ms": 1}},
+                    {"tool": "type_text", "args": {"text": "Must not reach locker"}}], **observation)
+            current = first.tool("accessibility", observations=[window])["observations"][0]
+            assert {row["label"]: row["element_id"] for row in current["elements"]} == original_ids
+            assert fixture_state()["text"] == "Locked " + token
+            record("locked-status-and-vision-rejection", preserved_ids=original_ids)
+            # Only the test harness changes the lock, restoring the initial state.
+            host("loginctl", "unlock-session", session)
+            wait(lambda: not locked(), "external unlock did not complete")
+            assert not first.tool("status")["locked"]
+            current = first.tool("accessibility", observations=[window])["observations"][0]
+            assert {row["label"]: row["element_id"] for row in current["elements"]} == original_ids
             focus_entry(first)
-            lock_visible()
-            expected = "Unlocked EIS " + token
+            expected = "Recovered EIS " + token
             first.tool("vision", steps=[{"tool": "type_text", "args": {"text": expected}}], observations=False)
-            wait(lambda: not locked(), "EIS did not unlock")
             assert fixture_state()["text"] == expected, fixture_state()
-            assert any(item["name"].startswith("eDP") and item["enabled"] for item in outputs())
+            record("external-unlock-recovery", fixture=fixture_state())
+            first.close()
+            second.close()
+            wait(lambda: host_pid() == "0", "SCU host survived final client")
+            lock_visible()
+            first = new_probe("cold-locked")
+            current_status = locked_status(first)
+            window = next(window["window_id"] for app in current_status["apps"]
+                          for window in app["windows"] if window["title"] == "Spaces AT-SPI fixture " + token)
+            main_pid = host_pid()
+            current = first.tool("accessibility", observations=[window])
+            assert current["observations"][0]["elements"]
+            record("cold-locked-status", host_pid=int(main_pid))
             assert not virtuals(), "lock test created a fallback despite the enabled physical screen"
-            first.tool("status")
-            record("eis-unlocked", fixture=fixture_state())
         assert host_pid() == main_pid
         assert host("getenforce") == "Enforcing"
         record("passed", mode=args.mode)

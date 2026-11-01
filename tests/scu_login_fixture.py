@@ -23,6 +23,8 @@ XML = """<node>
 </interface>
 <interface name='org.freedesktop.login1.Session'>
  <method name='Unlock'/><method name='SetLocked'><arg type='b' direction='in'/></method>
+ <method name='SetLockedHint'><arg type='b' direction='in'/></method>
+ <method name='SetScreenLocked'><arg type='b' direction='in'/></method>
  <method name='Deactivate'/>
  <property name='User' type='(uo)' access='read'/><property name='Active' type='b' access='read'/>
  <property name='Remote' type='b' access='read'/><property name='Type' type='s' access='read'/>
@@ -30,10 +32,12 @@ XML = """<node>
 </interface>
 <interface name='org.freedesktop.ScreenSaver'>
  <method name='GetActive'><arg type='b' direction='out'/></method>
+ <signal name='ActiveChanged'><arg type='b'/></signal>
 </interface></node>"""
 node = Gio.DBusNodeInfo.new_for_xml(XML)
 path = "/org/freedesktop/login1/session/fixture"
-state = {"locked": json.loads(control.read_text()).get("locked", False), "unlocks": 0, "active": True}
+config = json.loads(control.read_text())
+state = {"locked": config.get("locked", False), "screen_locked": config.get("screen_locked", config.get("locked", False)), "unlocks": 0, "active": True}
 
 
 def save():
@@ -49,24 +53,36 @@ def locked(value):
     save()
 
 
+def screen_locked(value):
+    state["screen_locked"] = value
+    bus.emit_signal(None, "/ScreenSaver", "org.freedesktop.ScreenSaver", "ActiveChanged",
+                    GLib.Variant("(b)", (value,)))
+    save()
+
+
 def method(connection, sender, object_path, interface, name, parameters, invocation):
     config = json.loads(control.read_text())
     if name == "GetSession":
         invocation.return_value(GLib.Variant("(o)", (path,)))
     elif name == "GetActive":
-        invocation.return_value(GLib.Variant("(b)", (state["locked"],)))
+        if config.get("lock_query_error"):
+            invocation.return_dbus_error("org.freedesktop.DBus.Error.Failed", "Cannot inspect fixture locker")
+        else:
+            invocation.return_value(GLib.Variant("(b)", (state["screen_locked"],)))
     elif name == "SetLocked":
         locked(parameters.unpack()[0])
+        screen_locked(parameters.unpack()[0])
+        invocation.return_value(None)
+    elif name == "SetLockedHint":
+        locked(parameters.unpack()[0])
+        invocation.return_value(None)
+    elif name == "SetScreenLocked":
+        screen_locked(parameters.unpack()[0])
         invocation.return_value(None)
     elif name == "Unlock":
         state["unlocks"] += 1
         save()
-        if config.get("deny_unlock"):
-            invocation.return_dbus_error("org.freedesktop.DBus.Error.AccessDenied", "fixture denies unlock")
-            return
-        if not config.get("hold_unlock"):
-            locked(False)
-        invocation.return_value(None)
+        invocation.return_dbus_error("org.freedesktop.DBus.Error.AccessDenied", "SCU must never unlock")
     elif name == "Deactivate":
         state["active"] = False
         save()
