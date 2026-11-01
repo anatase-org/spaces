@@ -677,24 +677,37 @@ and compositor metadata are refreshed. Matching still requires a unique title
 and compatible client/buffer/frame geometry; PID-independent Flatpak matches
 must be unique in both inventories. An ambiguous association, incompatible
 geometry, and an unmatched window have distinct error codes and diagnostics.
+Chromium's accessible `Audio playing` window-name suffix is normalized during
+association; title/geometry uniqueness checks still apply. Other toolkits keep
+exact title matching.
 A title change alone does not invalidate an otherwise unchanged window;
 identity, PID and geometry changes still invalidate the observation.
 
 Unnamed structural wrappers and duplicate descendant text are flattened.
-Container hypertext is not copied into every ancestor. Visible controls and
-content retain tokens, roles, labels, compact ancestry and overview-coordinate
+Container hypertext is not copied into every ancestor. Offscreen controls stay
+in the tree and remain semantic targets, including controls without visible or
+showing states. Rectangles never determine whether a control is included.
+Dormant tooltips and nodes without semantic content are omitted; unnamed text
+and numeric controls remain. Controls and content retain tokens, roles, labels,
+compact ancestry and overview-coordinate
 frames. `actions` names the supported SCU actions, and `click_buttons` identifies
 supported click buttons. Only true focused/selected/checked states are included;
 password values remain excluded. Text values preserve whitespace, and clipped
 labels/values carry `text_truncated:true`.
 
+For Chromium's mixed coordinate units, a document's rectangle must align with
+its native parent under a compositor-provided display scale before converting
+that document and its descendants to logical coordinates. Already aligned
+documents keep their coordinates. No scale is inferred from page width alone.
+
 Internal limits bound traversal to 4096 raw nodes, 96 raw levels, five seconds,
 and 160 emitted rows. Rows have a 16 KiB budget; the converted tree is checked
 again against 18 KiB. Complexity produces a usable partial tree with
 `truncated:true` and `accessibility_error.code:"accessibility_tree_too_complex"`,
-with guidance to scroll and observe again or use screenshot input. Complexity
-is not reported as accessibility being unavailable. A missing bridge can still
-return the window screenshot with the specific accessibility error.
+with usable returned elements and guidance to use screenshot input for omitted
+controls. Complexity is not reported as accessibility being unavailable. A
+missing bridge can still return the window screenshot with the specific
+accessibility error.
 
 Element tokens identify action targets; replacing a window's tree invalidates
 its old tokens. Unsupported rectangles are null. Toolkit click names such as
@@ -713,7 +726,15 @@ to confirm full selection before sending text, since keyboard and EIS text can
 arrive through separate compositor paths.
 This route requires the normal unlocked visual/input session and reports a
 keyboard warning. It counts as foreground input for automatic observation.
-Numeric `set_value` continues using the AT-SPI Value interface.
+Numeric controls expose their current `value`, `minimum` and `maximum` in the
+tree. Numeric `set_value` first validates the range, submits through AT-SPI Value
+and waits up to 250 ms for readback. A setter accepting the request without
+changing a slider triggers the same verified-focus keyboard path. It adjusts
+with arrow keys, checking focus, the active window and actual value after each
+change, for at most 64 keys or three seconds. No progress, focus loss or failed
+readback stops the batch. Other numeric controls fail rather than receiving
+speculative keyboard input. A successful native text replacement also requires
+matching readback.
 
 ### One coordinate system
 
@@ -1128,3 +1149,35 @@ tests, and `make -C native check-guest-abi` passed. The private fixtures exercis
 canonical action mapping, single-key/chord input, text readback, full-selection
 confirmation, refusal to type without focus or an active window, stopping after
 focus loss, and preservation of visible descendants under hidden containers.
+
+### Offscreen controls and browser coordinates
+
+The browser probe also places a named button more than two viewport heights
+below the initial page. Its token must be present before scrolling and must
+invoke the button directly. The independent page result confirms the click.
+Native range and custom ARIA sliders must expose their numeric range and reach
+50 through `set_value`, with page event handlers confirming the application
+changed as well as accessibility readback.
+
+On 2026-11-01, the updated probe passed on win5/win5f without accessibility
+launch overrides. The synthetic page returned 60 elements without truncation;
+the offscreen button, native slider, custom ARIA slider, text editing and
+address-bar checks passed. Shared-client retention, last-client teardown and
+reactivation passed. Final state was `IsEnabled=false`, no registered events,
+`MainPID=0`, and SELinux enforcing. Artifacts are in
+`.build/scu-value-browser-final`.
+
+A separate read-only check of the existing YouTube window returned Search and
+Volume controls with corrected coordinates. The document width was about 1922
+pixels within a 1921-pixel screenshot, instead of the previous 3170 pixels.
+Volume exposed value 50 with range 0–100. The 62-row result was explicitly
+partial under the existing byte budget and contained no dormant tooltip rows;
+tree-only observation also succeeded. Artifacts are in
+`.build/scu-tree-youtube-final`, with readable copies at
+`/tmp/scu-youtube-tree.txt` and `/tmp/scu-youtube-tree.json`. This check preserved
+the browser page and playback state.
+
+The final SCU, computer-integration, launch and native ABI suite passed all 218
+tests, and `make -C native check-guest-abi` passed. Fixtures cover offscreen
+controls, controls without visibility states, placeholder compaction, dormant
+tooltips, mixed document scales, playback-title association and ambiguity.

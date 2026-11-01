@@ -12,7 +12,8 @@ from types import SimpleNamespace
 
 # Stable AT-SPI wire enum values; no libatspi client is used by the server.
 Atspi = SimpleNamespace(
-    Role=SimpleNamespace(APPLICATION=75, FRAME=23, PUSH_BUTTON=43, ENTRY=79, PASSWORD_TEXT=40, PANEL=39),
+    Role=SimpleNamespace(APPLICATION=75, FRAME=23, PUSH_BUTTON=43, ENTRY=79, PASSWORD_TEXT=40,
+                         PANEL=39, SLIDER=51, DOCUMENT_WEB=95, TOOL_TIP=64),
     StateType=SimpleNamespace(EDITABLE=7, ENABLED=8, FOCUSED=12, SENSITIVE=24, SHOWING=25, VISIBLE=30),
 )
 
@@ -23,6 +24,9 @@ BUTTON = "/org/a11y/atspi/accessible/button"
 ENTRY = "/org/a11y/atspi/accessible/entry"
 PASSWORD = "/org/a11y/atspi/accessible/password"
 PANEL = "/org/a11y/atspi/accessible/panel"
+SLIDER = "/org/a11y/atspi/accessible/slider"
+DOCUMENT = "/org/a11y/atspi/accessible/document"
+TOOLTIP = "/org/a11y/atspi/accessible/tooltip"
 XML = """<node>
 <interface name='org.a11y.atspi.Accessible'>
  <property name='Name' type='s' access='read'/>
@@ -70,6 +74,12 @@ XML = """<node>
  <method name='SetTextContents'><arg type='s' direction='in'/><arg type='b' direction='out'/></method>
  <method name='InsertText'><arg type='i' direction='in'/><arg type='s' direction='in'/><arg type='i' direction='in'/><arg type='b' direction='out'/></method>
 </interface>
+<interface name='org.a11y.atspi.Value'>
+ <property name='CurrentValue' type='d' access='readwrite'/>
+ <property name='MinimumValue' type='d' access='read'/>
+ <property name='MaximumValue' type='d' access='read'/>
+ <property name='MinimumIncrement' type='d' access='read'/>
+</interface>
 <interface name='org.a11y.atspi.Registry'>
  <method name='RegisterEvent'><arg type='s' direction='in'/><arg type='as' direction='in'/><arg type='s' direction='in'/></method>
  <method name='DeregisterEvent'><arg type='s' direction='in'/><arg type='s' direction='in'/></method>
@@ -104,8 +114,17 @@ def main():
     refuse_focus = "--refuse-focus" in sys.argv[3:]
     lose_focus = "--lose-focus" in sys.argv[3:]
     readonly = "--readonly-entry" in sys.argv[3:]
+    numeric = "--numeric" in sys.argv[3:]
+    numeric_keyboard = "--numeric-keyboard" in sys.argv[3:]
+    numeric_readonly = "--numeric-readonly" in sys.argv[3:]
+    numeric_delay = "--numeric-delay" in sys.argv[3:]
+    state.update(value=80.0, value_writes=0)
     hidden = "--hidden-button" in sys.argv[3:]
     hidden_container = "--hidden-container" in sys.argv[3:]
+    browser = "--browser" in sys.argv[3:]
+    offscreen = "--offscreen" in sys.argv[3:]
+    tooltips = "--tooltips" in sys.argv[3:]
+    placeholders = next((int(arg.split("=", 1)[1]) for arg in sys.argv[3:] if arg.startswith("--placeholders=")), 0)
     deep = next((int(arg.split("=", 1)[1]) for arg in sys.argv[3:] if arg.startswith("--deep=")), 0)
     wide = next((int(arg.split("=", 1)[1]) for arg in sys.argv[3:] if arg.startswith("--wide=")), 0)
     delayed_window = "--delayed-window" in sys.argv[3:]
@@ -115,6 +134,7 @@ def main():
     window_pending = False
     frame_ready = False
     extra_paths = [f"{PANEL}/{i}" for i in range(deep)] + [f"{BUTTON}/{i}" for i in range(wide)]
+    extra_paths += [f"{BUTTON}/empty_{i}" for i in range(placeholders)]
     focused = False
     selected_fixture = "--selection" in sys.argv[3:] or "--selection-unstable" in sys.argv[3:]
     unstable_selection = "--selection-unstable" in sys.argv[3:]
@@ -143,6 +163,12 @@ def main():
     def text_selected():
         path = Path(state_path).with_name("kwin-state.json")
         return path.exists() and json.loads(path.read_text()).get("input", {}).get("selected", False)
+
+    def number_value():
+        path = Path(state_path).with_name("kwin-state.json")
+        if numeric_keyboard and not numeric_readonly and path.exists():
+            return json.loads(path.read_text()).get("input", {}).get("numeric_value", 80.0)
+        return state["value"]
 
     def owner_changed(connection, sender, path, interface, signal, parameters, unused):
         name, old, new = parameters.unpack()
@@ -198,6 +224,14 @@ def main():
         if path == WINDOW and (not exposed or empty):
             # Chromium can advertise a child while it still returns null.
             return [("", "/org/a11y/atspi/null")] if not empty else []
+        if browser and path in (WINDOW, PANEL, DOCUMENT):
+            paths = {WINDOW: [PANEL], PANEL: [DOCUMENT], DOCUMENT: [BUTTON, ENTRY, PASSWORD]}[path]
+            return [(app.get_unique_name(), p) for p in paths]
+        if tooltips and path == WINDOW:
+            return [(app.get_unique_name(), p) for p in (TOOLTIP, BUTTON, ENTRY, PASSWORD)]
+        if placeholders and path == WINDOW:
+            return [(app.get_unique_name(), p) for p in
+                    [*(f"{BUTTON}/empty_{i}" for i in range(placeholders)), BUTTON, ENTRY, PASSWORD]]
         if hidden_container and path in (WINDOW, PANEL):
             paths = (PANEL, ENTRY, PASSWORD) if path == WINDOW else (BUTTON,)
             return [(app.get_unique_name(), path) for path in paths]
@@ -211,7 +245,8 @@ def main():
         if wide and path == WINDOW:
             return [(app.get_unique_name(), f"{BUTTON}/{i}") for i in range(wide)]
         return {ROOT: [(app.get_unique_name(), path) for path in window_paths],
-                WINDOW: [(app.get_unique_name(), p) for p in (BUTTON, ENTRY, PASSWORD)]}.get(path, [])
+                WINDOW: [(app.get_unique_name(), p) for p in
+                         ((BUTTON, ENTRY, PASSWORD, SLIDER) if numeric else (BUTTON, ENTRY, PASSWORD))]}.get(path, [])
 
     def interfaces(path, connection):
         values = ["org.a11y.atspi.Accessible"]
@@ -225,6 +260,8 @@ def main():
             values += ["org.a11y.atspi.Text"]
             if not keyboard or path == PASSWORD:
                 values += ["org.a11y.atspi.EditableText"]
+        if path == SLIDER:
+            values += ["org.a11y.atspi.Value"]
         return values
 
     def method(connection, sender, path, interface, name, parameters, invocation):
@@ -237,9 +274,13 @@ def main():
             # Deliberately wrong SCREEN values expose any accidental raw-coordinate leak.
             rectangle = ((9000,9000,40,30) if args[0] == 0 else
                          {WINDOW:(0,0,40,30),WINDOW_TWO:(0,0,40,30),
-                          BUTTON:(5,5,10,5),ENTRY:(5,12,20,5),PASSWORD:(5,20,20,5)}.get(path,(0,0,40,30)))
+                          BUTTON:(5,5,10,5),ENTRY:(5,12,20,5),PASSWORD:(5,20,20,5),SLIDER:(5,25,20,4)}.get(path,(0,0,40,30)))
             if path == WINDOW and geometry_after_attributes and not frame_ready:
                 rectangle = (0, 0, 23, 17)
+            if args[0] != 0:
+                if path == BUTTON and offscreen: rectangle = (5, 300, 10, 5)
+                if browser and path in (DOCUMENT, BUTTON, ENTRY, PASSWORD):
+                    rectangle = tuple(v * 2 for v in rectangle)
             reply = GLib.Variant("((iiii))", (rectangle,))
         elif name == "GrabFocus":
             focused = not refuse_focus
@@ -256,16 +297,20 @@ def main():
         elif name == "GetRole":
             role = {ROOT: Atspi.Role.APPLICATION, WINDOW: Atspi.Role.FRAME, WINDOW_TWO: Atspi.Role.FRAME,
                     BUTTON: Atspi.Role.PUSH_BUTTON, ENTRY: Atspi.Role.ENTRY,
-                    PASSWORD: Atspi.Role.PASSWORD_TEXT, PANEL: Atspi.Role.PANEL}[path]
+                    PASSWORD: Atspi.Role.PASSWORD_TEXT, PANEL: Atspi.Role.PANEL, SLIDER: Atspi.Role.SLIDER,
+                    DOCUMENT: Atspi.Role.DOCUMENT_WEB, TOOLTIP: Atspi.Role.TOOL_TIP}[path]
             reply = GLib.Variant("(u)", (int(role),))
         elif name in ("GetRoleName", "GetLocalizedRoleName"):
             reply = GLib.Variant("(s)", ({ROOT: "application", WINDOW: "frame", WINDOW_TWO: "frame",
-                    BUTTON: "push button", ENTRY: "entry", PASSWORD: "password text", PANEL: "panel"}[path],))
+                    BUTTON: "push button", ENTRY: "entry", PASSWORD: "password text", PANEL: "panel", SLIDER: "slider",
+                    DOCUMENT: "document web", TOOLTIP: "tool tip"}[path],))
         elif name == "GetState":
             bits = sum(1 << int(s) for s in (Atspi.StateType.ENABLED, Atspi.StateType.SENSITIVE,
                                              Atspi.StateType.VISIBLE, Atspi.StateType.SHOWING))
             if (path == BUTTON and hidden) or original_path == PANEL:
                 bits &= ~((1 << Atspi.StateType.VISIBLE) | (1 << Atspi.StateType.SHOWING))
+            if (path == BUTTON and offscreen) or path == TOOLTIP:
+                bits &= ~(1 << Atspi.StateType.SHOWING)
             if path == ENTRY:
                 bits |= 1 << Atspi.StateType.EDITABLE
             still_focused = focused
@@ -273,7 +318,7 @@ def main():
                 oracle = Path(state_path).with_name("kwin-state.json")
                 if oracle.exists() and json.loads(oracle.read_text()).get("input", {}).get("keys", 0):
                     still_focused = False
-            if path == ENTRY and (selected_fixture or still_focused):
+            if path in (ENTRY, SLIDER) and (selected_fixture or still_focused):
                 bits |= 1 << Atspi.StateType.FOCUSED
             reply = GLib.Variant("(au)", ([bits & 0xffffffff, bits >> 32],))
         elif name == "GetApplication":
@@ -301,7 +346,7 @@ def main():
             save()
             reply = GLib.Variant("(b)", (True,))
         elif name == "SetTextContents":
-            state["text"] = args[0]
+            if not readonly: state["text"] = args[0]
             save()
             reply = GLib.Variant("(b)", (True,))
         elif name == "InsertText":
@@ -353,15 +398,18 @@ def main():
 
     def property_get(connection, sender, path, interface, name):
         if name == "Name":
-            if path == WINDOW:
+            if path == WINDOW or (path == WINDOW_TWO and duplicate_windows):
                 if title_after_attributes and not frame_ready:
                     return GLib.Variant("s", "Loading")
                 title_file = Path(state_path).with_suffix(".title")
                 if title_file.exists(): return GLib.Variant("s", title_file.read_text())
             if path.startswith(PANEL + "/"): return GLib.Variant("s", "")
+            if path.startswith(BUTTON + "/empty_"): return GLib.Variant("s", "")
             if path.startswith(BUTTON + "/"): return GLib.Variant("s", "Repeated button " + path.rsplit("/", 1)[1])
             return GLib.Variant("s", {ROOT: "scu fixture", WINDOW: "scu test window", WINDOW_TWO: "scu test window" if duplicate_windows else "scu second window",
-                BUTTON: "Fixture button", ENTRY: "Fixture entry", PASSWORD: "Fixture password", PANEL: "Hidden container"}[path])
+                BUTTON: "Fixture button", ENTRY: "Fixture entry", PASSWORD: "Fixture password", PANEL: "Hidden container", SLIDER: "Fixture volume",
+                DOCUMENT: "Fixture document", TOOLTIP: "tooltip"}[path])
+        if name == "ToolkitName" and browser: return GLib.Variant("s", "Chromium")
         if name in ("Description", "ToolkitName", "Version"): return GLib.Variant("s", "fixture")
         if name == "ChildCount": return GLib.Variant("i", len(children(connection, path)))
         if name == "Parent": return GLib.Variant("(so)", (app.get_unique_name(), ROOT if path in window_paths else WINDOW))
@@ -369,13 +417,30 @@ def main():
         if name == "CharacterCount": return GLib.Variant("i", len(text_value()))
         if name == "CaretOffset": return GLib.Variant("i", len(text_value()))
         if name == "Id": return GLib.Variant("i", 1)
+        if name == "CurrentValue": return GLib.Variant("d", number_value())
+        if name == "MinimumValue": return GLib.Variant("d", 0.0)
+        if name == "MaximumValue": return GLib.Variant("d", 100.0)
+        if name == "MinimumIncrement": return GLib.Variant("d", 5.0)
 
-    for connection, paths in ((registry, [ROOT]), (app, [ROOT, *window_paths, BUTTON, ENTRY, PASSWORD, PANEL, *extra_paths])):
+    def property_set(connection, sender, path, interface, name, value):
+        if path != SLIDER or name != "CurrentValue": return False
+        state["value_writes"] += 1
+        def apply():
+            state["value"] = value.unpack()
+            save()
+            return GLib.SOURCE_REMOVE
+        if not numeric_keyboard:
+            if numeric_delay: GLib.timeout_add(150, apply)
+            else: apply()
+        save()
+        return True
+
+    for connection, paths in ((registry, [ROOT]), (app, [ROOT, *window_paths, BUTTON, ENTRY, PASSWORD, PANEL, SLIDER, DOCUMENT, TOOLTIP, *extra_paths])):
         if connection == registry and "--registry-unavailable" in sys.argv[3:]:
             continue  # Own the name, but expose no working registry object.
         for path in paths:
             for info in node.interfaces:
-                connection.register_object(path, info, method, property_get, None)
+                connection.register_object(path, info, method, property_get, property_set)
     if "--registry-unavailable" not in sys.argv[3:]:
         registry.register_object("/org/a11y/atspi/registry",
             node.lookup_interface("org.a11y.atspi.Registry"), method, None, None)

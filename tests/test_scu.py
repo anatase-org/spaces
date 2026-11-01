@@ -165,7 +165,9 @@ class ScuTests(unittest.TestCase):
                             keyboard=False, refuse_focus=False, hidden=False,
                             lose_focus=False, readonly=False, hidden_container=False,
                             deep=0, wide=0, delayed_window=False, title_after_attributes=False,
-                            geometry_after_attributes=False):
+                            geometry_after_attributes=False, numeric=False, numeric_keyboard=False,
+                            numeric_readonly=False, numeric_delay=False, browser=False,
+                            offscreen=False, tooltips=False, placeholders=0):
         self.atspi_bus, address = self.bus(self.socket_path)
         self.atspi_state = self.directory / "atspi-state.json"
         command = ["/usr/bin/python3", str(ROOT / "tests/scu_atspi_fixture.py"), address, str(self.atspi_state)]
@@ -193,6 +195,14 @@ class ScuTests(unittest.TestCase):
             command.append("--hidden-button")
         if hidden_container:
             command.append("--hidden-container")
+        if browser:
+            command.append("--browser")
+        if offscreen:
+            command.append("--offscreen")
+        if tooltips:
+            command.append("--tooltips")
+        if placeholders:
+            command.append(f"--placeholders={placeholders}")
         if deep:
             command.append(f"--deep={deep}")
         if wide:
@@ -207,6 +217,9 @@ class ScuTests(unittest.TestCase):
             command.append("--lose-focus")
         if readonly:
             command.append("--readonly-entry")
+        for enabled, flag in ((numeric, "--numeric"), (numeric_keyboard, "--numeric-keyboard"),
+                              (numeric_readonly, "--numeric-readonly"), (numeric_delay, "--numeric-delay")):
+            if enabled: command.append(flag)
         self.atspi_state.with_suffix(".actions.json").unlink(missing_ok=True)
         self.atspi_state.with_suffix(".title").unlink(missing_ok=True)
         self.atspi = self.child(command)
@@ -841,6 +854,111 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         stale = client.tool("computer", steps=[{"tool": "click", "args": {"element_token": rows["Fixture button"]["element_token"]}}])
         self.assertEqual(stale["structuredContent"]["failed"]["code"], "stale_element")
 
+    def test_numeric_value_and_range_are_observed_and_set_without_keyboard(self):
+        self.start_accessibility(numeric=True)
+        self.start_host()
+        client = self.client()
+        row = next(row for row in self.snapshot(client)["elements"] if row["label"] == "Fixture volume")
+        self.assertEqual((row["value"], row["minimum"], row["maximum"]), (80, 0, 100))
+        result = client.tool("computer", steps=[{"tool": "set_value", "args": {
+            "element_token": row["element_token"], "value": "50"}}], observe=False)
+        self.assertEqual(result["structuredContent"]["status"], "ok", result)
+        self.assertEqual(json.loads(self.atspi_state.read_text())["value"], 50)
+        self.assertEqual(json.loads(self.state.read_text())["input"]["keys"], 0)
+
+    def test_delayed_numeric_setter_is_verified_before_keyboard_fallback(self):
+        self.start_accessibility(numeric=True, numeric_delay=True)
+        self.start_host()
+        client = self.client()
+        row = next(row for row in self.snapshot(client)["elements"] if row["label"] == "Fixture volume")
+        result = client.tool("computer", steps=[{"tool": "set_value", "args": {
+            "element_token": row["element_token"], "value": "50"}}], observe=False)
+        self.assertEqual(result["structuredContent"]["status"], "ok", result)
+        self.assertEqual(json.loads(self.atspi_state.read_text())["value"], 50)
+        self.assertEqual(json.loads(self.state.read_text())["input"]["keys"], 0)
+
+    def test_ignored_slider_setter_uses_verified_keyboard_and_readback(self):
+        self.start_accessibility(numeric=True, numeric_keyboard=True)
+        self.start_host()
+        client = self.client()
+        tree = self.snapshot(client)
+        row = next(row for row in tree["elements"] if row["label"] == "Fixture volume")
+        result = client.tool("computer", steps=[{"tool": "set_value", "args": {
+            "element_token": row["element_token"], "value": "50"}}],
+            observe={"kind": "window", "window_id": tree["window_id"], "screenshot": False})
+        self.assertEqual(result["structuredContent"]["status"], "ok", result)
+        actual = next(row for row in result["structuredContent"]["observation"]["elements"]
+                      if row["label"] == "Fixture volume")
+        self.assertEqual(actual["value"], 50)
+        self.assertEqual(json.loads(self.atspi_state.read_text())["value"], 80,
+                         "the independent keyboard receiver must supply the changed value")
+        self.assertEqual(json.loads(self.state.read_text())["input"]["keys"], 6)
+
+    def test_numeric_keyboard_refusal_stops_the_batch(self):
+        self.start_accessibility(numeric=True, numeric_keyboard=True, numeric_readonly=True)
+        self.start_host()
+        client = self.client()
+        row = next(row for row in self.snapshot(client)["elements"] if row["label"] == "Fixture volume")
+        result = client.tool("computer", steps=[
+            {"tool": "set_value", "args": {"element_token": row["element_token"], "value": "50"}},
+            {"tool": "press_keys", "args": {"keys": ["a"]}}], observe=False)["structuredContent"]
+        self.assertEqual(result["status"], "failed", result)
+        self.assertEqual(result["completed"], 0)
+        self.assertEqual(result["failed"]["code"], "value_readback_failed")
+        self.assertEqual(json.loads(self.state.read_text())["input"]["keys"], 1)
+
+    def test_numeric_keyboard_requires_focus(self):
+        self.start_accessibility(numeric=True, numeric_keyboard=True, refuse_focus=True)
+        self.start_host()
+        client = self.client()
+        row = next(row for row in self.snapshot(client)["elements"] if row["label"] == "Fixture volume")
+        result = client.tool("computer", steps=[{"tool": "set_value", "args": {
+            "element_token": row["element_token"], "value": "50"}}], observe=False)["structuredContent"]
+        self.assertEqual(result["status"], "failed", result)
+        self.assertEqual(json.loads(self.state.read_text())["input"]["keys"], 0)
+
+    def test_numeric_keyboard_stops_after_focus_loss(self):
+        self.start_accessibility(numeric=True, numeric_keyboard=True, lose_focus=True)
+        self.start_host()
+        client = self.client()
+        row = next(row for row in self.snapshot(client)["elements"] if row["label"] == "Fixture volume")
+        result = client.tool("computer", steps=[{"tool": "set_value", "args": {
+            "element_token": row["element_token"], "value": "50"}}], observe=False)["structuredContent"]
+        self.assertEqual(result["failed"]["code"], "value_focus_changed", result)
+        self.assertEqual(json.loads(self.state.read_text())["input"]["keys"], 1)
+
+    def test_numeric_keyboard_requires_the_matched_active_window(self):
+        self.start_accessibility(numeric=True, numeric_keyboard=True)
+        self.start_host(active=False)
+        client = self.client()
+        row = next(row for row in self.snapshot(client)["elements"] if row["label"] == "Fixture volume")
+        result = client.tool("computer", steps=[{"tool": "set_value", "args": {
+            "element_token": row["element_token"], "value": "50"}}], observe=False)["structuredContent"]
+        self.assertEqual(result["failed"]["code"], "value_focus_changed", result)
+        self.assertEqual(json.loads(self.state.read_text())["input"]["keys"], 0)
+
+    def test_numeric_invalid_values_are_not_submitted(self):
+        self.start_accessibility(numeric=True)
+        self.start_host()
+        client = self.client()
+        row = next(row for row in self.snapshot(client)["elements"] if row["label"] == "Fixture volume")
+        for value in ("NaN", "infinity", "oops", "101", "-1", ""):
+            result = client.tool("computer", steps=[{"tool": "set_value", "args": {
+                "element_token": row["element_token"], "value": value}}], observe=False)["structuredContent"]
+            self.assertEqual(result["failed"]["code"], "invalid_arguments", result)
+        self.assertEqual(json.loads(self.atspi_state.read_text())["value_writes"], 0)
+        self.assertEqual(json.loads(self.state.read_text())["input"]["keys"], 0)
+
+    def test_native_text_setter_cannot_report_success_without_readback(self):
+        self.start_accessibility(readonly=True)
+        self.start_host()
+        client = self.client()
+        row = next(row for row in self.snapshot(client)["elements"] if row["label"] == "Fixture entry")
+        result = client.tool("computer", steps=[{"tool": "set_value", "args": {
+            "element_token": row["element_token"], "value": "changed"}}], observe=False)["structuredContent"]
+        self.assertEqual(result["failed"]["code"], "text_readback_failed", result)
+        self.assertEqual(json.loads(self.atspi_state.read_text())["text"], "")
+
     def test_browser_action_names_reuse_click(self):
         self.start_host()
         client = self.client()
@@ -891,12 +1009,74 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertEqual(result["failed"]["code"], "text_focus_changed", result)
         self.assertEqual(json.loads(self.state.read_text())["input"]["keys"], 0)
 
-    def test_hidden_nodes_do_not_consume_element_budget(self):
+    def test_controls_remain_actionable_without_visibility_states(self):
         self.start_accessibility(hidden=True)
         self.start_host()
+        client = self.client()
+        tree = self.snapshot(client)
+        button = next(row for row in tree["elements"] if row["label"] == "Fixture button")
+        result = client.tool("computer", steps=[{"tool": "click", "args": {
+            "element_token": button["element_token"]}}], observe=False)
+        self.assertEqual(result["structuredContent"]["status"], "ok", result)
+        self.assertEqual(json.loads(self.atspi_state.read_text())["clicks"], 1)
+
+    def test_offscreen_controls_remain_actionable(self):
+        self.start_accessibility(offscreen=True)
+        self.start_host()
+        client = self.client()
+        tree = self.snapshot(client)
+        button = next(row for row in tree["elements"] if row["label"] == "Fixture button")
+        self.assertEqual(button["frame"]["y"], 620)
+        result = client.tool("computer", steps=[{"tool": "click", "args": {
+            "element_token": button["element_token"]}}], observe=False)
+        self.assertEqual(result["structuredContent"]["status"], "ok", result)
+        self.assertEqual(json.loads(self.atspi_state.read_text())["clicks"], 1)
+
+    def test_dormant_tooltips_do_not_consume_tree_rows(self):
+        self.start_accessibility(tooltips=True)
+        self.start_host()
         tree = self.snapshot(self.client())
-        self.assertNotIn("Fixture button", [row["label"] for row in tree["elements"]])
-        self.assertIn("Fixture entry", [row["label"] for row in tree["elements"]])
+        self.assertNotIn("tool tip", [row["role"] for row in tree["elements"]])
+        self.assertIn("Fixture button", [row["label"] for row in tree["elements"]])
+
+    def test_empty_placeholder_buttons_do_not_hide_named_controls(self):
+        self.start_accessibility(placeholders=200)
+        self.start_host()
+        tree = self.snapshot(self.client())
+        self.assertFalse(tree["truncated"], tree)
+        self.assertEqual(len(tree["elements"]), 4)
+        self.assertIn("Fixture button", [row["label"] for row in tree["elements"]])
+
+    def test_chromium_document_device_coordinates_are_normalized(self):
+        self.start_accessibility(browser=True)
+        self.start_host()
+        tree = self.snapshot(self.client())
+        document = next(row for row in tree["elements"] if row["role"] == "document web")
+        self.assertEqual(document["frame"], {"x": 20, "y": 20, "width": 80, "height": 60})
+        button = next(row for row in tree["elements"] if row["label"] == "Fixture button")
+        self.assertEqual(button["frame"], {"x": 30, "y": 30, "width": 20, "height": 10})
+
+    def test_chromium_media_title_preserves_window_association(self):
+        self.start_accessibility(browser=True)
+        self.atspi_state.with_suffix(".title").write_text("Video - YouTube - Audio playing - Chromium")
+        self.start_host(window_title="Video - YouTube - Chromium")
+        tree = self.snapshot(self.client())
+        self.assertNotIn("accessibility_error", tree)
+        self.assertIn("Fixture button", [row["label"] for row in tree["elements"]])
+
+    def test_chromium_media_title_does_not_resolve_ambiguous_windows(self):
+        self.start_accessibility(browser=True, duplicates=True)
+        self.atspi_state.with_suffix(".title").write_text("Video - YouTube - Audio playing - Chromium")
+        self.start_host(window_title="Video - YouTube - Chromium")
+        tree = self.snapshot(self.client())
+        self.assertEqual(tree["accessibility_error"]["code"], "accessibility_window_ambiguous")
+
+    def test_other_toolkits_keep_exact_title_matching(self):
+        self.start_accessibility()
+        self.atspi_state.with_suffix(".title").write_text("Video - YouTube - Audio playing - Chromium")
+        self.start_host(window_title="Video - YouTube - Chromium")
+        tree = self.snapshot(self.client())
+        self.assertEqual(tree["accessibility_error"]["code"], "accessibility_window_unmatched")
 
     def test_keyboard_text_requires_active_window(self):
         self.start_accessibility(keyboard=True)

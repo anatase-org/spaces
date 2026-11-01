@@ -43,9 +43,9 @@ static void poll_backend(void);
 static gboolean desktop_ready(void);
 static void desktop_check_lock(void);
 static gboolean desktop_input_allowed(void);
-static gboolean verify_text_input(void);
-static JsonResult *type_target_text(const char *tool, JsonValue *args);
-static JsonValue *text_input_arguments, *text_input_window;
+static gboolean verify_target_input(void);
+static JsonResult *type_target_value(const char *tool, JsonValue *args, gboolean numeric);
+static JsonValue *target_input_arguments, *target_input_window;
 
 static const char *libs[] = {"libatspi.so.0", "libei.so.1",
     "libxkbcommon.so.0", "libgdk_pixbuf-2.0.so.0", NULL};
@@ -157,6 +157,7 @@ typedef struct {
     __typeof__(&atspi_accessible_get_state_set) accessible_get_state_set;
     __typeof__(&atspi_state_set_contains) state_set_contains;
     __typeof__(&atspi_accessible_get_process_id) accessible_get_process_id;
+    __typeof__(&atspi_accessible_get_toolkit_name) accessible_get_toolkit_name;
     __typeof__(&atspi_accessible_get_component_iface) accessible_get_component_iface;
     __typeof__(&atspi_component_get_extents) component_get_extents;
     __typeof__(&atspi_component_grab_focus) component_grab_focus;
@@ -178,6 +179,8 @@ typedef struct {
     __typeof__(&atspi_action_do_action) action_do_action;
     __typeof__(&atspi_accessible_get_value_iface) accessible_get_value_iface;
     __typeof__(&atspi_value_get_current_value) value_get_current_value;
+    __typeof__(&atspi_value_get_minimum_value) value_get_minimum_value;
+    __typeof__(&atspi_value_get_maximum_value) value_get_maximum_value;
     __typeof__(&atspi_value_set_current_value) value_set_current_value;
 } AtspiLibrary;
 
@@ -185,12 +188,13 @@ static AtspiLibrary atspi;
 static gboolean library_loaded, atspi_initialized;
 static AtspiEventListener *atspi_listener;
 static const char atspi_event[] = "object:children-changed";
-static AtspiAccessible *text_target;
-static char *text_expected;
+static AtspiAccessible *input_target;
+static char *input_expected;
+static gboolean input_numeric;
 typedef struct {
     guint id, pid;
     AtspiAccessible *accessible;
-    char *key, *app;
+    char *key, *app, *toolkit;
     gboolean seen;
 } Window;
 typedef struct {
@@ -216,6 +220,7 @@ static void free_window(gpointer p)
     g_object_unref(w->accessible);
     g_free(w->key);
     g_free(w->app);
+    g_free(w->toolkit);
     g_free(w);
 }
 
@@ -264,6 +269,7 @@ static gboolean load_atspi(void)
     LOAD_ATSPI(accessible_get_state_set);
     LOAD_ATSPI(state_set_contains);
     LOAD_ATSPI(accessible_get_process_id);
+    LOAD_ATSPI(accessible_get_toolkit_name);
     LOAD_ATSPI(accessible_get_component_iface);
     LOAD_ATSPI(component_get_extents);
     LOAD_ATSPI(component_grab_focus);
@@ -284,6 +290,8 @@ static gboolean load_atspi(void)
     LOAD_ATSPI(action_do_action);
     LOAD_ATSPI(accessible_get_value_iface);
     LOAD_ATSPI(value_get_current_value);
+    LOAD_ATSPI(value_get_minimum_value);
+    LOAD_ATSPI(value_get_maximum_value);
     LOAD_ATSPI(value_set_current_value);
 #undef LOAD_ATSPI
 
@@ -298,8 +306,8 @@ static void scu_atspi_close(void)
         return;
     }
     retire_atspi_worker = TRUE;
-    g_clear_object(&text_target);
-    g_clear_pointer(&text_expected, g_free);
+    g_clear_object(&input_target);
+    g_clear_pointer(&input_expected, g_free);
     clear_clipboard_selection();
     if (elements) {
         g_hash_table_remove_all(elements);
@@ -438,6 +446,7 @@ static Window *register_window(
     window->accessible = g_object_ref(accessible);
     window->key = key;
     window->app = g_strdup(application_name);
+    window->toolkit = atspi.accessible_get_toolkit_name(accessible, NULL);
     window->seen = TRUE;
     g_ptr_array_add(windows, window);
     return window;
@@ -586,6 +595,7 @@ static JsonResult *list_apps(void)
         char *title = atspi.accessible_get_name(window->accessible, NULL);
         result_integer(item, "window_id", window->id);
         result_string(item, "title", title);
+        result_string(item, "toolkit", window->toolkit);
         result_member(item, "bounds", accessible_frame(window->accessible));
         result_boolean(item, "shown",
             accessible_has_state(window->accessible, ATSPI_STATE_SHOWING));
@@ -612,7 +622,7 @@ typedef struct {
     gboolean truncated;
     Window *window;
     JsonResult *rows;
-    double width, height;
+    JsonValue *scales;
     char snapshot[16];
 } Walk;
 
@@ -621,7 +631,7 @@ static void mark_tree_complex(JsonResult *tree)
     result_boolean(tree, "truncated", TRUE);
     JsonResult *limitation = result_object();
     result_string(limitation, "code", "accessibility_tree_too_complex");
-    result_string(limitation, "hint", "A compact portion of this window is shown. Scroll to the needed area and observe again, or use screenshot input.");
+    result_string(limitation, "hint", "This window exceeds the accessibility response budget. The partial tree's elements remain usable; use screenshot input for omitted controls.");
     result_member(tree, "accessibility_error", limitation);
 }
 
@@ -672,21 +682,44 @@ static char *observation_text(const char *text, guint maximum, gboolean *shorten
     return label ? g_strstrip(value) : value;
 }
 
-/* Keep only content in the window's viewport. A structural node may contain
- * visible descendants even when its own state or bounds are hidden. */
-static gboolean frame_in_view(Walk *state, JsonResult *frame)
+/* Chromium Views use logical coordinates, but web content can use device
+ * pixels. Accept only compositor-provided scales that align the document's
+ * complete rectangle with its native parent; do not infer scale from width. */
+static double accessible_document_scale(Walk *state, JsonResult *frame,
+    JsonResult *parent, double scale)
 {
-    if (!frame || yyjson_mut_is_null(frame)) return TRUE;
-    double x = yyjson_mut_get_num(yyjson_mut_obj_get(frame, "x"));
-    double y = yyjson_mut_get_num(yyjson_mut_obj_get(frame, "y"));
-    double w = yyjson_mut_get_num(yyjson_mut_obj_get(frame, "width"));
-    double h = yyjson_mut_get_num(yyjson_mut_obj_get(frame, "height"));
-    if (w <= 0 || h <= 0 || state->width <= 0 || state->height <= 0) return TRUE;
-    return x + w > 0 && y + h > 0 && x < state->width && y < state->height;
+    if (scale != 1 || g_strcmp0(state->window->toolkit, "Chromium") ||
+        !frame || !parent || yyjson_mut_is_null(frame) || yyjson_mut_is_null(parent)) return scale;
+    const char *fields[] = {"x", "y", "width", "height"};
+    gboolean aligned = TRUE;
+    for (guint j = 0; j < G_N_ELEMENTS(fields); j++) {
+        JsonResult *a = yyjson_mut_obj_get(frame, fields[j]);
+        JsonResult *b = yyjson_mut_obj_get(parent, fields[j]);
+        if (!yyjson_mut_is_num(a) || !yyjson_mut_is_num(b) ||
+            (j >= 2 && (yyjson_mut_get_num(a) <= 0 || yyjson_mut_get_num(b) <= 0))) return scale;
+        if (fabs(yyjson_mut_get_num(a) - yyjson_mut_get_num(b)) > 2) aligned = FALSE;
+    }
+    if (aligned) return scale;
+    size_t i, n;
+    JsonValue *value;
+    yyjson_arr_foreach(state->scales, i, n, value) {
+        double factor = yyjson_get_num(value);
+        if (factor <= 0 || fabs(factor - 1) < 0.001) continue;
+        gboolean matches = TRUE;
+        for (guint j = 0; j < G_N_ELEMENTS(fields); j++) {
+            JsonResult *a = yyjson_mut_obj_get(frame, fields[j]);
+            JsonResult *b = yyjson_mut_obj_get(parent, fields[j]);
+            if (!yyjson_mut_is_num(a) || !yyjson_mut_is_num(b) ||
+                fabs(yyjson_mut_get_num(a) / factor - yyjson_mut_get_num(b)) > 2) matches = FALSE;
+        }
+        if (matches) return 1 / factor;
+    }
+    return scale;
 }
 
 static void append_accessible(Walk *state, AtspiAccessible *node,
-    guint depth, gint parent, guint level, const char *parent_label)
+    guint depth, gint parent, guint level, const char *parent_label,
+    double scale, JsonResult *parent_frame)
 {
     if (state->visited >= TREE_NODES || level > TREE_DEPTH ||
         state->count >= TREE_ROWS || state->bytes >= TREE_BYTES ||
@@ -699,21 +732,31 @@ static void append_accessible(Walk *state, AtspiAccessible *node,
     AtspiRole type = atspi.accessible_get_role(node, NULL);
     gint children = atspi.accessible_get_child_count(node, NULL);
     gboolean structural = structural_role(type);
-    gboolean shown = !level || accessible_has_state(node, ATSPI_STATE_SHOWING) ||
-        accessible_has_state(node, ATSPI_STATE_VISIBLE);
+    /* Offscreen controls remain semantic targets. Visibility only suppresses
+     * dormant tooltips and flattens hidden structural wrappers. */
+    gboolean showing = accessible_has_state(node, ATSPI_STATE_SHOWING);
+    gboolean visible = showing || accessible_has_state(node, ATSPI_STATE_VISIBLE);
+    gboolean exposed = type != ATSPI_ROLE_TOOL_TIP || showing;
     gboolean shortened = FALSE;
     char *raw_name = atspi.accessible_get_name(node, NULL);
     char *name = observation_text(raw_name, 256, &shortened, TRUE);
     g_free(raw_name);
-    JsonResult *frame = shown ? accessible_frame(node) : NULL;
-    shown &= frame_in_view(state, frame);
+    JsonResult *frame = exposed ? accessible_frame(node) : NULL;
+    if (type == ATSPI_ROLE_DOCUMENT_WEB)
+        scale = accessible_document_scale(state, frame, parent_frame, scale);
+    if (frame && !yyjson_mut_is_null(frame) && scale != 1) {
+        const char *fields[] = {"x", "y", "width", "height"};
+        for (guint i = 0; i < G_N_ELEMENTS(fields); i++)
+            result_number(frame, fields[i], yyjson_mut_get_num(yyjson_mut_obj_get(frame, fields[i])) * scale);
+    }
     gboolean password = type == ATSPI_ROLE_PASSWORD_TEXT;
-    AtspiEditableText *editable = shown && !password ? atspi.accessible_get_editable_text_iface(node) : NULL;
-    gboolean text_input = shown && !password && (editable || keyboard_editable(node));
+    AtspiEditableText *editable = exposed && !password ? atspi.accessible_get_editable_text_iface(node) : NULL;
+    AtspiValue *number = exposed && !password ? atspi.accessible_get_value_iface(node) : NULL;
+    gboolean text_input = exposed && !password && (editable || keyboard_editable(node));
     g_clear_object(&editable);
     gboolean duplicate = (type == ATSPI_ROLE_STATIC || type == ATSPI_ROLE_LABEL ||
         type == ATSPI_ROLE_TEXT) && !text_input && !password && name && *name && !g_strcmp0(name, parent_label);
-    gboolean emit = shown && (!level || (!duplicate && (!structural || (name && *name))));
+    gboolean emit = exposed && (!level || (!duplicate && (!structural || (visible && name && *name))));
     /* Unnamed wrappers and duplicate text do not consume rows or compact depth. */
     char *value = NULL;
     if (emit && !password && (text_input || (!children && (!name || !*name)))) {
@@ -727,7 +770,10 @@ static void append_accessible(Walk *state, AtspiAccessible *node,
             g_object_unref(text);
         }
     }
-    if (level && (!name || !*name) && (!value || !*value) && structural) emit = FALSE;
+    /* Chromium exports many empty placeholder buttons/notifications. Flatten
+     * nodes with no semantic content, retaining unnamed editable/value controls
+     * and continuing through their children regardless of visibility. */
+    if (level && (!name || !*name) && (!value || !*value) && !text_input && !number) emit = FALSE;
     if (emit) {
         guint index = state->count;
         char *role = atspi.accessible_get_role_name(node, NULL);
@@ -768,10 +814,20 @@ static void append_accessible(Walk *state, AtspiAccessible *node,
             result_append(actions, yyjson_mut_str(scu.doc, "click"));
             result_member(row, "click_buttons", buttons);
         }
-        AtspiValue *number = password ? NULL : atspi.accessible_get_value_iface(node);
         if (text_input) result_append(actions, yyjson_mut_str(scu.doc, "type_text"));
         if (text_input || number) result_append(actions, yyjson_mut_str(scu.doc, "set_value"));
-        g_clear_object(&number);
+        if (number) {
+            GError *error = NULL;
+            double current = atspi.value_get_current_value(number, &error);
+            if (!error && isfinite(current)) result_number(row, "value", current);
+            g_clear_error(&error);
+            double minimum = atspi.value_get_minimum_value(number, &error);
+            if (!error && isfinite(minimum)) result_number(row, "minimum", minimum);
+            g_clear_error(&error);
+            double maximum = atspi.value_get_maximum_value(number, &error);
+            if (!error && isfinite(maximum)) result_number(row, "maximum", maximum);
+            g_clear_error(&error);
+        }
         if (yyjson_mut_arr_size(actions)) result_member(row, "actions", actions);
         size_t bytes = 0;
         char *encoded = yyjson_mut_val_write(row, 0, &bytes);
@@ -804,12 +860,14 @@ static void append_accessible(Walk *state, AtspiAccessible *node,
         }
         AtspiAccessible *child = atspi.accessible_get_child_at_index(node, i, NULL);
         if (child) {
-            append_accessible(state, child, depth, parent, level + 1, emit ? name : parent_label);
+            append_accessible(state, child, depth, parent, level + 1,
+                emit ? name : parent_label, scale, frame);
             g_object_unref(child);
         }
     }
     g_free(name);
     g_free(value);
+    g_clear_object(&number);
 }
 
 /* Chromium enables its full tree when a consumer requests frame attributes.
@@ -871,13 +929,10 @@ static JsonResult *read_window_state(JsonValue *args)
             g_hash_table_iter_remove(&it);
         }
     }
-    JsonResult *bounds = accessible_frame(w->accessible);
-    Walk state = {.window = w, .rows = result_array(),
-        .width = yyjson_mut_get_num(yyjson_mut_obj_get(bounds, "width")),
-        .height = yyjson_mut_get_num(yyjson_mut_obj_get(bounds, "height")),
+    Walk state = {.window = w, .rows = result_array(), .scales = json_member(args, "device_scales"),
         .until = g_get_monotonic_time() + 5 * G_USEC_PER_SEC};
     g_snprintf(state.snapshot, sizeof(state.snapshot), "s%08x", ++snapshot);
-    append_accessible(&state, w->accessible, 0, -1, 0, NULL);
+    append_accessible(&state, w->accessible, 0, -1, 0, NULL, 1, NULL);
     if (scu.code) return NULL;
     JsonResult *r = result_object();
     result_string(r, "snapshot_id", state.snapshot);
@@ -934,32 +989,66 @@ static JsonResult *invoke_accessible_action(
         "Accessible action submitted; inspect the resulting state.");
 }
 
+static gboolean number_matches(double actual, double expected)
+{
+    return isfinite(actual) && fabs(actual - expected) <= 1e-9 * MAX(1, fabs(expected));
+}
+
 static JsonResult *set_accessible_number(AtspiAccessible *node, const char *text)
 {
     GError *error = NULL;
     AtspiValue *value = atspi.accessible_get_value_iface(node);
     char *end = NULL;
     double number = g_ascii_strtod(text, &end);
-    gboolean completed = FALSE;
-    gboolean confirmed = FALSE;
-
-    if (value != NULL && end != text && *end == '\0' && isfinite(number)) {
-        completed = atspi.value_set_current_value(value, number, &error);
-        confirmed = completed && atspi.value_get_current_value(value, NULL) == number;
+    if (!value || end == text || *end || !isfinite(number)) {
+        g_clear_object(&value);
+        return scu_fail("invalid_arguments", "A numeric control requires a finite number in value.");
     }
-    if (value != NULL) {
-        g_object_unref(value);
-    }
-    if (!completed) {
-        scu_fail("accessible_action_failed",
-            error != NULL ? error->message
-                          : "The element does not accept the requested numeric value.");
+    double minimum = atspi.value_get_minimum_value(value, &error);
+    double maximum = error ? NAN : atspi.value_get_maximum_value(value, &error);
+    if (error || !isfinite(minimum) || !isfinite(maximum) || minimum > maximum) {
+        g_clear_object(&value);
         g_clear_error(&error);
+        return scu_fail("value_readback_failed", "The numeric control did not expose a readable range. No value was submitted.");
+    }
+    if (number < minimum || number > maximum) {
+        g_object_unref(value);
+        return scu_fail("invalid_arguments", "The requested value is outside this control's minimum and maximum. Read its window tree for the range.");
+    }
+    gboolean completed = atspi.value_set_current_value(value, number, &error);
+    if (error) {
+        scu_fail("accessible_action_failed",
+            error->message);
+        g_clear_error(&error);
+        g_object_unref(value);
         return NULL;
     }
-    return scu_action("accessibility", confirmed,
-        confirmed ? "Accessible numeric value read back as requested."
-                  : "Accessible numeric value submitted; readback was unavailable.");
+    gboolean confirmed = FALSE;
+    gint64 until = g_get_monotonic_time() + 250000;
+    do {
+        atspi.accessible_clear_cache(node);
+        double actual = atspi.value_get_current_value(value, &error);
+        confirmed = !error && number_matches(actual, number);
+        if (confirmed || error || !completed) break;
+        if (!scu_pause(25)) { g_object_unref(value); return NULL; }
+    } while (g_get_monotonic_time() < until);
+    g_object_unref(value);
+    if (error) {
+        g_clear_error(&error);
+        return scu_fail("value_readback_failed", "The numeric value could not be read after submission. Inspect the result before retrying.");
+    }
+    if (confirmed)
+        return scu_action("accessibility", TRUE, "Accessible numeric value read back as requested.");
+    /* Chromium can accept SetCurrentValue on an ARIA slider without delivering
+     * an application change. Use its keyboard behavior under the existing focus
+     * guards, and verify every change instead of treating submission as success. */
+    if (atspi.accessible_get_role(node, NULL) == ATSPI_ROLE_SLIDER) {
+        JsonResult *result = result_object();
+        result_boolean(result, "keyboard_required", TRUE);
+        result_boolean(result, "numeric", TRUE);
+        return result;
+    }
+    return scu_fail("value_readback_failed", "The numeric control did not read back the requested value. Inspect the result before retrying.");
 }
 
 /* AT-SPI caret positions count Unicode characters, not UTF-8 bytes. Build the
@@ -1059,6 +1148,8 @@ static JsonResult *edit_accessible_text(
         g_clear_error(&error);
         return NULL;
     }
+    if (replace && !confirmed)
+        return scu_fail("text_readback_failed", "The text control did not read back the requested value. Inspect the result before retrying.");
     return scu_action("accessibility", confirmed,
         confirmed
             ? "Accessible text value read back with the expected contents."
@@ -1078,14 +1169,18 @@ static gboolean accessible_text_selected(AtspiText *text)
     return selected;
 }
 
-static JsonResult *accessible_text_input(AtspiAccessible *node, Element *element,
+static JsonResult *accessible_target_input(AtspiAccessible *node, Element *element,
     const char *operation, JsonValue *args)
 {
-    if (!keyboard_editable(node) || !accessible_has_state(node, ATSPI_STATE_ENABLED))
-        return scu_fail("accessible_action_failed", "The target is not an enabled editable text control.");
-    if (!strcmp(operation, "text_input_prepare")) {
-        g_clear_object(&text_target);
-        g_clear_pointer(&text_expected, g_free);
+    gboolean numeric = json_boolean(args, "numeric");
+    const char *focus_error = numeric ? "value_focus_changed" : "text_focus_changed";
+    if (!(numeric ? atspi.accessible_get_role(node, NULL) == ATSPI_ROLE_SLIDER : keyboard_editable(node)) ||
+        !accessible_has_state(node, ATSPI_STATE_ENABLED))
+        return scu_fail("accessible_action_failed", "The target is not an enabled editable control.");
+    if (!strcmp(operation, "target_input_prepare")) {
+        g_clear_object(&input_target);
+        g_clear_pointer(&input_expected, g_free);
+        input_numeric = numeric;
         atspi.accessible_clear_cache(node);
         gboolean focused = accessible_has_state(node, ATSPI_STATE_FOCUSED);
         GError *error = NULL;
@@ -1097,7 +1192,7 @@ static JsonResult *accessible_text_input(AtspiAccessible *node, Element *element
             g_clear_object(&component);
         }
         if (!focused || error) {
-            scu_fail("accessible_action_failed", error ? error->message : "The text control could not take focus.");
+            scu_fail("accessible_action_failed", error ? error->message : "The control could not take focus.");
             g_clear_error(&error);
             return NULL;
         }
@@ -1108,39 +1203,57 @@ static JsonResult *accessible_text_input(AtspiAccessible *node, Element *element
             if (!scu_pause(10)) return NULL;
         } while (g_get_monotonic_time() < until);
         if (!accessible_has_state(node, ATSPI_STATE_FOCUSED))
-            return scu_fail("text_focus_changed", "The requested text control did not gain focus. No keyboard input was sent.");
-        AtspiText *text = atspi.accessible_get_text_iface(node);
-        if (!text) return scu_fail("accessible_action_failed", "The target does not expose text readback.");
-        const char *contents = json_string(args, "text");
-        if (json_boolean(args, "replace")) text_expected = g_strdup(contents);
-        else {
-            gint selections = atspi.text_get_n_selections(text, NULL);
-            if (selections == 0) {
-                text_expected = expected_inserted_text(text, atspi.text_get_caret_offset(text, NULL), contents);
-            } else if (selections == 1) {
-                gint length = atspi.text_get_character_count(text, NULL);
-                AtspiRange *range = atspi.text_get_selection(text, 0, NULL);
-                char *before = length >= 0 && length <= 65536 ? atspi.text_get_text(text, 0, length, NULL) : NULL;
-                if (before && g_utf8_validate(before, -1, NULL) && range && range->start_offset >= 0 &&
-                    range->end_offset >= range->start_offset && range->end_offset <= g_utf8_strlen(before, -1)) {
-                    const char *start = g_utf8_offset_to_pointer(before, range->start_offset);
-                    const char *end = g_utf8_offset_to_pointer(before, range->end_offset);
-                    text_expected = g_strdup_printf("%.*s%s%s", (int)(start - before), before, contents, end);
+            return scu_fail(focus_error, "The requested control did not gain focus. No keyboard input was sent.");
+        if (numeric) {
+            input_expected = g_strdup(json_string(args, "value"));
+        } else {
+            AtspiText *text = atspi.accessible_get_text_iface(node);
+            if (!text) return scu_fail("accessible_action_failed", "The target does not expose text readback.");
+            const char *contents = json_string(args, "text");
+            if (json_boolean(args, "replace")) input_expected = g_strdup(contents);
+            else {
+                gint selections = atspi.text_get_n_selections(text, NULL);
+                if (selections == 0) {
+                    input_expected = expected_inserted_text(text, atspi.text_get_caret_offset(text, NULL), contents);
+                } else if (selections == 1) {
+                    gint length = atspi.text_get_character_count(text, NULL);
+                    AtspiRange *range = atspi.text_get_selection(text, 0, NULL);
+                    char *before = length >= 0 && length <= 65536 ? atspi.text_get_text(text, 0, length, NULL) : NULL;
+                    if (before && g_utf8_validate(before, -1, NULL) && range && range->start_offset >= 0 &&
+                        range->end_offset >= range->start_offset && range->end_offset <= g_utf8_strlen(before, -1)) {
+                        const char *start = g_utf8_offset_to_pointer(before, range->start_offset);
+                        const char *end = g_utf8_offset_to_pointer(before, range->end_offset);
+                        input_expected = g_strdup_printf("%.*s%s%s", (int)(start - before), before, contents, end);
+                    }
+                    g_free(before);
+                    g_free(range);
                 }
-                g_free(before);
-                g_free(range);
             }
+            g_object_unref(text);
+            if (!input_expected) return scu_fail("accessible_action_failed", "Cannot verify the text insertion position. No keyboard input was sent.");
         }
-        g_object_unref(text);
-        if (!text_expected) return scu_fail("accessible_action_failed", "Cannot verify the text insertion position. No keyboard input was sent.");
-        text_target = g_object_ref(node);
+        input_target = g_object_ref(node);
     } else {
         atspi.accessible_clear_cache(node);
-        if (text_target != node || accessible_has_state(node, ATSPI_STATE_DEFUNCT) ||
+        if (input_target != node || input_numeric != numeric || accessible_has_state(node, ATSPI_STATE_DEFUNCT) ||
             !accessible_has_state(node, ATSPI_STATE_FOCUSED))
-            return scu_fail("text_focus_changed", "The text target lost focus; no further keyboard input was sent.");
+            return scu_fail(focus_error, "The target lost focus; no further keyboard input was sent.");
     }
-    if (!strcmp(operation, "text_input_select")) {
+    JsonResult *result = result_object();
+    if (numeric) {
+        AtspiValue *value = atspi.accessible_get_value_iface(node);
+        GError *error = NULL;
+        double current = value ? atspi.value_get_current_value(value, &error) : NAN;
+        g_clear_object(&value);
+        gboolean readable = !error && isfinite(current);
+        g_clear_error(&error);
+        if (!readable)
+            return scu_fail("value_readback_failed", "The target's numeric value could not be read. No further keyboard input was sent.");
+        result_number(result, "value", current);
+        result_boolean(result, "confirmed", number_matches(current, g_ascii_strtod(input_expected, NULL)));
+        if (strcmp(operation, "target_input_prepare")) return result;
+    }
+    if (!strcmp(operation, "target_input_select")) {
         AtspiText *text = atspi.accessible_get_text_iface(node);
         gboolean selected = text && accessible_text_selected(text);
         g_clear_object(&text);
@@ -1148,27 +1261,29 @@ static JsonResult *accessible_text_input(AtspiAccessible *node, Element *element
         result_boolean(result, "confirmed", selected);
         return result;
     }
-    if (!strcmp(operation, "text_input_finish")) {
+    if (!strcmp(operation, "target_input_finish")) {
         AtspiText *text = atspi.accessible_get_text_iface(node);
-        char *actual = text ? atspi.text_get_text(text, 0, (gint)g_utf8_strlen(text_expected, -1) + 1, NULL) : NULL;
-        gboolean confirmed = !g_strcmp0(actual, text_expected);
+        char *actual = text ? atspi.text_get_text(text, 0, (gint)g_utf8_strlen(input_expected, -1) + 1, NULL) : NULL;
+        gboolean confirmed = !g_strcmp0(actual, input_expected);
         g_free(actual);
         g_clear_object(&text);
         JsonResult *result = result_object();
         result_boolean(result, "confirmed", confirmed);
         return result;
     }
-    JsonResult *result = result_object();
-    if (!strcmp(operation, "text_input_prepare")) {
-        AtspiText *text = atspi.accessible_get_text_iface(node);
-        result_boolean(result, "selected", text && accessible_text_selected(text));
-        g_clear_object(&text);
+    if (!strcmp(operation, "target_input_prepare")) {
+        if (!numeric) {
+            AtspiText *text = atspi.accessible_get_text_iface(node);
+            result_boolean(result, "selected", text && accessible_text_selected(text));
+            g_clear_object(&text);
+        }
         for (guint i = 0; i < windows->len; i++) {
             Window *window = g_ptr_array_index(windows, i);
             if (window->id != element->window) continue;
             char *title = atspi.accessible_get_name(window->accessible, NULL);
             result_string(result, "title", title);
             result_integer(result, "pid", window->pid);
+            result_string(result, "toolkit", window->toolkit);
             result_member(result, "bounds", accessible_frame(window->accessible));
             g_free(title);
             break;
@@ -1194,8 +1309,8 @@ static JsonResult *operate_on_element(const char *tool, JsonValue *arguments)
     if (accessible_has_state(node, ATSPI_STATE_DEFUNCT)) {
         result = scu_fail("stale_element",
             "Accessible application or element disappeared. Read window state again.");
-    } else if (g_str_has_prefix(tool, "text_input_")) {
-        result = accessible_text_input(node, element, tool, arguments);
+    } else if (g_str_has_prefix(tool, "target_input_")) {
+        result = accessible_target_input(node, element, tool, arguments);
     } else if (strcmp(tool, "click") == 0) {
         result = invoke_accessible_action(node, arguments);
     } else if (strcmp(tool, "set_value") == 0 || strcmp(tool, "type_text") == 0) {
@@ -1254,9 +1369,9 @@ static JsonResult *clipboard_selection(const char *tool, JsonValue *args)
         clear_clipboard_selection();
         const char *token = json_string(args, "element_token");
         Element *element = token ? g_hash_table_lookup(elements, token) : NULL;
-        if (element && element->accessible == text_target &&
-            accessible_has_state(text_target, ATSPI_STATE_FOCUSED)) {
-            clipboard_selection_node = g_object_ref(text_target);
+        if (element && element->accessible == input_target &&
+            accessible_has_state(input_target, ATSPI_STATE_FOCUSED)) {
+            clipboard_selection_node = g_object_ref(input_target);
         } else {
             if (!discover_windows()) {
                 return NULL;
@@ -1353,9 +1468,9 @@ static JsonResult *scu_atspi(const char *tool, JsonValue *args)
     if (!strcmp(tool, "check_ready")) {
         return check_accessibility_ready();
     }
-    if (!strcmp(tool, "text_input_clear")) {
-        g_clear_object(&text_target);
-        g_clear_pointer(&text_expected, g_free);
+    if (!strcmp(tool, "target_input_clear")) {
+        g_clear_object(&input_target);
+        g_clear_pointer(&input_expected, g_free);
         return result_object();
     }
     if (!strcmp(tool, "list_apps")) {
@@ -2757,11 +2872,31 @@ static gboolean accessibility_size(JsonValue *window, JsonValue *candidate,
     return FALSE;
 }
 
+/* Chromium appends playback state to its accessible window name, while KWin
+ * retains the page title. Strip only this toolkit-owned suffix on both sides. */
+static char *accessibility_title(const char *title, gboolean chromium)
+{
+    const char *suffix = " - Audio playing - Chromium";
+    if (title && chromium && g_str_has_suffix(title, suffix))
+        return g_strdup_printf("%.*s - Chromium", (int)(strlen(title) - strlen(suffix)), title);
+    return g_strdup(title);
+}
+
+static gboolean accessibility_titles_match(JsonValue *window, JsonValue *candidate)
+{
+    gboolean chromium = !g_strcmp0(json_string(candidate, "toolkit"), "Chromium");
+    char *a = accessibility_title(json_string(window, "title"), chromium);
+    char *b = accessibility_title(json_string(candidate, "title"), chromium);
+    gboolean same = a && *a && !g_strcmp0(a, b);
+    g_free(a);
+    g_free(b);
+    return same;
+}
+
 static gboolean accessibility_geometry(JsonValue *window, JsonValue *candidate,
     CanvasRect *anchor, CanvasRect *origin, double *ratio)
 {
-    const char *title = json_string(candidate, "title");
-    return title && *title && !g_strcmp0(title, json_string(window, "title")) &&
+    return accessibility_titles_match(window, candidate) &&
         accessibility_size(window, candidate, anchor, origin, ratio);
 }
 
@@ -2820,7 +2955,7 @@ static JsonResult *window_tree(JsonValue *args, JsonValue *window)
                 CanvasRect root, origin;
                 double scale;
                 frames++;
-                titles += !g_strcmp0(json_string(candidate, "title"), json_string(window, "title"));
+                titles += accessibility_titles_match(window, candidate);
                 sizes += accessibility_size(window, candidate, &root, &origin, &scale);
                 if (score < best || !accessibility_geometry(window, candidate, &root, &origin, &scale))
                     continue;
@@ -2868,6 +3003,10 @@ static JsonResult *window_tree(JsonValue *args, JsonValue *window)
         yyjson_mut_uint(request, json_number(match, "window_id", 0)));
     /* The worker validates its own process identity, not the KWin PID. */
     yyjson_mut_obj_put(copy, yyjson_mut_str(request, "pid"), yyjson_mut_uint(request, match_pid));
+    JsonResult *scales = yyjson_mut_arr(request);
+    for (guint d = 0; d < visual.display_count; d++)
+        yyjson_mut_arr_add_real(request, scales, (double)visual.displays[d].width / visual.displays[d].logical_width);
+    yyjson_mut_obj_put(copy, yyjson_mut_str(request, "device_scales"), scales);
     yyjson_doc *parameters = yyjson_mut_val_imut_copy(copy, NULL);
     yyjson_mut_doc_free(request);
     yyjson_doc_free(listing);
@@ -3440,7 +3579,7 @@ static gboolean device_resumed(struct ei_device *raw)
 static gboolean press_codes(struct ei_device *device, const guint *codes, guint count)
 {
     if (count == 0 || count > G_N_ELEMENTS(visual.held_keys) || !visual_step() ||
-        !device_resumed(device) || !verify_text_input()) {
+        !device_resumed(device) || !verify_target_input()) {
         return FALSE;
     }
     visual.keyboard_device = device;
@@ -3523,7 +3662,7 @@ static JsonResult *keyboard_action(JsonValue *arguments)
 
 static gboolean paste_text(struct ei_device *device, KeyboardMap *map, const char *text)
 {
-    if (!verify_text_input()) return FALSE;
+    if (!verify_target_input()) return FALSE;
     KeyStroke control, paste;
     if (!lookup_keysym(map, XKB_KEY_Control_L, &control) ||
         !lookup_keysym(map, XKB_KEY_v, &paste)) {
@@ -3545,8 +3684,8 @@ static gboolean paste_text(struct ei_device *device, KeyboardMap *map, const cha
         result_integer(target, "pid", json_number(active, "pid", 0));
         result_string(target, "title", json_string(active, "title"));
         yyjson_doc *parameters = yyjson_mut_val_imut_copy(target, NULL);
-        JsonResult *guard = atspi_worker_call("save_selection", text_input_arguments
-            ? text_input_arguments : yyjson_doc_get_root(parameters));
+        JsonResult *guard = atspi_worker_call("save_selection", target_input_arguments
+            ? target_input_arguments : yyjson_doc_get_root(parameters));
         yyjson_doc_free(parameters);
         if (!guard) {
             return FALSE;
@@ -3601,7 +3740,7 @@ static JsonResult *type_foreground_text(JsonValue *arguments)
             while (*end != '\0' && g_utf8_next_char(end) - cursor <= 240) {
                 end = g_utf8_next_char(end);
             }
-            if (!visual_step() || !device_resumed(device) || !verify_text_input()) {
+            if (!visual_step() || !device_resumed(device) || !verify_target_input()) {
                 return NULL;
             }
             char *chunk = g_strndup(cursor, end - cursor);
@@ -3672,9 +3811,9 @@ static gboolean keyboard_fallback;
 
 /* Focus is checked in both independent inventories before each input chunk.
  * In particular, Flatpak bus PIDs need not equal compositor PIDs. */
-static gboolean verify_text_input(void)
+static gboolean verify_target_input(void)
 {
-    if (!text_input_arguments) return TRUE;
+    if (!target_input_arguments) return TRUE;
     if (!visual_step() || !refresh_geometry()) return FALSE;
     guint matches = 0;
     gboolean active = FALSE;
@@ -3683,19 +3822,50 @@ static gboolean verify_text_input(void)
     yyjson_arr_foreach(json_member(yyjson_doc_get_root(visual.geometry), "windows"), index, count, window) {
         CanvasRect anchor, origin;
         double ratio;
-        if (accessibility_geometry(window, text_input_window, &anchor, &origin, &ratio)) {
+        if (accessibility_geometry(window, target_input_window, &anchor, &origin, &ratio)) {
             matches++;
             active = json_boolean(window, "active");
         }
     }
     if (matches != 1 || !active) {
-        scu_fail("text_focus_changed", "The text target is not in the uniquely matched active window. No further keyboard input was sent.");
+        scu_fail(json_boolean(target_input_arguments, "numeric") ? "value_focus_changed" : "text_focus_changed",
+            "The target is not in the uniquely matched active window. No further keyboard input was sent.");
         return FALSE;
     }
-    return atspi_worker_call("text_input_verify", text_input_arguments) != NULL;
+    return atspi_worker_call("target_input_verify", target_input_arguments) != NULL;
 }
 
-static JsonResult *type_target_text(const char *tool, JsonValue *args)
+static JsonResult *type_target_number(JsonValue *args, JsonResult *readback)
+{
+    double expected = g_ascii_strtod(json_string(args, "value"), NULL);
+    gint64 until = g_get_monotonic_time() + 3 * G_USEC_PER_SEC;
+    for (guint i = 0; i < 64 && g_get_monotonic_time() < until; i++) {
+        if (yyjson_mut_is_true(yyjson_mut_obj_get(readback, "confirmed")))
+            return scu_action("global_input", TRUE, "Target numeric value read back as requested after verified keyboard input.");
+        double before = yyjson_mut_get_num(yyjson_mut_obj_get(readback, "value"));
+        const char *key = before < expected ? "{\"keys\":[\"Right\"]}" : "{\"keys\":[\"Left\"]}";
+        yyjson_doc *chord = yyjson_read(key, strlen(key), 0);
+        gboolean submitted = keyboard_action(yyjson_doc_get_root(chord)) != NULL;
+        yyjson_doc_free(chord);
+        if (!submitted) return NULL;
+        gint64 progress = MIN(until, g_get_monotonic_time() + 250000);
+        double current = before;
+        do {
+            if (!scu_pause(10) || !verify_target_input()) return NULL;
+            readback = atspi_worker_call("target_input_finish", args);
+            if (!readback) return NULL;
+            current = yyjson_mut_get_num(yyjson_mut_obj_get(readback, "value"));
+            if (yyjson_mut_is_true(yyjson_mut_obj_get(readback, "confirmed")))
+                return scu_action("global_input", TRUE, "Target numeric value read back as requested after verified keyboard input.");
+            if (!number_matches(current, before)) break;
+        } while (g_get_monotonic_time() < progress);
+        if (fabs(current - expected) >= fabs(before - expected))
+            return scu_fail("value_readback_failed", "The slider did not move toward the requested value. No further keyboard input was sent.");
+    }
+    return scu_fail("value_readback_failed", "The slider did not reach the requested value within the input limit. Inspect the result before retrying.");
+}
+
+static JsonResult *type_target_value(const char *tool, JsonValue *args, gboolean numeric)
 {
     keyboard_fallback = TRUE;
     if (!ensure_visual_session()) return NULL;
@@ -3703,17 +3873,23 @@ static JsonResult *type_target_text(const char *tool, JsonValue *args)
     const char *contents = json_string(args, replace ? "value" : "text");
     JsonResult *parameters = result_object();
     result_string(parameters, "element_token", json_string(args, "element_token"));
-    result_string(parameters, "text", contents);
+    result_string(parameters, numeric ? "value" : "text", contents);
     result_boolean(parameters, "replace", replace);
+    result_boolean(parameters, "numeric", numeric);
     yyjson_doc *request = yyjson_mut_val_imut_copy(parameters, NULL);
     JsonValue *arguments = yyjson_doc_get_root(request);
-    JsonResult *candidate = atspi_worker_call("text_input_prepare", arguments);
+    JsonResult *candidate = atspi_worker_call("target_input_prepare", arguments);
     yyjson_doc *window = candidate ? yyjson_mut_val_imut_copy(candidate, NULL) : NULL;
     JsonResult *result = NULL;
     if (!window) goto done;
-    text_input_arguments = arguments;
-    text_input_window = yyjson_doc_get_root(window);
-    if (!verify_text_input()) goto done;
+    target_input_arguments = arguments;
+    target_input_window = yyjson_doc_get_root(window);
+    if (!verify_target_input()) goto done;
+    if (numeric) {
+        JsonResult *readback = atspi_worker_call("target_input_finish", arguments);
+        if (readback) result = type_target_number(arguments, readback);
+        goto done;
+    }
     if (replace && !yyjson_mut_is_true(yyjson_mut_obj_get(candidate, "selected"))) {
         const char *select = "{\"keys\":[\"ctrl\",\"a\"]}";
         yyjson_doc *chord = yyjson_read(select, strlen(select), 0);
@@ -3724,8 +3900,8 @@ static JsonResult *type_target_text(const char *tool, JsonValue *args)
          * receiving control to apply Ctrl+A before committing replacement text. */
         gint64 until = g_get_monotonic_time() + 500000;
         do {
-            if (!scu_pause(25) || !verify_text_input()) goto done;
-            JsonResult *selection = atspi_worker_call("text_input_select", arguments);
+            if (!scu_pause(25) || !verify_target_input()) goto done;
+            JsonResult *selection = atspi_worker_call("target_input_select", arguments);
             if (!selection) goto done;
             selected = yyjson_mut_is_true(yyjson_mut_obj_get(selection, "confirmed"));
         } while (!selected && g_get_monotonic_time() < until);
@@ -3745,8 +3921,8 @@ static JsonResult *type_target_text(const char *tool, JsonValue *args)
     gboolean confirmed = FALSE;
     gint64 until = g_get_monotonic_time() + 500000;
     do {
-        if (!scu_pause(25) || !verify_text_input()) goto done;
-        JsonResult *readback = atspi_worker_call("text_input_finish", arguments);
+        if (!scu_pause(25) || !verify_target_input()) goto done;
+        JsonResult *readback = atspi_worker_call("target_input_finish", arguments);
         if (!readback) goto done;
         confirmed = yyjson_mut_is_true(yyjson_mut_obj_get(readback, "confirmed"));
     } while (!confirmed && g_get_monotonic_time() < until);
@@ -3760,10 +3936,10 @@ static JsonResult *type_target_text(const char *tool, JsonValue *args)
         ? "Used verified keyboard input. Clipboard and primary selection text replaced."
         : "Used keyboard input after verifying the target and active window; text readback confirmed.");
 done:
-    text_input_arguments = text_input_window = NULL;
+    target_input_arguments = target_input_window = NULL;
     /* Preserve the operation's error if cleanup is possible. Cancellation or
      * worker failure already retires the process and releases these objects. */
-    if (!scu.code) atspi_worker_call("text_input_clear", NULL);
+    if (!scu.code) atspi_worker_call("target_input_clear", NULL);
     yyjson_doc_free(window);
     yyjson_doc_free(request);
     return result;
@@ -4023,7 +4199,7 @@ static JsonResult *execute_tool(const Tool *t, JsonValue *args)
     if (!strcmp(t->name, "set_value") || json_string(args, "element_token")) {
         JsonResult *result = scu_atspi(t->name, args);
         if (result && yyjson_mut_is_true(yyjson_mut_obj_get(result, "keyboard_required")))
-            return type_target_text(t->name, args);
+            return type_target_value(t->name, args, yyjson_mut_is_true(yyjson_mut_obj_get(result, "numeric")));
         return result;
     }
     return scu_visual(t->name, args);

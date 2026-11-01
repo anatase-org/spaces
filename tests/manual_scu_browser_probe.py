@@ -68,7 +68,19 @@ def main():
                 '<button onclick="document.getElementById(\'result\').textContent=\'Button clicked\'">Probe button</button>'
                 '<input aria-label="Probe field">'
                 '<a href="about:blank" onclick="event.preventDefault();document.getElementById(\'result\').textContent=\'Link clicked\'">Probe link</a>'
-                '<p id="result">Ready</p>' + '</div>' * 48)
+                '<p id="result">Ready</p>'
+                '<input id="native" type="range" min="0" max="100" value="80" aria-label="Native volume">'
+                '<p id="native-result">Native value 80</p>'
+                '<div id="custom" role="slider" tabindex="0" aria-label="ARIA volume" '
+                'aria-valuemin="0" aria-valuemax="100" aria-valuenow="80">ARIA volume</div>'
+                '<p id="custom-result">ARIA value 80</p>'
+                '<script>const n=document.getElementById("native"),c=document.getElementById("custom");'
+                'n.oninput=()=>document.getElementById("native-result").textContent="Native value "+n.value;'
+                'let actual=80;c.onkeydown=e=>{if(e.key==="ArrowLeft"||e.key==="ArrowDown")actual=Math.max(0,actual-5);'
+                'else if(e.key==="ArrowRight"||e.key==="ArrowUp")actual=Math.min(100,actual+5);else return;'
+                'c.setAttribute("aria-valuenow",actual);document.getElementById("custom-result").textContent="ARIA value "+actual;'
+                'e.preventDefault()};</script>' + '</div>' * 48 +
+                '<button style="margin-top:200vh" onclick="document.getElementById(\'result\').textContent=\'Offscreen button clicked\'">Offscreen button</button>')
         log = (args.artifacts / f"{label}-browser.log").open("w")
         command = [*graphical, "flatpak", "run", *permission, "org.anatase.Browser",
                    "--user-data-dir=" + profile, "--ozone-platform=wayland", "--no-first-run",
@@ -98,9 +110,13 @@ def main():
         def snapshot():
             return probe.tool("computer", observe={"kind": "window", **target})["observation"]
 
-        for label, text in (("Probe button", "Button clicked"), ("Probe link", "Link clicked")):
+        for label, text in (("Probe button", "Button clicked"), ("Probe link", "Link clicked"),
+                            ("Offscreen button", "Offscreen button clicked")):
             tree = snapshot()
             row = next(row for row in tree["elements"] if row["label"] == label)
+            if label == "Offscreen button":
+                bounds = tree["screenshot"]["bounds"]
+                assert row["frame"]["y"] > bounds["y"] + bounds["height"], row
             result = probe.tool("computer", steps=[{"tool": "click", "args": {"element_token": row["element_token"]}}],
                 observe={"kind": "window", **target})
             assert result["status"] == "ok", result
@@ -120,6 +136,20 @@ def main():
             actual = next(row for row in result["observation"]["elements"] if row["label"] == "Probe field")
             assert actual.get("value", "") == expected, actual
             record("text", tool=tool, value=actual.get("value"), warnings=result.get("warnings"))
+
+        for label, readback in (("Native volume", "Native value 50"), ("ARIA volume", "ARIA value 50")):
+            tree = snapshot()
+            row = next(row for row in tree["elements"] if row["label"] == label)
+            assert (row["value"], row["minimum"], row["maximum"]) == (80, 0, 100), row
+            result = probe.tool("computer", steps=[{"tool": "set_value", "args": {
+                "element_token": row["element_token"], "value": "50"}}],
+                observe={"kind": "window", **target, "screenshot": False})
+            assert result["status"] == "ok", result
+            actual = next(row for row in result["observation"]["elements"] if row["label"] == label)
+            assert actual["value"] == 50, actual
+            # This page text changes only from the application's event handler.
+            assert any(row.get("label") == readback for row in result["observation"]["elements"]), result
+            record("numeric", target=label, value=actual["value"], application_readback=readback)
 
         tree = snapshot()
         row = next(row for row in tree["elements"] if row["label"] == "Address and search bar")

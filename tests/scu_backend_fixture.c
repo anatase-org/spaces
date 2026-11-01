@@ -188,6 +188,7 @@ typedef struct {
     struct eis_client *keys_client, *buttons_client;
     struct xkb_state *keyboard;
     GString *text;
+    gint numeric_value;
     gboolean selected;
 } InputOracle;
 
@@ -229,9 +230,9 @@ static gpointer serve_input(gpointer pointer)
                 yyjson_mut_doc *document=yyjson_mut_doc_new(NULL);
                 yyjson_mut_val *encoded=yyjson_mut_str(document,oracle->text->str);
                 char *text=yyjson_mut_val_write(encoded,0,NULL);
-                char *json=g_strdup_printf("{\"keys_down\":%d,\"buttons_down\":%d,\"keys\":%d,\"clicks\":%d,\"scrolls\":%d,\"motions\":%d,\"dragged_motions\":%d,\"x\":%d,\"y\":%d,\"text\":%s,\"selected\":%s}",
+                char *json=g_strdup_printf("{\"keys_down\":%d,\"buttons_down\":%d,\"keys\":%d,\"clicks\":%d,\"scrolls\":%d,\"motions\":%d,\"dragged_motions\":%d,\"x\":%d,\"y\":%d,\"text\":%s,\"selected\":%s,\"numeric_value\":%d}",
                     oracle->keys_down,oracle->buttons_down,oracle->keys,oracle->clicks,oracle->scrolls,
-                    oracle->motions,oracle->dragged_motions,oracle->x,oracle->y,text,oracle->selected?"true":"false");
+                    oracle->motions,oracle->dragged_motions,oracle->x,oracle->y,text,oracle->selected?"true":"false",oracle->numeric_value);
                 free(text);yyjson_mut_doc_free(document);
                 assert(send(oracle->control,json,strlen(json),0)>0);g_free(json);
             } else if(command=='D') {
@@ -331,6 +332,8 @@ static gpointer serve_input(gpointer pointer)
                 gboolean down = eis_event_keyboard_get_key_is_press(event);
                 xkb_keycode_t code=eis_event_keyboard_get_key(event)+8;
                 xkb_keysym_t symbol=xkb_state_key_get_one_sym(oracle->keyboard,code);
+                if (down && symbol == XKB_KEY_Left) oracle->numeric_value = MAX(0, oracle->numeric_value - 5);
+                if (down && symbol == XKB_KEY_Right) oracle->numeric_value = MIN(100, oracle->numeric_value + 5);
                 gboolean control=xkb_state_mod_name_is_active(oracle->keyboard,XKB_MOD_NAME_CTRL,XKB_STATE_MODS_EFFECTIVE)>0;
                 if(down && control && symbol==XKB_KEY_a)oracle->selected=TRUE;
                 else if(down && !control) {
@@ -388,6 +391,7 @@ static int run_eis_server(int fd)
     struct xkb_keymap *map=xkb_keymap_new_from_names(context,&names,XKB_KEYMAP_COMPILE_NO_FLAGS);
     oracle.keyboard=xkb_state_new(map);
     oracle.text=g_string_new("");
+    oracle.numeric_value=80;
     oracle.clients=g_ptr_array_new_with_free_func(free_oracle_client);
     oracle.bound_seats=g_hash_table_new(g_direct_hash,g_direct_equal);
     eis_set_flag(oracle.server,EIS_FLAG_DEVICE_READY);
