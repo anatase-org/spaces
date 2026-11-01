@@ -2964,7 +2964,9 @@ static JsonResult *window_image(JsonValue *window)
 
 static JsonResult *observe_window(JsonValue *args)
 {
-    if (!visual.canvas.id || !validate_canvas(0)) {
+    gboolean screenshot = !yyjson_is_false(json_member(args, "screenshot"));
+    if (!validate_canvas(0)) {
+        if (!screenshot) return NULL;
         clear_tool_error();
         guint images = yyjson_mut_arr_size(scu.images);
         if (!capture_desktop(NULL)) {
@@ -2981,23 +2983,26 @@ static JsonResult *observe_window(JsonValue *args)
     JsonResult *result = NULL, *tree_error = NULL;
     JsonResult *tree = window_tree(args, window);
     if (!tree) {
-        if (g_strcmp0(scu.code, "accessibility_window_unmatched") &&
+        if (!screenshot || (g_strcmp0(scu.code, "accessibility_window_unmatched") &&
             g_strcmp0(scu.code, "accessibility_window_ambiguous") &&
             g_strcmp0(scu.code, "accessibility_geometry_mismatch") &&
-            g_strcmp0(scu.code, "accessibility_unavailable")) {
+            g_strcmp0(scu.code, "accessibility_unavailable"))) {
             goto done;
         }
         tree_error = error_payload();
         clear_tool_error();
     }
-    window = requested_kwin_window(args);
-    JsonResult *image = window ? window_image(window) : NULL;
-    if (!image) {
-        if (!tree || !scu_tick() || !require_computer_access()) {
-            goto done;
+    JsonResult *image = NULL;
+    if (screenshot) {
+        window = requested_kwin_window(args);
+        image = window ? window_image(window) : NULL;
+        if (!image) {
+            if (!tree || !scu_tick() || !require_computer_access()) {
+                goto done;
+            }
+            result_member(tree, "screenshot_error", error_payload());
+            clear_tool_error();
         }
-        result_member(tree, "screenshot_error", error_payload());
-        clear_tool_error();
     }
     if (!refresh_geometry() || !validate_canvas(0)) {
         goto done;
@@ -3966,7 +3971,9 @@ static JsonResult *computer(JsonValue *args)
                 visual.bus == NULL)) {
             scu_fail("visual_session_closed", "Visual session disconnected during the batch.");
         } else {
-            if (ensure_visual_session()) {
+            gboolean screenshot = observer == &desktop_schema ||
+                !yyjson_is_false(json_member(yyjson_doc_get_root(observation), "screenshot"));
+            if (screenshot ? ensure_visual_session() : refresh_geometry()) {
                 value = observer == &desktop_schema
                     ? capture_desktop(yyjson_doc_get_root(observation))
                     : observe_window(yyjson_doc_get_root(observation));

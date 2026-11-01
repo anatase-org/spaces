@@ -161,6 +161,9 @@ static const Argument point_arguments[] = {
 };
 static const Argument window_arguments[] = {
     {.name = "window_id", .type = ARG_INTEGER},
+    {.name = "screenshot", .type = ARG_BOOLEAN,
+        .description = "Include a window screenshot (default true). False returns only the tree "
+            "and requires a valid previous desktop overview."},
     {NULL},
 };
 static const Argument capture_arguments[] = {
@@ -244,16 +247,23 @@ static const Tool tools[] = {
         ARGS_NONE},
     {.name = "computer",
         "Execute up to 64 JSON steps shaped {tool,args}, in order and stop "
-        "on failure. Returns one final overview image. "
+        "on failure. Returns one final observation. "
         "Responses report status:ok/failed and the completed step count. "
-        "Insert {tool:delay_ms,args:{ms:500}} to pause anywhere, the final image "
-        "waits for all steps including trailing delays (there are some default "
-        "delays if not provided). "
-        "use observe:false to skip it or specify a window. "
-        "All pixel coordinates are global to the full overview, including after observe.zoom. "
+        "Insert {tool:delay_ms,args:{ms:500}} to pause anywhere, the final "
+        "observation waits for all steps including trailing delays (there are "
+        "some default delays if not provided). "
+        "Use observe:false to skip observation or observe:{kind:window,window_id} "
+        "for a screenshot and an accessibility tree. "
+        "Prefer the accessibility tree to locate controls when working with a "
+        "single application, especially browsers. "
+        "When the tree provides the controls you need, use "
+        "observe:{kind:window,window_id,screenshot:false} for subsequent trees "
+        "to skip the screenshot. "
+        "All pixel coordinates are global to the full overview, including after "
+        "observe.zoom. "
         "Use zoom:[left,top,right,bottom] to read native detail on large desktops. "
         "Screenshots and foreground input unlock the host desktop when needed; "
-        "accessibility-only steps with observe:false leave it locked. ",
+        "accessibility-only steps and tree-only observations leave it locked. ",
         ARGS_NONE,
         batch_arguments,
         .action = TRUE},
@@ -470,8 +480,10 @@ static yyjson_doc *build_tool_schema(const Tool *tool)
         result_string(observe, "description",
             "Omit for a desktop image with no steps or after foreground input; false disables it. "
             "Use {kind:desktop,zoom:[left,top,right,bottom]} for an image or native-detail crop. "
-            "or {kind:window,window_id} for a compact tree of visible content and controls. "
-            "An explicit object replaces automatic observation. Zoom coordinates and all actions stay in the full overview's global pixel space; zoom never changes that frame.");
+            "Use {kind:window,window_id} for a compact accessibility tree and window screenshot. "
+            "Add screenshot:false for only the tree. "
+            "An explicit object replaces automatic observation. Zoom coordinates and all actions "
+            "stay in the full overview's global pixel space; zoom never changes that frame.");
         result_member(properties, "observe", observe);
     }
     if (tool->required != NULL) {

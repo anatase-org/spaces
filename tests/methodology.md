@@ -546,8 +546,9 @@ Before screenshots or EIS input, the host checks the selected session through
 logind, requests `Unlock()` when needed and waits for both logind and the screen
 locker. The unlock wait is bounded to five seconds and the request deadline.
 It leaves the desktop unlocked afterward. Accessibility-only steps with
-`observe:false` and pure delays do not unlock the desktop; window observations
-include screenshots and therefore require unlocking.
+`observe:false` or a window observation with `screenshot:false`, and pure delays,
+do not unlock the desktop. Window observations include screenshots by default
+and therefore require unlocking.
 
 While MCP clients are connected, `kscreen-doctor` supplies the output inventory.
 If none is usable, the host supervises one `krfb-virtualmonitor` at 1280x720,
@@ -655,6 +656,15 @@ An explicit window observation requests an accessibility tree:
 ```json
 {"observe":{"kind":"window","window_id":1}}
 ```
+
+The optional boolean `screenshot` defaults to true. Once a desktop overview has
+established the coordinate frame, use
+`{"observe":{"kind":"window","window_id":1,"screenshot":false}}` to return
+only the tree. This performs no capture or unlock, reuses the overview's `id`,
+and preserves its coordinate mapping. Missing or stale overviews return
+`stale_capture`; request a fresh screenshot before continuing. Accessibility
+failures return an observation error without falling back to an image when
+screenshots are disabled.
 
 Window observations use one structured `elements` tree. SCU owns traversal,
 compaction and response limits; `max_depth`, `max_elements`, `tree_format` and

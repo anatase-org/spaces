@@ -354,6 +354,15 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertFalse(result["isError"], result)
         self.assertTrue(json.loads(self.login_state.read_text())["locked"])
         self.assertEqual(json.loads(self.login_state.read_text())["unlocks"], 0)
+        captures = json.loads(self.state.read_text())["captures"]
+        result = client.tool("computer", observe={"kind": "window",
+            "window_id": tree["window_id"], "screenshot": False})
+        self.assertEqual(result["structuredContent"]["status"], "ok", result)
+        self.assertIn("elements", result["structuredContent"]["observation"])
+        self.assertFalse(any(block["type"] == "image" for block in result["content"]))
+        self.assertEqual(json.loads(self.state.read_text())["captures"], captures)
+        self.assertTrue(json.loads(self.login_state.read_text())["locked"])
+        self.assertEqual(json.loads(self.login_state.read_text())["unlocks"], 0)
         self.status(client)
         self.assertFalse(json.loads(self.login_state.read_text())["locked"])
         self.login_call("SetLocked", "true")
@@ -757,6 +766,10 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertEqual(set(schema["properties"]), {"steps", "observe", "id"})
         self.assertEqual(schema["properties"]["id"]["type"], "integer")
         self.assertEqual(schema["properties"]["id"]["minimum"], 1)
+        window = next(option for option in schema["properties"]["observe"]["anyOf"]
+                      if option.get("properties", {}).get("kind", {}).get("enum") == ["window"])
+        self.assertEqual(window["properties"]["screenshot"]["type"], "boolean")
+        self.assertNotIn("screenshot", window["required"])
         advertised = {step["properties"]["tool"]["enum"][0]
                       for step in schema["properties"]["steps"]["items"]["anyOf"]}
         self.assertEqual(advertised, {"click", "move_cursor", "drag", "scroll",
@@ -1071,6 +1084,68 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         observation = result["structuredContent"]["observation"]
         self.assertNotIn("elements", observation)
         self.assertEqual(observation["accessibility_error"]["code"], "accessibility_window_unmatched")
+
+    def test_tree_only_window_preserves_coordinates_and_can_act(self):
+        self.start_host()
+        client = self.client()
+        status = self.status(client)["structuredContent"]
+        target = {"kind": "window", "window_id": status["apps"][0]["windows"][0]["window_id"],
+                  "screenshot": False}
+        before = json.loads(self.state.read_text())
+        result = client.tool("computer", observe=target)
+        self.assertEqual(result["structuredContent"]["status"], "ok", result)
+        tree = result["structuredContent"]["observation"]
+        self.assertEqual(tree["id"], status["canvas"]["id"])
+        self.assertNotIn("screenshot", tree)
+        self.assertNotIn("screenshot_error", tree)
+        self.assertFalse(any(block["type"] == "image" for block in result["content"]))
+        button = next(row for row in tree["elements"] if row["label"] == "Fixture button")
+        self.assertEqual(button["frame"], {"x": 30, "y": 30, "width": 20, "height": 10})
+        result = client.tool("computer", steps=[{"tool": "click", "args": {
+            "element_token": button["element_token"]}}], observe=target)
+        self.assertEqual(result["structuredContent"]["status"], "ok", result)
+        self.assertEqual(json.loads(self.atspi_state.read_text())["clicks"], 1)
+        self.assertEqual(json.loads(self.state.read_text())["captures"], before["captures"])
+        self.assertNotIn("window_captures", json.loads(self.state.read_text()))
+        # Disabling screenshots never repairs an invalid overview by capturing.
+        self.configure(resize=True)
+        result = client.tool("computer", observe=target)
+        self.assertEqual(result["structuredContent"]["observation_error"]["code"], "stale_capture")
+        self.assertEqual(json.loads(self.state.read_text())["captures"], before["captures"])
+
+    def test_tree_only_window_requires_a_previous_overview(self):
+        self.start_host()
+        client = self.client()
+        result = client.tool("computer", observe={"kind": "window", "window_id": 1, "screenshot": False})
+        self.assertEqual(result["structuredContent"]["observation_error"]["code"], "stale_capture")
+        state = json.loads(self.state.read_text())
+        self.assertEqual(state["captures"], 0)
+        self.assertEqual(state["connections"], 0)
+
+    def test_tree_only_window_does_not_fall_back_to_a_screenshot(self):
+        self.start_host(window_title="No accessibility tree")
+        client = self.client()
+        window = client.windows()[0]
+        before = json.loads(self.state.read_text())["captures"]
+        result = client.tool("computer", observe={"kind": "window",
+            "window_id": window["window_id"], "screenshot": False})
+        self.assertEqual(result["structuredContent"]["observation_error"]["code"], "accessibility_window_unmatched")
+        self.assertFalse(any(block["type"] == "image" for block in result["content"]))
+        self.assertEqual(json.loads(self.state.read_text())["captures"], before)
+
+    def test_window_screenshot_flag_is_a_boolean_and_defaults_to_true(self):
+        self.start_host()
+        client = self.client()
+        window = client.windows()[0]
+        target = {"kind": "window", "window_id": window["window_id"]}
+        result = client.tool("computer", observe={**target, "screenshot": True})
+        self.assertIn("screenshot", result["structuredContent"]["observation"])
+        self.assertEqual(self.image(result).size, (80, 60))
+        for value in ("false", 0, None):
+            result = client.tool("computer", steps=[{"tool": "press_keys", "args": {"keys": ["a"]}}],
+                observe={**target, "screenshot": value})
+            self.assertEqual(result["structuredContent"]["code"], "invalid_arguments")
+        self.assertEqual(json.loads(self.state.read_text())["input"]["keys"], 0)
 
     def test_window_capture_failure_preserves_available_tree(self):
         self.start_host()
