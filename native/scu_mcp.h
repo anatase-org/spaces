@@ -792,12 +792,152 @@ static void list_tools(JsonResult *result)
     result_member(result, "tools", tool_list);
 }
 
+/* Human-facing content stays readable; structuredContent carries the same
+ * compact trees and the existing observation/status metadata, never raw rows. */
+static void append_result_value(GString *text, JsonResult *value)
+{
+    char *encoded = yyjson_mut_val_write(value, 0, NULL);
+    if (encoded) g_string_append(text, encoded);
+    free(encoded);
+}
+
+static void append_result_frame(GString *text, JsonResult *frame)
+{
+    const char *fields[] = {"x", "y", "width", "height"};
+    g_string_append_c(text, '[');
+    for (guint i = 0; i < G_N_ELEMENTS(fields); i++) {
+        if (i) g_string_append_c(text, ',');
+        append_result_value(text, yyjson_mut_obj_get(frame, fields[i]));
+    }
+    g_string_append_c(text, ']');
+}
+
+#ifdef SCU_HOST
+static void append_tree_row(GString *text, JsonResult *row)
+{
+    const char *role = yyjson_mut_get_str(yyjson_mut_obj_get(row, "role"));
+    g_string_append_printf(text, "%*s[%" G_GINT64_FORMAT "] %s ",
+        (int)yyjson_mut_get_sint(yyjson_mut_obj_get(row, "depth")) * 2, "",
+        yyjson_mut_get_sint(yyjson_mut_obj_get(row, "element_id")), role ? role : "unknown");
+    append_result_value(text, yyjson_mut_obj_get(row, "label"));
+    const char *values[] = {"value", "minimum", "maximum"};
+    for (guint i = 0; i < G_N_ELEMENTS(values); i++) {
+        JsonResult *value = yyjson_mut_obj_get(row, values[i]);
+        if (value) {
+            g_string_append_printf(text, " %s=", values[i]);
+            append_result_value(text, value);
+        }
+    }
+    JsonResult *actions = yyjson_mut_obj_get(row, "actions"), *action;
+    size_t i, n;
+    if (yyjson_mut_arr_size(actions)) {
+        g_string_append(text, " actions=");
+        yyjson_mut_arr_foreach(actions, i, n, action) {
+            if (i) g_string_append_c(text, ',');
+            g_string_append(text, yyjson_mut_get_str(action));
+        }
+    }
+    if (yyjson_mut_is_false(yyjson_mut_obj_get(row, "enabled"))) g_string_append(text, " disabled");
+    const char *flags[] = {"focused", "selected", "checked", "protected", "text_truncated"};
+    for (guint i = 0; i < G_N_ELEMENTS(flags); i++) {
+        if (yyjson_mut_is_true(yyjson_mut_obj_get(row, flags[i]))) g_string_append_printf(text, " %s", flags[i]);
+    }
+    JsonResult *frame = yyjson_mut_obj_get(row, "frame");
+    if (yyjson_mut_is_obj(frame)) {
+        g_string_append(text, " frame=");
+        append_result_frame(text, frame);
+    }
+    g_string_append_c(text, '\n');
+}
+#endif
+
+static void append_result_error(GString *text, const char *label, JsonResult *error)
+{
+    if (!error) return;
+    const char *code = yyjson_mut_get_str(yyjson_mut_obj_get(error, "code"));
+    const char *hint = yyjson_mut_get_str(yyjson_mut_obj_get(error, "hint"));
+    g_string_append_printf(text, "%s: %s", label, code ? code : "error");
+    JsonResult *index = yyjson_mut_obj_get(error, "index");
+    const char *tool = yyjson_mut_get_str(yyjson_mut_obj_get(error, "tool"));
+    if (index) g_string_append_printf(text, " (step %" G_GINT64_FORMAT ", %s)", yyjson_mut_get_sint(index), tool ? tool : "unknown");
+    if (hint) g_string_append_printf(text, ": %s", hint);
+    g_string_append_c(text, '\n');
+}
+
+static char *tool_result_text(const Tool *tool, JsonResult *output)
+{
+    GString *text = g_string_new(NULL);
+    if (!output) {
+        append_result_error(text, "Error", error_payload());
+    } else if (tool && !strcmp(tool->name, "status")) {
+        g_string_append_printf(text, "Screen: %s\n", yyjson_mut_is_true(yyjson_mut_obj_get(output, "locked")) ? "locked" : "unlocked");
+        JsonResult *canvas = yyjson_mut_obj_get(output, "canvas");
+        g_string_append_printf(text, "Canvas: %" G_GINT64_FORMAT " x %" G_GINT64_FORMAT "; id: %" G_GUINT64_FORMAT "\n",
+            yyjson_mut_get_sint(yyjson_mut_obj_get(canvas, "width")), yyjson_mut_get_sint(yyjson_mut_obj_get(canvas, "height")),
+            yyjson_mut_get_uint(yyjson_mut_obj_get(canvas, "id")));
+        g_string_append(text, "Windows:\n");
+        JsonResult *app, *window;
+        size_t i, n, j, m;
+        yyjson_mut_arr_foreach(yyjson_mut_obj_get(output, "apps"), i, n, app) {
+            g_string_append(text, "  ");
+            append_result_value(text, yyjson_mut_obj_get(app, "app_name"));
+            g_string_append(text, ":\n");
+            yyjson_mut_arr_foreach(yyjson_mut_obj_get(app, "windows"), j, m, window) {
+                g_string_append_printf(text, "    window_id=%" G_GINT64_FORMAT " ", yyjson_mut_get_sint(yyjson_mut_obj_get(window, "window_id")));
+                append_result_value(text, yyjson_mut_obj_get(window, "title"));
+                if (yyjson_mut_is_true(yyjson_mut_obj_get(window, "active"))) g_string_append(text, " active");
+                if (yyjson_mut_is_false(yyjson_mut_obj_get(window, "shown"))) g_string_append(text, " hidden");
+                g_string_append(text, " bounds=");
+                append_result_frame(text, yyjson_mut_obj_get(window, "bounds"));
+                g_string_append_c(text, '\n');
+            }
+        }
+    } else {
+        const char *status = yyjson_mut_get_str(yyjson_mut_obj_get(output, "status"));
+        g_string_append_printf(text, "Status: %s; completed: %" G_GINT64_FORMAT "\n", status ? status : "ok",
+            yyjson_mut_get_sint(yyjson_mut_obj_get(output, "completed")));
+        append_result_error(text, "Failed", yyjson_mut_obj_get(output, "failed"));
+        JsonResult *warnings = yyjson_mut_obj_get(output, "warnings");
+        if (warnings) {
+            g_string_append(text, "Warnings: ");
+            append_result_value(text, warnings);
+            g_string_append_c(text, '\n');
+        }
+        JsonResult *observation;
+        size_t i, n;
+        yyjson_mut_arr_foreach(yyjson_mut_obj_get(output, "observations"), i, n, observation) {
+            JsonResult *window = yyjson_mut_obj_get(observation, "window_id");
+            if (window) g_string_append_printf(text, "\nWindow %" G_GINT64_FORMAT, yyjson_mut_get_sint(window));
+            else g_string_append(text, "\nDesktop");
+            JsonResult *id = yyjson_mut_obj_get(observation, "id");
+            if (id) g_string_append_printf(text, "; id: %" G_GUINT64_FORMAT, yyjson_mut_get_uint(id));
+            if (!window) g_string_append_printf(text, "; %" G_GINT64_FORMAT " x %" G_GINT64_FORMAT,
+                yyjson_mut_get_sint(yyjson_mut_obj_get(observation, "width")), yyjson_mut_get_sint(yyjson_mut_obj_get(observation, "height")));
+            g_string_append_c(text, '\n');
+            JsonResult *screenshot = yyjson_mut_obj_get(observation, "screenshot");
+            if (screenshot) {
+                g_string_append_printf(text, "Screenshot: %" G_GINT64_FORMAT " x %" G_GINT64_FORMAT "; bounds=",
+                    yyjson_mut_get_sint(yyjson_mut_obj_get(screenshot, "width")), yyjson_mut_get_sint(yyjson_mut_obj_get(screenshot, "height")));
+                append_result_frame(text, yyjson_mut_obj_get(screenshot, "bounds"));
+                g_string_append_c(text, '\n');
+            }
+            append_result_error(text, "Error", yyjson_mut_obj_get(observation, "error"));
+            append_result_error(text, "Accessibility", yyjson_mut_obj_get(observation, "accessibility_error"));
+            append_result_error(text, "Screenshot", yyjson_mut_obj_get(observation, "screenshot_error"));
+            if (yyjson_mut_is_true(yyjson_mut_obj_get(observation, "truncated"))) g_string_append(text, "Tree truncated; listed element IDs remain usable.\n");
+            const char *tree = yyjson_mut_get_str(yyjson_mut_obj_get(observation, "tree_markdown"));
+            if (tree) g_string_append(text, tree);
+        }
+    }
+    return g_string_free(text, FALSE);
+}
+
 static void add_tool_result(JsonResult *result, const Tool *tool, JsonResult *output)
 {
     JsonResult *content = result_array();
     JsonResult *text = result_object();
     JsonResult *structured = output != NULL ? output : error_payload();
-    char *body = yyjson_mut_val_write(structured, 0, NULL);
+    char *body = tool_result_text(tool, output);
     if (output && tool && !strcmp(tool->name, "status") &&
         yyjson_mut_is_true(yyjson_mut_obj_get(output, "locked"))) {
         JsonResult *warning = result_object();

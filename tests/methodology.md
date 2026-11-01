@@ -649,7 +649,7 @@ the batch failed; cancellation, revocation and session failure stop further work
 For example, one missing window followed by a readable window returns:
 
 ```json
-{"completed":0,"status":"failed","observations":[{"window_id":99,"error":{"code":"window_unavailable","hint":"KWin window is unavailable. Call status again."}},{"window_id":1,"id":2,"elements":[]}]}
+{"completed":0,"status":"failed","observations":[{"window_id":99,"error":{"code":"window_unavailable","hint":"KWin window is unavailable. Call status again."}},{"window_id":1,"id":2,"tree_markdown":""}]}
 ```
 
 Vision also returns an `observations` array:
@@ -710,8 +710,18 @@ before continuing. Accessibility failures return an observation error without
 falling back to an image. The old `observe`, `screenshot`, and `zoom` arguments
 are rejected before effects.
 
-Window observations use one structured `elements` tree. SCU owns traversal,
-compaction and response limits; `max_depth`, `max_elements`, `tree_format` and
+Window observations expose one compact `tree_markdown` string in both text and
+`structuredContent`; full element records stay inside the host. Each indented
+line starts with the integer `element_id` in brackets, followed by role, quoted
+label, value/range, supported actions, meaningful state flags and an optional
+`frame=[x,y,width,height]`. Quotes and newlines in labels/values are escaped, so
+one accessible object always occupies one line. Indentation shows hierarchy.
+The plain text content displays batch outcomes, observations and errors directly
+rather than JSON-encoding the tree again. Status text similarly lists screen
+lock state, canvas dimensions/ID and grouped windows with their IDs and bounds;
+its existing structured canvas/apps metadata is retained.
+
+SCU owns traversal, compaction and response limits; `max_depth`, `max_elements`, `tree_format` and
 PID selectors are not MCP arguments. The unique `window_id` selects a window;
 process identities remain internal to safe AT-SPI association.
 
@@ -764,9 +774,9 @@ same order; reads and actions do not refresh eviction order. An overwritten ID
 targets its new occupant. Absent rows remain cached; unallocated or defunct
 objects return `stale_element`. Other clients cannot invalidate these IDs.
 Disconnected clients' tables are discarded at the next worker request, and a
-worker restart resets all tables. `element_index` and `parent_index` describe
-only the current tree structure. The string `element_token` and `snapshot_id`
-fields are removed. Unsupported rectangles are null. Toolkit default-action names
+worker restart resets all tables. Row indices and parent indices stay internal;
+indentation describes the public tree structure. The string `element_token` and `snapshot_id`
+fields are removed. An omitted frame indicates an unsupported rectangle. Toolkit default-action names
 such as Chromium's `jump`, `open`, `doDefault` and `clickAncestor` map to
 `activate`; unknown action names never invoke an arbitrary action index.
 Scroll `amount` always counts lines; no unit selector is exposed.
@@ -1473,3 +1483,33 @@ PYTHONPATH=src python -m unittest \
   tests.test_scu tests.test_computer_integration tests.test_launch tests.test_native_abi
 make -C native check-guest-abi
 ```
+
+### Restored readable MCP output (2026-11-01)
+
+The `tree_format` cleanup in `28bd367` also removed the readable renderer,
+leaving full element records in both MCP text and structured output. The restored
+default puts compact `tree_markdown` in both representations and keeps raw rows
+inside the host. It introduces no format selector or input-schema changes.
+Persistent element IDs, offscreen controls, coordinates, values, states, supported
+actions and partial-tree diagnostics remain available. The 512 KiB observation
+budget now measures the serialized compact representation, including escapes and
+metadata, rather than the internal element records.
+
+Status text lists the screen state, canvas dimensions/capture ID, and applications
+with window IDs, titles, state and bounds. Batch text displays completed counts,
+window/capture IDs, screenshot geometry, readable trees, warnings and errors.
+Structured canvas/apps and batch metadata are preserved. Locked status keeps its
+exact warning and no images; `--no-vision` remains local to the frontend.
+
+`tests/scu_tree.py` decodes the public tree for functional test/probe assertions;
+raw wire-format tests bypass that helper and verify that neither response form
+exports an `elements` array. Coverage includes both frontends, semantic and pixel
+actions, escaping multiline Unicode values, offscreen controls, mixed observation
+failures, ID reordering/rollover and the existing geometry/lifecycle contracts.
+
+The staged binaries produced exact protocol examples against private desktop
+fixtures at `/tmp/scu-mcp-protocol`, with readable previews at
+`/tmp/scu-status-output.txt`, `/tmp/scu-vision-output.txt` and
+`/tmp/scu-accessibility-output.txt`. The prior deployed dump is retained at
+`/tmp/scu-mcp-protocol-before-readable`. These examples are fixture responses,
+not a deployment or a resumed browser rollout; the real desktop was not changed.

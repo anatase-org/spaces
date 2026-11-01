@@ -15,6 +15,7 @@ import time
 import uuid
 
 from manual_scu_session_probe import Probe
+from scu_tree import read_trees
 
 
 def main():
@@ -239,7 +240,7 @@ def main():
         trees = hidden.call("tools/call", {"name": "accessibility", "arguments": {
             "observations": [missing, window, window]}})
         assert trees["isError"], trees
-        observations = trees["structuredContent"]["observations"]
+        observations = read_trees(trees["structuredContent"])["observations"]
         assert [item["window_id"] for item in observations] == [missing, window], observations
         assert observations[0]["error"]["code"] == "window_unavailable", observations
         entry = next(row for row in observations[1]["elements"] if row["label"] == "Address and search bar")

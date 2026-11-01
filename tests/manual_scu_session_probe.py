@@ -16,6 +16,8 @@ import subprocess
 import time
 import uuid
 
+from scu_tree import read_trees
+
 
 class Probe:
     def __init__(self, guest, artifacts, label, *, no_vision=False):
@@ -54,7 +56,7 @@ class Probe:
             assert error.get("hint") == "The screen is locked. Vision tools are unavailable.", metadata
         else:
             assert not reply.get("isError"), metadata
-        return metadata
+        return read_trees(metadata)
 
     def close(self):
         if not self.process.stdin.closed:

@@ -20,6 +20,8 @@ import unittest
 
 from PIL import Image
 
+from tests.scu_tree import read_trees
+
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGES = ("gio-unix-2.0", "atspi-2", "libei-1.0", "xkbcommon", "gdk-pixbuf-2.0", "libeis-1.0")
 
@@ -46,7 +48,11 @@ class Client:
         return result
 
     def tool(self, name, **arguments):
-        return self.call("tools/call", {"name": name, "arguments": arguments})["result"]
+        result = self.call("tools/call", {"name": name, "arguments": arguments})["result"]
+        # Functional assertions decode the public compact tree. Wire-format
+        # assertions call tools/call directly and inspect the unmodified result.
+        result["structuredContent"] = read_trees(result["structuredContent"])
+        return result
 
     def windows(self):
         response = self.tool("status")
@@ -1125,6 +1131,74 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertEqual(json.loads(self.state.read_text())["geometry_requests"], 0)
         self.assertEqual(json.loads(self.atspi_state.read_text())["registrations"], 0)
 
+    def test_readable_status_lists_canvas_and_windows_in_both_modes(self):
+        self.start_host()
+        for no_vision in (False, True):
+            client = self.client(no_vision=no_vision)
+            response = client.call("tools/call", {"name": "status", "arguments": {}})["result"]
+            data = response["structuredContent"]
+            text = response["content"][0]["text"]
+            window = data["apps"][0]["windows"][0]
+            self.assertIn("Screen: unlocked", text)
+            self.assertIn(f"Canvas: 160 x 120; id: {data['canvas']['id']}", text)
+            self.assertIn(f'window_id={window["window_id"]} {json.dumps(window["title"])} active bounds=', text)
+            self.assertNotIn('"apps":', text)
+            self.assertEqual(any(b["type"] == "image" for b in response["content"]), not no_vision)
+
+    def test_readable_trees_are_the_only_public_representation(self):
+        self.start_accessibility(offscreen=True)
+        self.start_host()
+        for no_vision in (False, True):
+            client = self.client(no_vision=no_vision)
+            window = client.windows()[0]["window_id"]
+            for tool in (("vision", "accessibility") if not no_vision else ("accessibility",)):
+                response = client.call("tools/call", {"name": tool, "arguments": {"observations": [window]}})["result"]
+                self.assertFalse(response["isError"], response)
+                tree = response["structuredContent"]["observations"][0]
+                self.assertNotIn("elements", tree)
+                text = tree["tree_markdown"]
+                self.assertTrue(text.startswith('[0] frame "scu test window"'), text)
+                self.assertIn('  [1] button "Fixture button" actions=activate', text)
+                self.assertIn(text, response["content"][0]["text"])
+                if tool == "vision":
+                    image = tree["screenshot"]
+                    self.assertIn(f"Screenshot: {image['width']} x {image['height']}; bounds=", response["content"][0]["text"])
+                self.assertNotIn('"element_index"', json.dumps(response))
+                rows = read_trees(response["structuredContent"])["observations"][0]["elements"]
+                button = next(row for row in rows if row["label"] == "Fixture button")
+                self.assertEqual(button["frame"]["y"], 620)
+                self.assertEqual(any(b["type"] == "image" for b in response["content"]), tool == "vision")
+                self.assertFalse(client.tool("accessibility", steps=[{"tool": "activate", "args": {
+                    "element_id": button["element_id"]}}])["isError"])
+            # Quoted, multiline UTF-8 values must stay on one escaped tree line.
+            entry = next(row for row in rows if row["label"] == "Fixture entry")
+            expected = 'Héllo "世界"\nsecond line'
+            response = client.call("tools/call", {"name": "accessibility", "arguments": {
+                "steps": [{"tool": "set_value", "args": {"element_id": entry["element_id"], "value": expected}}],
+                "observations": [window]}})["result"]
+            self.assertFalse(response["isError"], response)
+            tree = response["structuredContent"]["observations"][0]
+            self.assertEqual(len(tree["tree_markdown"].splitlines()), len(rows))
+            actual = read_trees(response["structuredContent"])["observations"][0]["elements"]
+            self.assertEqual(next(row["value"] for row in actual if row["label"] == "Fixture entry"), expected)
+
+    def test_readable_batch_keeps_window_errors_and_completed_actions(self):
+        self.start_host()
+        client = self.client(no_vision=True)
+        window = client.windows()[0]["window_id"]
+        response = client.call("tools/call", {"name": "accessibility", "arguments": {
+            "steps": [{"tool": "delay_ms", "args": {"ms": 0}}],
+            "observations": [window + 99, window]}})["result"]
+        self.assertTrue(response["isError"], response)
+        self.assertEqual(response["structuredContent"]["completed"], 1)
+        text = response["content"][0]["text"]
+        self.assertIn("Status: failed; completed: 1", text)
+        self.assertIn(f"Window {window + 99}", text)
+        self.assertIn("Error: window_unavailable", text)
+        self.assertIn(f"Window {window};", text)
+        self.assertIn('button "Fixture button"', text)
+        self.assertNotIn('"elements"', json.dumps(response))
+
     def test_no_vision_status_initializes_canvas_and_is_frontend_local(self):
         self.start_shared()
         hidden, normal = self.client(no_vision=True), self.client()
@@ -1132,7 +1206,9 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertFalse(response["isError"], response)
         self.assertEqual([block["type"] for block in response["content"]], ["text"])
         data = response["structuredContent"]
-        self.assertEqual(json.loads(response["content"][0]["text"]), data)
+        self.assertIn("Screen: unlocked", response["content"][0]["text"])
+        self.assertIn("Windows:", response["content"][0]["text"])
+        self.assertIn(f"id: {data['canvas']['id']}", response["content"][0]["text"])
         self.assertGreater(data["canvas"]["id"], 0)
         self.assertGreater(json.loads(self.state.read_text())["captures"], 0)
         window = data["apps"][0]["windows"][0]["window_id"]
@@ -1723,10 +1799,10 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         tree = self.snapshot(client)
         self.assertTrue(tree["truncated"])
         self.assertEqual(tree["accessibility_error"]["code"], "accessibility_tree_too_complex")
-        size = len(json.dumps(tree, separators=(",", ":")).encode())
+        size = len(json.dumps({k: v for k, v in tree.items() if k != "elements"}, separators=(",", ":")).encode())
         self.assertGreater(size, 500 * 1024)
         self.assertLessEqual(size, 512 * 1024)
-        self.assertNotIn("tree_markdown", tree)
+        self.assertIn("tree_markdown", tree)
         button = next(row for row in tree["elements"] if row["role"] == "button")
         result = client.tool("accessibility", steps=[{"tool": "activate", "args": {"element_id": button["element_id"]}}])
         self.assertEqual(result["structuredContent"]["status"], "ok", result)

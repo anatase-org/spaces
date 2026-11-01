@@ -12,6 +12,8 @@ from pathlib import Path
 import select
 import subprocess
 
+from scu_tree import read_trees
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -53,7 +55,7 @@ def main():
                 (args.artifacts / f"{serial:02d}-{index}.png").write_bytes(base64.b64decode(block["data"]))
         assert not response.get("isError"), metadata
         print(name, json.dumps(metadata, ensure_ascii=False)[:350], flush=True)
-        return metadata
+        return read_trees(metadata)
 
     try:
         call("initialize", {"protocolVersion": "2025-11-25"})

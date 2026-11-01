@@ -711,37 +711,41 @@ static void mark_tree_complex(JsonResult *tree)
     result_member(tree, "accessibility_error", limitation);
 }
 
-/* Budget the final representation, including observation metadata, rather
- * than stopping discovery on intermediate coordinates or an arbitrary row. */
+/* Render only after geometry revalidation. Raw rows stay inside the host;
+ * the response budget applies to the compact representation actually sent. */
 static void limit_tree_output(JsonResult *tree)
 {
     JsonResult *rows = yyjson_mut_obj_get(tree, "elements");
     if (!rows) return;
-    size_t bytes = 0;
-    char *encoded = yyjson_mut_val_write(tree, 0, &bytes);
-    free(encoded);
-    if (bytes <= TREE_BYTES) return;
-
-    mark_tree_complex(tree);
     JsonResult *metadata = result_object(), *key, *value;
     size_t i, n;
     yyjson_mut_obj_foreach(tree, i, n, key, value) {
         const char *name = yyjson_mut_get_str(key);
-        result_member(metadata, name, !strcmp(name, "elements") ? result_array()
-            : yyjson_mut_val_mut_copy(scu.doc, value));
+        if (strcmp(name, "elements")) result_member(metadata, name, yyjson_mut_val_mut_copy(scu.doc, value));
     }
-    encoded = yyjson_mut_val_write(metadata, 0, &bytes);
+    /* Reserve room for a truncation warning before adding complete lines. */
+    mark_tree_complex(metadata);
+    result_string(metadata, "tree_markdown", "");
+    size_t bytes = 0;
+    char *encoded = yyjson_mut_val_write(metadata, 0, &bytes);
     free(encoded);
-    size_t keep = 0;
+    GString *text = g_string_new(NULL);
     yyjson_mut_arr_foreach(rows, i, n, value) {
-        size_t row_bytes = 0;
-        encoded = yyjson_mut_val_write(value, 0, &row_bytes);
+        gsize start = text->len;
+        append_tree_row(text, value);
+        size_t line_bytes = 0;
+        encoded = yyjson_mut_val_write(yyjson_mut_str(scu.doc, text->str + start), 0, &line_bytes);
         free(encoded);
-        if (bytes + row_bytes + (keep != 0) > TREE_BYTES) break;
-        bytes += row_bytes + (keep != 0);
-        keep++;
+        if (bytes + line_bytes - 2 > TREE_BYTES) {
+            g_string_truncate(text, start);
+            mark_tree_complex(tree);
+            break;
+        }
+        bytes += line_bytes - 2;
     }
-    yyjson_mut_arr_remove_range(rows, keep, yyjson_mut_arr_size(rows) - keep);
+    yyjson_mut_obj_remove_key(tree, "elements");
+    result_string(tree, "tree_markdown", text->str);
+    g_string_free(text, TRUE);
 }
 
 /* Toolkit action names describe the same default activation. Never select an
