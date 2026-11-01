@@ -3615,16 +3615,18 @@ static const Tool window_observation = {
 static const Tool tools[] = {
     {.name = "status",
         "Run first for health checks, canvas metadata, apps/windows and a full desktop screenshot. "
-        "Window bounds, element frames and pixel actions share the full screenshot's coordinates. "
+        "Window bounds, element frames and pixel actions share the full screenshot's coordinates. ",
         ARGS_NONE},
     {.name = "computer",
         "Execute up to 64 JSON steps shaped {tool,args}, in order and stop "
         "on failure. Returns one final overview image. "
         "Responses report status:ok/failed and the completed step count. "
+        "Without delay_ms steps, pauses 150 ms between steps and before the final image. "
         "Insert {tool:delay_ms,args:{ms:500}} to pause anywhere, the final image waits for all steps including trailing delays. "
+        "Any explicit delay disables automatic pauses for the whole batch. "
         "use observe:false to skip it or specify a window. "
         "All pixel coordinates are global to the full overview, including after observe.zoom. "
-        "Use zoom:[left,top,right,bottom] to read native detail on large desktops. "
+        "Use zoom:[left,top,right,bottom] to read native detail on large desktops. ",
         ARGS_NONE,
         batch_arguments,
         .action = TRUE},
@@ -4028,6 +4030,21 @@ static void clear_tool_error(void)
     g_clear_pointer(&scu.hint, g_free);
 }
 
+/* Both explicit and automatic pauses remain cancellable and notice revoked
+ * access even when no visual session has been opened. */
+static gboolean wait_for_delay(unsigned ms)
+{
+    gint64 end = g_get_monotonic_time() + (gint64)ms * 1000;
+    while (g_get_monotonic_time() < end) {
+        gint64 remaining = end - g_get_monotonic_time();
+        if (!scu_pause((unsigned)MIN(10, MAX(0, (remaining + 999) / 1000))) ||
+            !require_computer_access()) {
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
 static JsonResult *batch_failure(guint index, const Tool *tool)
 {
     JsonResult *failure = error_payload();
@@ -4063,7 +4080,7 @@ static JsonResult *computer(JsonValue *args)
     const Tool *observer = NULL;
     JsonValue *observe = json_member(args, "observe");
     gboolean automatic = observe == NULL, has_foreground = FALSE, has_actions = FALSE;
-    gboolean valid = FALSE;
+    gboolean valid = FALSE, has_delay = FALSE;
     JsonResult *result = result_object(), *warnings = result_array();
 
     yyjson_arr_foreach(array, index, length, step) {
@@ -4081,6 +4098,8 @@ static JsonResult *computer(JsonValue *args)
         if (strcmp(action->name, "delay_ms")) {
             has_actions = TRUE;
             has_foreground |= json_string(merged, "element_token") == NULL;
+        } else {
+            has_delay = TRUE;
         }
     }
     /* Delays are neutral: semantic-only sequences stay semantic. With no
@@ -4116,7 +4135,12 @@ static JsonResult *computer(JsonValue *args)
         JsonValue *merged = yyjson_doc_get_root(steps[index]);
         foreground_attempted |= strcmp(actions[index]->name, "delay_ms") != 0 &&
             json_string(merged, "element_token") == NULL;
-        JsonResult *value = execute_tool(actions[index], merged);
+        /* An explicit delay anywhere gives the caller full control of timing.
+         * Otherwise leave a small gap before each subsequent action. */
+        JsonResult *value = NULL;
+        if (!index || has_delay || wait_for_delay(150)) {
+            value = execute_tool(actions[index], merged);
+        }
         if (value == NULL) {
             release_input();
             result_member(result, "failed", batch_failure(index, actions[index]));
@@ -4143,7 +4167,11 @@ static JsonResult *computer(JsonValue *args)
         /* A broken visual session is not reconnected inside the interrupted
          * batch. Only a subsequent request may establish another grant. */
         JsonResult *value = NULL;
-        if (visual.broken || (failed && foreground_attempted &&
+        /* Also allow rendering time before a screenshot of a partial batch.
+         * Empty observations and tree-only observations need no final pause. */
+        if (observer == &desktop_observation && count && !has_delay && !wait_for_delay(150)) {
+            release_input();
+        } else if (visual.broken || (failed && foreground_attempted &&
                 visual.bus == NULL && !strcmp(observer->name, "get_desktop_state"))) {
             scu_fail("visual_session_closed", "Visual session disconnected during the batch.");
         } else {
@@ -4186,15 +4214,8 @@ static JsonResult *execute_tool(const Tool *t, JsonValue *args)
         return NULL;
     }
     if (!strcmp(t->name, "delay_ms")) {
-        /* Keep explicit waits interruptible and recheck the host grant even
-         * when no EIS session exists. Observation runs only after this ends. */
-        gint64 end = g_get_monotonic_time() + (gint64)json_number(args, "ms", 0) * 1000;
-        while (g_get_monotonic_time() < end) {
-            gint64 remaining = end - g_get_monotonic_time();
-            if (!scu_pause((unsigned)MIN(10, MAX(0, (remaining + 999) / 1000))) ||
-                !require_computer_access()) {
-                return NULL;
-            }
+        if (!wait_for_delay((unsigned)json_number(args, "ms", 0))) {
+            return NULL;
         }
         return result_object();
     }
@@ -4308,14 +4329,9 @@ static void send_response(
 static void add_server_info(JsonResult *result)
 {
     result_string(result, "instructions",
-        "Call computer with {} for an initial desktop image, or read a window tree. All actions go through computer with JSON steps {tool,args}; "
-        "foreground batches return one final image. Inspect it to verify effects; "
-        "insert delay_ms steps with args:{ms:500} to wait before another action or the final image. "
-        "if loading continues, observe again without replaying actions. "
-        "All pixel coordinates stay global to the full desktop overview; observe.zoom reads native detail without changing that frame or focus. "
-        "Call status for KWin windows and a desktop screenshot; missing prerequisites return an error. "
-        "All computer use requires the Spaces accessibility tier and a KWin host session; no portal prompts. "
-        "No browser, shell, JavaScript or window capture tools.");
+        "Computer use MCP server. Control the host desktop: screenshots, mouse, "
+        "keyboard, and accessibility. Use `status` to inspect the desktop and "
+        "`computer` to execute actions");
     JsonResult *capabilities = result_object();
     JsonResult *info = result_object();
     result_member(capabilities, "tools", result_object());
