@@ -201,9 +201,10 @@ int main(int argc, char **argv)
         print_help(stdout);
         return 0;
     }
-    if (argc != 2 || strcmp(argv[1], "mcp")) {
+    if ((argc != 2 && !(argc == 3 && !strcmp(argv[2], "--no-vision"))) || strcmp(argv[1], "mcp")) {
         print_help(stderr);
         return 2;
     }
+    no_vision = argc == 3;
     return serve_mcp();
 }

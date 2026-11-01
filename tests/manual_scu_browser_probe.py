@@ -98,7 +98,7 @@ def main():
         status = probe.tool("status")
         target = next({"window_id": window["window_id"]}
                       for app in status["apps"] for window in app["windows"] if title in window["title"])
-        observation = probe.tool("computer", observe={"kind": "window", **target})["observation"]
+        observation = probe.tool("vision", observe={"kind": "window", **target})["observation"]
         elements = observation.get("elements", [])
         wanted = {("heading", "SCU browser probe"), ("button", "Probe button"), ("entry", "Probe field")}
         found = {(row["role"], row["label"]) for row in elements} & wanted
@@ -111,8 +111,13 @@ def main():
         target = next({"window_id": window["window_id"]}
                       for app in status["apps"] for window in app["windows"] if title in window["title"])
 
-        def snapshot():
-            return probe.tool("computer", observe={"kind": "window", **target})["observation"]
+        bounds = next(window["bounds"] for app in status["apps"] for window in app["windows"]
+                      if window["window_id"] == target["window_id"])
+
+        def snapshot(*, vision=False):
+            if vision:
+                return probe.tool("vision", observe={"kind": "window", **target})["observation"]
+            return probe.tool("accessibility", observations=[target["window_id"]])["observations"][0]
 
         def point(tree, label):
             frame = next(row["frame"] for row in tree["elements"] if row["label"] == label)
@@ -120,13 +125,13 @@ def main():
             return {"id": tree["id"], "x": frame["x"] + frame["width"] / 2,
                     "y": frame["y"] + frame["height"] / 2}
 
-        tree = snapshot()
-        result = probe.tool("computer", steps=[{"tool": "click", "args": {
+        tree = snapshot(vision=True)
+        result = probe.tool("vision", steps=[{"tool": "click", "args": {
             **point(tree, "Probe button"), "count": 2}}], observe={"kind": "window", **target})
         assert result["status"] == "ok", result
         assert any(row["label"] == "Button double clicked" for row in result["observation"]["elements"]), result
         record("pixel-double-click", status=result["status"])
-        result = probe.tool("computer", steps=[
+        result = probe.tool("vision", steps=[
             {"tool": "click", "args": {**point(result["observation"], "Probe link"), "button": "middle"}},
             {"tool": "press_keys", "args": {"keys": ["CTRL", "Tab"]}},
             {"tool": "delay_ms", "args": {"ms": 500}}], observe={"kind": "window", **target})
@@ -134,19 +139,19 @@ def main():
         assert any(row["label"] == "Address and search bar" and row.get("value") == "about:blank"
                    for row in result["observation"]["elements"]), result
         record("pixel-middle-click", new_tab="about:blank", status=result["status"])
-        probe.tool("computer", steps=[{"tool": "press_keys", "args": {"keys": ["CTRL", "w"]}}], observe=False)
-        tree = snapshot()
+        probe.tool("vision", steps=[{"tool": "press_keys", "args": {"keys": ["CTRL", "w"]}}], observe=False)
+        tree = probe.tool("vision", observe={"kind": "window", **target})["observation"]
         link = next(row for row in tree["elements"] if row["label"] == "Probe link")
         assert {"activate", "open_context_menu"} <= set(link["actions"]), link
         assert "click_buttons" not in link, link
-        result = probe.tool("computer", steps=[{"tool": "open_context_menu", "args": {
-            "element_token": link["element_token"]}}], observe={"kind": "window", **target})
+        result = probe.tool("accessibility", steps=[{"tool": "open_context_menu", "args": {
+            "element_token": link["element_token"]}}], observations=[target["window_id"]])
         assert result["status"] == "ok", result
-        menu = next(row for row in result["observation"]["elements"] if row["label"] == "Probe menu item")
-        result = probe.tool("computer", steps=[{"tool": "activate", "args": {
-            "element_token": menu["element_token"]}}], observe={"kind": "window", **target})
+        menu = next(row for row in result["observations"][0]["elements"] if row["label"] == "Probe menu item")
+        result = probe.tool("accessibility", steps=[{"tool": "activate", "args": {
+            "element_token": menu["element_token"]}}], observations=[target["window_id"]])
         assert result["status"] == "ok", result
-        assert any(row["label"] == "Context menu selected" for row in result["observation"]["elements"]), result
+        assert any(row["label"] == "Context menu selected" for row in result["observations"][0]["elements"]), result
         record("open_context_menu", status=result["status"])
 
         for label, text in (("Probe button", "Button clicked"), ("Probe link", "Link clicked"),
@@ -154,12 +159,11 @@ def main():
             tree = snapshot()
             row = next(row for row in tree["elements"] if row["label"] == label)
             if label == "Offscreen button":
-                bounds = tree["screenshot"]["bounds"]
                 assert row["frame"]["y"] > bounds["y"] + bounds["height"], row
-            result = probe.tool("computer", steps=[{"tool": "activate", "args": {"element_token": row["element_token"]}}],
-                observe={"kind": "window", **target})
+            result = probe.tool("accessibility", steps=[{"tool": "activate", "args": {"element_token": row["element_token"]}}],
+                observations=[target["window_id"]])
             assert result["status"] == "ok", result
-            assert any(text in (row.get("label", "") + row.get("value", "")) for row in result["observation"]["elements"]), result
+            assert any(text in (row.get("label", "") + row.get("value", "")) for row in result["observations"][0]["elements"]), result
             record("activate", target=label, actions=row["actions"], status=result["status"])
 
         for tool, field, text, expected in (("set_value", "value", "hello", "hello"),
@@ -168,11 +172,11 @@ def main():
                                              ("set_value", "value", "", "")):
             tree = snapshot()
             row = next(row for row in tree["elements"] if row["label"] == "Probe field")
-            result = probe.tool("computer", steps=[{"tool": tool, "args": {
+            result = probe.tool("accessibility", steps=[{"tool": tool, "args": {
                 "element_token": row["element_token"], field: text}}],
-                observe={"kind": "window", **target})
+                observations=[target["window_id"]])
             assert result["status"] == "ok", result
-            actual = next(row for row in result["observation"]["elements"] if row["label"] == "Probe field")
+            actual = next(row for row in result["observations"][0]["elements"] if row["label"] == "Probe field")
             assert actual.get("value", "") == expected, actual
             record("text", tool=tool, value=actual.get("value"), warnings=result.get("warnings"))
 
@@ -180,28 +184,76 @@ def main():
             tree = snapshot()
             row = next(row for row in tree["elements"] if row["label"] == label)
             assert (row["value"], row["minimum"], row["maximum"]) == (80, 0, 100), row
-            result = probe.tool("computer", steps=[{"tool": "set_value", "args": {
+            result = probe.tool("accessibility", steps=[{"tool": "set_value", "args": {
                 "element_token": row["element_token"], "value": "50"}}],
-                observe={"kind": "window", **target, "screenshot": False})
+                observations=[target["window_id"]])
             assert result["status"] == "ok", result
-            actual = next(row for row in result["observation"]["elements"] if row["label"] == label)
+            actual = next(row for row in result["observations"][0]["elements"] if row["label"] == label)
             assert actual["value"] == 50, actual
             # This page text changes only from the application's event handler.
-            assert any(row.get("label") == readback for row in result["observation"]["elements"]), result
+            assert any(row.get("label") == readback for row in result["observations"][0]["elements"]), result
             record("numeric", target=label, value=actual["value"], application_readback=readback)
 
         tree = snapshot()
         row = next(row for row in tree["elements"] if row["label"] == "Address and search bar")
-        result = probe.tool("computer", steps=[{"tool": "set_value", "args": {
+        result = probe.tool("accessibility", steps=[{"tool": "set_value", "args": {
             "element_token": row["element_token"], "value": "about:blank"}}],
-            observe={"kind": "window", **target})
+            observations=[target["window_id"]])
         assert result["status"] == "ok", result
-        address = next(row for row in result["observation"]["elements"] if row["label"] == "Address and search bar")
+        address = next(row for row in result["observations"][0]["elements"] if row["label"] == "Address and search bar")
         assert address.get("value") == "about:blank", address
         # Discard the address edit in our isolated profile without navigating.
-        dismissed = probe.tool("computer", steps=[{"tool": "press_keys", "args": {"keys": ["Escape"]}}])
+        dismissed = probe.tool("vision", steps=[{"tool": "press_keys", "args": {"keys": ["Escape"]}}])
         assert dismissed["status"] == "ok", dismissed
         record("address-bar", tool="set_value", value=address["value"], dismissed=True)
+
+    def check_frontends(probe, title):
+        metadata = {"io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities": {}}
+        normal = probe.call("tools/list", {"_meta": metadata})["tools"]
+        assert [tool["name"] for tool in normal] == ["status", "vision", "accessibility"], normal
+        hidden = Probe(args.guest, args.artifacts, "no-vision", no_vision=True)
+        probes.append(hidden)
+        disabled = hidden.call("tools/list", {"_meta": metadata})["tools"]
+        assert [tool["name"] for tool in disabled] == ["status", "accessibility"], disabled
+        rejected = hidden.call("tools/call", {"name": "vision", "arguments": {}})
+        assert rejected["isError"] and rejected["structuredContent"]["code"] == "unknown_tool", rejected
+        status = probe.tool("status")
+        window = next(window["window_id"] for app in status["apps"] for window in app["windows"]
+                      if title in window["title"])
+        orientation = probe.tool("vision", observe={"kind": "window", "window_id": window})["observation"]
+        reload = next(row for row in orientation["elements"] if row["label"] == "Reload")
+        probe.tool("accessibility", steps=[{"tool": "activate", "args": {"element_token": reload["element_token"]}}])
+        entry = next(row for row in orientation["elements"] if row["label"] == "Address and search bar")
+        edited = probe.tool("accessibility", steps=[
+            {"tool": "set_value", "args": {"element_token": entry["element_token"], "value": "about:blank"}},
+            {"tool": "type_text", "args": {"element_token": entry["element_token"], "text": "#scu"}}])
+        assert edited["completed"] == 2 and edited["observations"] == [], edited
+        # Renew the canvas explicitly after input mapping initialization. Keyboard
+        # fallback itself must return no automatic screenshot or tree observation.
+        status = hidden.call("tools/call", {"name": "status", "arguments": {}})
+        assert not status["isError"] and not any(block["type"] == "image" for block in status["content"]), status
+        windows = [window for app in status["structuredContent"]["apps"] for window in app["windows"]]
+        window = next(window["window_id"] for window in windows if title in window["title"])
+        missing = max(item["window_id"] for item in windows) + 99999
+        trees = hidden.call("tools/call", {"name": "accessibility", "arguments": {
+            "observations": [missing, window, window]}})
+        assert trees["isError"], trees
+        observations = trees["structuredContent"]["observations"]
+        assert [item["window_id"] for item in observations] == [missing, window], observations
+        assert observations[0]["error"]["code"] == "window_unavailable", observations
+        entry = next(row for row in observations[1]["elements"] if row["label"] == "Address and search bar")
+        assert entry["value"] == "about:blank#scu", entry
+        probe.tool("vision", steps=[{"tool": "press_keys", "args": {"keys": ["Escape"]}}], observe=False)
+        assert not any(block["type"] == "image" for block in trees["content"]), trees
+        # A normal frontend continues to return images while --no-vision remains connected.
+        visible = probe.call("tools/call", {"name": "vision", "arguments": {}})
+        assert not visible["isError"] and any(block["type"] == "image" for block in visible["content"]), visible
+        record("split-frontends", normal=[tool["name"] for tool in normal],
+               no_vision=[tool["name"] for tool in disabled], status_images=0,
+               partial_observations=[item["window_id"] for item in observations], normal_images=True,
+               targeted_editing=entry["value"], warnings=edited.get("warnings"))
+        hidden.close()
 
     # Kill only instances using our unique profile, including Flatpak sub-sandboxes.
     cleanup = """import subprocess,sys,shutil
@@ -226,6 +278,7 @@ shutil.rmtree(profile,ignore_errors=True)
         complete = observe(first, after, "browser-started-after-activation")
         if complete:
             exercise(first, after)
+        check_frontends(first, after)
         diagnostics = ('gsettings get org.gnome.desktop.interface toolkit-accessibility; '
             'gdbus call --address "$AT_SPI_BUS_ADDRESS" --dest org.a11y.atspi.Registry '
             '--object-path /org/a11y/atspi/registry --method org.a11y.atspi.Registry.GetRegisteredEvents; '

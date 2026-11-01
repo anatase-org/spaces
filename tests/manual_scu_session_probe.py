@@ -18,8 +18,8 @@ import uuid
 
 
 class Probe:
-    def __init__(self, guest, artifacts, label):
-        self.process = subprocess.Popen(["ssh", "-o", "BatchMode=yes", guest, "scu", "mcp"],
+    def __init__(self, guest, artifacts, label, *, no_vision=False):
+        self.process = subprocess.Popen(["ssh", "-o", "BatchMode=yes", guest, "scu", "mcp", *(["--no-vision"] if no_vision else [])],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=(artifacts / f"{label}-stderr.log").open("w"), text=True)
         self.serial, self.artifacts, self.label = 0, artifacts, label
         self.call("initialize", {"protocolVersion": "2025-11-25"})
@@ -37,6 +37,8 @@ class Probe:
 
     def tool(self, name, **arguments):
         reply = self.call("tools/call", {"name": name, "arguments": arguments})
+        if name == "accessibility":
+            assert not any(block["type"] == "image" for block in reply.get("content", [])), reply
         prefix = f"{self.label}-{self.serial:02d}-{name}"
         for index, block in enumerate(reply.get("content", [])):
             if block["type"] == "image":
@@ -157,18 +159,19 @@ def main():
         target = next({"window_id": window["window_id"]}
                       for app in status["apps"] for window in app["windows"]
                       if window["title"] == "Spaces AT-SPI fixture " + token)
-        tree = probe.tool("computer", observe={"kind": "window", **target})["observation"]
+        tree = probe.tool("vision", observe={"kind": "window", **target})["observation"]
         rows = {item["label"]: item for item in tree["elements"]}
         return status, rows
 
     def focus_entry(probe):
         status, rows = fixture_window(probe)
         frame = rows["Spaces fixture entry"]["frame"]
-        probe.tool("computer", id=status["canvas"]["id"], steps=[
+        probe.tool("vision", id=status["canvas"]["id"], observe=False, steps=[
             {"tool": "click", "args": {"x": frame["x"] + frame["width"] / 2,
-                                       "y": frame["y"] + frame["height"] / 2}},
+                                       "y": frame["y"] + frame["height"] / 2}}])
+        probe.tool("accessibility", steps=[
             {"tool": "set_value", "args": {"element_token": rows["Spaces fixture entry"]["element_token"], "value": ""}},
-        ], observe=False)
+        ])
         return rows
 
     def lock_visible():
@@ -225,7 +228,7 @@ def main():
             assert (current["canvas"]["width"], current["canvas"]["height"]) == (1280, 720), current["canvas"]
             rows = focus_entry(first)
             expected = "Headless " + token
-            first.tool("computer", steps=[{"tool": "type_text", "args": {"text": expected}}], observe=False)
+            first.tool("vision", steps=[{"tool": "type_text", "args": {"text": expected}}], observe=False)
             assert fixture_state()["text"] == expected
             assert not locked()
             helpers = host("pgrep", "-af", "^/usr/bin/krfb-virtualmonitor --name Spaces-SCU-")
@@ -254,8 +257,8 @@ def main():
             rows = focus_entry(first)
             clicks = fixture_state()["clicks"]
             lock_visible()
-            first.tool("computer", steps=[{"tool": "activate", "args": {
-                "element_token": rows["Spaces fixture button"]["element_token"]}}], observe=False)
+            first.tool("accessibility", steps=[{"tool": "activate", "args": {
+                "element_token": rows["Spaces fixture button"]["element_token"]}}])
             assert fixture_state()["clicks"] == clicks + 1
             assert locked(), "accessibility action unlocked the session"
             record("accessibility-stayed-locked", fixture=fixture_state())
@@ -265,7 +268,7 @@ def main():
             focus_entry(first)
             lock_visible()
             expected = "Unlocked EIS " + token
-            first.tool("computer", steps=[{"tool": "type_text", "args": {"text": expected}}], observe=False)
+            first.tool("vision", steps=[{"tool": "type_text", "args": {"text": expected}}], observe=False)
             wait(lambda: not locked(), "EIS did not unlock")
             assert fixture_state()["text"] == expected, fixture_state()
             assert any(item["name"].startswith("eDP") and item["enabled"] for item in outputs())

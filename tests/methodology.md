@@ -507,7 +507,8 @@ a user action; never run `sync.sh --selinux` as the agent.
 
 ### Current KWin-only backend
 
-`scu mcp` exposes exactly `status` and `computer` over stdio. All computer use
+`scu mcp` exposes exactly `status`, `vision`, and `accessibility` over stdio.
+There is no `computer` alias. All computer use
 requires the **Plus Accessibility and Agent computer use** desktop tier. Basic
 and disabled spaces receive a configuration error with `spaces configure
 <space>`. MCP initialization and schema discovery remain available without the
@@ -545,10 +546,10 @@ private pipe protocol are unchanged.
 Before screenshots or EIS input, the host checks the selected session through
 logind, requests `Unlock()` when needed and waits for both logind and the screen
 locker. The unlock wait is bounded to five seconds and the request deadline.
-It leaves the desktop unlocked afterward. Accessibility-only steps with
-`observe:false` or a window observation with `screenshot:false`, and pure delays,
-do not unlock the desktop. Window observations include screenshots by default
-and therefore require unlocking.
+It leaves the desktop unlocked afterward. Semantic accessibility actions,
+accessibility observations, vision window observations with `screenshot:false`,
+and pure delays do not unlock the desktop. Verified keyboard editing may unlock.
+Vision window observations include screenshots by default and require unlocking.
 
 While MCP clients are connected, `kscreen-doctor` supplies the output inventory.
 If none is usable, the host supervises one `krfb-virtualmonitor` at 1280x720,
@@ -587,20 +588,29 @@ Window enumeration and placement come from KWin, including applications without
 AT-SPI support. Window IDs are unique and stable within the SCU host lifetime. Status must return
 an error if any required library, the accessibility registry, KWin input or
 capture is unavailable. It returns no health text, partial metadata or image on
-failure. `computer` checks the same prerequisites before starting a batch.
+failure. Both batch tools check the same prerequisites before starting a batch.
 MCP initialization and schema discovery remain usable without those prerequisites.
 Status does not report success with a null canvas. Its
 entire operation is bounded to 30 seconds. Explicit cancellation and clean EOF
 release input and close the host connection.
 
-`computer` accepts only `steps`, `observe`, and optional `id`.
-The capture `id` is a positive integer, starting at 1 for each MCP process.
+`scu mcp --no-vision` exposes only `status` and `accessibility`, rejects direct
+`vision` calls, and returns no status image blocks. This flag belongs to the MCP
+frontend; a normal client on the same shared host still has vision and images.
+Status still captures internally, initializes the canvas, and may unlock. Tree
+reads require that valid overview. Discovery and server instructions reflect the
+flag. Empty modern client capabilities still expose vision by default: the
+[MCP client capability schema](https://modelcontextprotocol.io/specification/2026-07-28/schema#clientcapabilities)
+has no standard flag describing model vision support. SCU performs no inference
+from client names, absent capabilities, or sampling support.
+
+`vision` accepts only `steps`, `observe`, and optional `id`.
+The capture `id` is a positive integer issued by the shared host.
 The same numeric ID appears in canvas, desktop/zoom and tree observations.
 An explicit pixel-step `id` overrides the batch ID; omission uses the latest
 valid overview. Strings and the old `capture_id` spelling are rejected.
-Steps are ordered `{tool,args}` objects, at most 64. The supported actions are
-`click`, `move_cursor`, `drag`, `scroll`, `press_keys`, `activate`,
-`open_context_menu`, `type_text`, `set_value`, and `delay_ms`. Use `click` with `button:"right"` or `count:2`,
+Steps are ordered `{tool,args}` objects, at most 64. Vision actions, in schema order, are `click`, `move_cursor`, `drag`, `scroll`,
+`press_keys`, untargeted `type_text`, and `delay_ms`. Use `click` with `button:"right"` or `count:2`,
 and `press_keys` with `keys:["ctrl","a"]` for chords. A standalone Meta key is
 `press_keys` with `keys:["meta"]`. Keys are pressed in listed order and released
 in reverse, so modifier keys come first. Whole-batch validation precedes effects; execution
@@ -609,6 +619,29 @@ stops at the first runtime failure without replay. Responses report
 any material warnings.
 Observation failure is separate from completed actions and also sets status to
 `failed`; actions already completed remain counted.
+
+`accessibility` accepts only optional `steps` and `observations:[window_id,...]`.
+Its actions, in order, are `activate`, `open_context_menu`, targeted `type_text`,
+`set_value`, and `delay_ms`. Targeted text requires `element_token`; vision text
+rejects it. Both schemas put delay last and reject cross-tool actions before any
+batch effects. Tool descriptions, argument variants, action membership,
+observation declarations and server instructions are maintained together in
+`native/scu_mcp.h`; discovery and runtime validation consume that catalog.
+
+Accessibility executes actions before reading windows, so a token from a vision
+observation can be used directly. Omitted observations or `[]` reads no trees.
+The response includes an `observations` array and never images, including after
+verified keyboard editing. At most 64 steps and 64 requested window IDs are
+accepted. Each distinct window is read once, in input order, with the existing
+per-tree budgets. A window error preserves other successful results and marks
+the batch failed; cancellation, revocation and session failure stop further work.
+For example, one missing window followed by a readable window returns:
+
+```json
+{"completed":0,"status":"failed","observations":[{"window_id":99,"error":{"code":"window_unavailable","hint":"KWin window is unavailable. Call status again."}},{"window_id":1,"id":2,"elements":[]}]}
+```
+
+Vision keeps the previous single-observation shape:
 
 ```json
 {"status":"ok","completed":2,"observation":{"id":2,"width":1600,"height":900}}
@@ -620,10 +653,11 @@ Step failures identify the zero-based index and stop the remaining sequence:
 {"status":"failed","completed":1,"failed":{"index":1,"tool":"click","code":"invalid_coordinates","hint":"Coordinates lie outside the full desktop overview."}}
 ```
 
-Without any `delay_ms` step, a batch pauses 150 ms between steps and before its
-final screenshot. Empty observations have no added pause. Any explicit delay,
-including zero, disables all automatic pauses for that batch. Automatic pauses
-remain cancellable and stop on permission loss; they do not count as steps.
+Batches pause 150 ms between actions unless an adjacent explicit delay supplies
+the gap. Vision waits 300 ms before its final observation unless a completed
+trailing delay supplies that wait. A zero delay replaces only its own gap.
+Automatic pauses remain cancellable and stop on permission loss; they do not
+count as steps.
 
 `delay_ms` is an explicit step with a required integer `ms` from 0 to 30000;
 the old top-level `delay_ms` argument is rejected. Place delays between actions
@@ -643,11 +677,11 @@ They are fixed timers and do not check whether an application has finished.
 
 This submits Enter, waits 1.5 seconds, then returns one screenshot. A delay-only
 sequence waits before observing; `observe:false` suppresses that observation.
-Adding delays to semantic-only sequences does not start a visual session.
+Accessibility delays do not request screenshots or start a visual session.
 
-An empty call captures a full overview. Foreground batches return one final
+An empty vision call captures a full overview. Vision batches return one final
 full overview automatically; `observe:false` suppresses it and an explicit
-observation replaces it. Semantic-only batches do not capture automatically.
+observation replaces it. Accessibility never captures automatically.
 Desktop observation metadata contains `id`, `width`, `height`, and
 `zoom` when requested. Width and height describe the returned image, including
 zoom crops; the global input coordinate frame remains the full overview.
@@ -927,7 +961,7 @@ broken accessibility bridges, no-input/no-capture failures and recovery. Native
 build and GLIBC ≤ 2.17 / architecture checks passed. This update was built and
 tested locally before deployment.
 
-Current deployed contract verification, 2026-11-01: ordinary `./sync.sh win5`
+Earlier deployed contract verification, 2026-11-01 (before the tool split): ordinary `./sync.sh win5`
 installed the current executable and restarted Fedora. A fresh `ssh win5f` MCP
 client verified `status` returns only canvas/apps plus its PNG, with numeric
 canvas ID. An empty `computer` call returned:
@@ -1215,8 +1249,8 @@ existing `stale_element` behavior.
 `click` requires `x` and `y`, with optional capture `id`, mouse `button` and
 `count`. It rejects element tokens before any batch effects. Middle and repeated
 clicks use explicit pixel coordinates; there is no automatic conversion from a
-token into pointer input. The semantic actions appear together before `delay_ms`,
-which remains last in the schema.
+token into pointer input. Semantic actions are grouped in `accessibility`;
+`delay_ms` remains last in both batch schemas.
 
 The browser probe uses semantic activation for buttons, links, an offscreen
 button and a custom context-menu item. It opens the link's menu through
@@ -1254,3 +1288,74 @@ and native ABI checks passed again, including schema order, preflight rejection,
 unsupported actions, stale tokens, offscreen activation, locked-desktop behavior
 and physical button/count delivery. Private fixtures also cover last-client
 cleanup and fresh socket activation.
+
+### Split status, vision and accessibility tools
+
+The public MCP catalog now contains exactly `status`, `vision` and
+`accessibility`, with no `computer` alias. The existing prose is retained where
+applicable; the vision description now directs subsequent tree reads to
+accessibility. Descriptions, argument variants, observation declarations, action
+membership, server instructions and the `usage` help constant live together in
+`native/scu_mcp.h`. `/tmp/scu-schema.json` contains the refreshed discovery output.
+
+Reproduce the regression and browser checks with:
+
+```sh
+PYTHONPATH=src python -m unittest \
+  tests.test_scu tests.test_computer_integration tests.test_launch tests.test_native_abi
+make -C native check-guest-abi
+./sync.sh win5
+python tests/manual_scu_browser_probe.py --artifacts .build/scu-split-browser-final
+```
+
+On 2026-11-01, all **227 regression tests passed** in 188.076 seconds, and native
+ABI checks passed. Four subsequent focused checks passed after extending
+multi-window cancellation, locked accessibility reads, missing-overview handling
+and argument preflight coverage. The stale-token hint was updated to the split
+API and its handoff/staleness regression passed again. Fixtures check exact
+catalog order, targeted versus untargeted text, cross-tool rejection before
+input, 64-item limits, ordered deduplication, successful windows around failed
+observations, token handoff and invalidation, cancellation, and keyboard editing
+without captures. Modern requests with empty capabilities retain vision unless
+`--no-vision` was explicitly selected. Differently configured frontends share
+the host without changing one another's discovery or image responses.
+
+After ordinary sync, the complete browser probe exited successfully through
+`win5f`. A normal isolated profile launched after SCU activation exposed the
+page heading, button and input, with a 60-element tree. Pixel double-click and
+middle-click/new-tab behavior passed. Accessibility handled context menus,
+button/link/offscreen activation, text insertion/replacement, native and ARIA
+sliders with application readback, and address-bar editing. All accessibility
+responses omitted images, including verified keyboard fallback. Later snapshots
+in the probe use accessibility rather than repeated vision screenshots.
+
+The same run verified normal discovery of three tools and `--no-vision`
+discovery of two, using modern empty capabilities. Direct calls to hidden vision
+were rejected. The no-vision status response contained no image; a simultaneous
+normal client continued to receive images. A missing window followed by a valid
+window returned an associated error and the successful tree; duplicate window
+IDs were read once. Targeted address-bar editing returned no automatic
+observation. The probe explicitly renewed the overview before further tree
+reads, rather than repairing input-mapping invalidation with a hidden capture.
+
+Cold activation changed `IsEnabled` from false to true and registered one
+consumer (`MainPID=139891`). Closing one client retained that consumer. Closing
+the last client removed it, reset `IsEnabled` and stopped the host. Reconnection
+started a new host (`MainPID=141090`) and returned the existing profile's page
+controls again. Dedicated Flatpak AT-SPI registry queries independently showed
+the consumer; toolkit-accessibility GSettings remained false. No launch used
+accessibility environment overrides or force-renderer flags, and no Flatpak
+permissions were changed. Probe profiles were removed, the user's existing
+browser session was preserved, and the final state was `MainPID=0`, no
+registered consumers and SELinux `Enforcing`.
+
+Earlier attempts during this validation exposed browser chrome but an empty
+renderer document: 49 untruncated SCU rows, with a direct independent AT-SPI
+walk also reporting a zero-child `document web`. This was not SCU output-budget
+truncation. The final successful run does not establish reliable renderer
+activation on every cold launch. An isolated browser started before consumer
+activation also remained unmatched in its initial check; in-place recovery was
+not demonstrated. These startup limitations remain separate from the tool split.
+Diagnostic artifacts are in `.build/scu-split-browser`,
+`.build/scu-split-browser-diagnostic` and `.build/scu-split-browser-active-first`;
+the accepted complete run is `.build/scu-split-browser-final`.

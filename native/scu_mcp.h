@@ -17,6 +17,300 @@
 #include <unistd.h>
 #define MAX_CAPTURE_ID G_GUINT64_CONSTANT(9007199254740991)
 #define MAX_IMAGE_DIMENSION 2048
+
+/* Public catalog: usage, descriptions, argument variants, membership and observations. */
+static const char usage[] =
+    "scu - Spaces computer use\n"
+    "\n"
+    "Usage: scu mcp [--no-vision]  Serve MCP over stdin/stdout.\n"
+    "       scu --help    Show this help.\n"
+    "\n"
+    "Enroll with your agent from inside the Space, as the agent's user:\n"
+    "  Codex:\n"
+    "    codex mcp add scu -- scu mcp\n"
+    "  Claude Code:\n"
+    "    claude mcp add --transport stdio --scope user scu -- scu mcp\n"
+    "  Other MCP clients: command \"scu\", arguments [\"mcp\"], transport stdio.\n"
+    "\n"
+    "Use --no-vision to hide vision and omit images from status.\n"
+    "Reload the agent's MCP connections after enrollment.\n"
+    "\n"
+    "Host permission: run `sudo spaces configure <space>` on the host and\n"
+    "enable Accessibility and Agent computer use or use the Development preset.\n";
+
+static const char server_instructions[] =
+    "Computer use MCP server. Control the host desktop: screenshots, mouse, "
+    "keyboard, and accessibility. Use `status` to inspect the desktop, "
+    "`vision` for pointer/keyboard actions and screenshots, and `accessibility` "
+    "for element actions and window trees.";
+static const char no_vision_instructions[] =
+    "Computer use MCP server. Control the host desktop through accessibility. "
+    "Start with status for canvas metadata and window IDs, "
+    "then use accessibility for element actions and window trees. ",
+    "This MCP has no vision support.";
+
+static const char status_description[] =
+    "Run first for health checks, canvas metadata, apps/windows and a full desktop screenshot. "
+    "Window bounds, element frames and pixel actions share the full screenshot's coordinates. "
+    "Screenshots unlock the host desktop when needed. ";
+static const char no_vision_status_description[] =
+    "Run first for health checks, canvas metadata, apps and windows. Initializes the desktop overview internally "
+    "and may unlock the desktop. Returns no images.";
+
+static const char vision_description[] =
+    "Execute up to 64 JSON steps shaped {tool,args}, in order and stop "
+    "on failure. Returns one final observation. "
+    "Responses report status:ok/failed and the completed step count. "
+    "Insert {tool:delay_ms,args:{ms:500}} to pause anywhere, the final "
+    "observation waits for all steps including trailing delays (there are "
+    "some default delays if not provided). "
+    "Use observe:false to skip observation or observe:{kind:window,window_id} "
+    "for a screenshot and an accessibility tree. "
+    "Prefer the accessibility tree to locate controls when working with a "
+    "single application, especially browsers. "
+    "When the tree provides the controls you need, use "
+    "accessibility with observations:[window_id] for subsequent trees "
+    "to skip the screenshot. "
+    "All pixel coordinates are global to the full overview, including after "
+    "observe.zoom. "
+    "Use zoom:[left,top,right,bottom] to read native detail on large desktops. "
+    "Screenshots and foreground input unlock the host desktop when needed; "
+    "tree-only observations leave it locked. ";
+static const char observation_description[] =
+    "Omit for a desktop image with no steps or after foreground input; false disables it. "
+    "Use {kind:desktop,zoom:[left,top,right,bottom]} for an image or native-detail crop. "
+    "Use {kind:window,window_id} for a compact accessibility tree and window screenshot. "
+    "Add screenshot:false for only the tree. "
+    "An explicit object replaces automatic observation. Zoom coordinates and all actions "
+    "stay in the full overview's global pixel space; zoom never changes that frame.";
+static const char accessibility_description[] =
+    "Execute up to 64 JSON steps shaped {tool,args}, in order and stop "
+    "on failure. Responses report status:ok/failed and the completed step count. "
+    "Insert {tool:delay_ms,args:{ms:500}} to pause anywhere. "
+    "Use observations:[window_id,...] for accessibility trees after all steps, "
+    "including trailing delays. Omit observations or pass [] to skip tree reads. "
+    "Returns observations without images. Element actions can target offscreen controls. "
+    "Accessibility-only steps and tree-only observations leave the host desktop locked; "
+    "keyboard editing unlocks it when needed. ";
+
+typedef enum {
+    ARG_STRING,
+    ARG_NUMBER,
+    ARG_INTEGER,
+    ARG_BOOLEAN,
+    ARG_STRING_ARRAY,
+    ARG_OBJECT,
+    ARG_OBJECT_ARRAY,
+    ARG_NUMBER_ARRAY,
+    ARG_INTEGER_ARRAY,
+} ArgumentType;
+
+typedef struct {
+    const char *name;
+    ArgumentType type;
+    const char *const *choices;
+    double minimum;
+    double maximum; /* Zero means no bound in this argument definition. */
+    const char *description;
+} Argument;
+
+typedef enum {
+    ARGS_NONE = 0,
+    ARGS_ACTION = 1 << 0,
+    ARGS_POINT = 1 << 1,
+    ARGS_WINDOW = 1 << 2,
+} ArgumentGroups;
+
+typedef enum { BATCH_NONE = 0, BATCH_VISION = 1, BATCH_ACCESSIBILITY = 2 } BatchKind;
+
+typedef struct {
+    const char *name;
+    const char *description;
+    ArgumentGroups groups;
+    const Argument *arguments;
+    const char *const *required;
+    gboolean action;
+    BatchKind batch, modes;
+    const char *const *targeted_required;
+} Tool;
+
+static const char *const pointer_buttons[] = {"left", "right", "middle", NULL};
+static const char *const scroll_directions[] = {"up", "down", "left", "right", NULL};
+
+static const Argument action_arguments[] = {
+    {.name = "element_token", .type = ARG_STRING},
+    {NULL},
+};
+static const Argument point_arguments[] = {
+    {.name = "x", .type = ARG_NUMBER},
+    {.name = "y", .type = ARG_NUMBER},
+    {.name = "id", .type = ARG_INTEGER, .minimum = 1, .maximum = MAX_CAPTURE_ID},
+    {NULL},
+};
+static const Argument window_arguments[] = {
+    {.name = "window_id", .type = ARG_INTEGER},
+    {.name = "screenshot", .type = ARG_BOOLEAN,
+        .description = "Include a window screenshot (default true). False returns only the tree "
+            "and requires a valid previous desktop overview."},
+    {NULL},
+};
+static const Argument capture_arguments[] = {
+    {.name = "zoom", .type = ARG_NUMBER_ARRAY, .minimum = 4, .maximum = 4,
+        .description = "[left,top,right,bottom] in full-overview coordinates. Read native detail without changing the global coordinate frame or capture ID."},
+    {NULL},
+};
+static const Argument click_arguments[] = {
+    {.name = "button", .type = ARG_STRING, .choices = pointer_buttons},
+    {.name = "count", .type = ARG_INTEGER, .minimum = 1, .maximum = 3},
+    {NULL},
+};
+static const Argument drag_arguments[] = {
+    {.name = "id", .type = ARG_INTEGER, .minimum = 1, .maximum = MAX_CAPTURE_ID},
+    {.name = "from_x", .type = ARG_NUMBER},
+    {.name = "from_y", .type = ARG_NUMBER},
+    {.name = "to_x", .type = ARG_NUMBER},
+    {.name = "to_y", .type = ARG_NUMBER},
+    {.name = "duration_ms", .type = ARG_INTEGER, .minimum = 0, .maximum = 10000},
+    {.name = "button", .type = ARG_STRING, .choices = pointer_buttons},
+    {NULL},
+};
+static const Argument scroll_arguments[] = {
+    {.name = "direction", .type = ARG_STRING, .choices = scroll_directions},
+    {.name = "amount", .type = ARG_INTEGER, .minimum = 1, .maximum = 700},
+    {NULL},
+};
+static const Argument text_arguments[] = {
+    {.name = "text", .type = ARG_STRING},
+    {NULL},
+};
+static const Argument value_arguments[] = {
+    {.name = "value", .type = ARG_STRING},
+    {NULL},
+};
+static const Argument key_arguments[] = {
+    {.name = "keys", .type = ARG_STRING_ARRAY, .minimum = 1, .maximum = 5},
+    {NULL},
+};
+static const Argument delay_arguments[] = {
+    {.name = "ms", .type = ARG_INTEGER, .minimum = 0, .maximum = 30000,
+        .description = "Milliseconds to wait."},
+    {NULL},
+};
+static const Argument vision_arguments[] = {
+    {.name = "steps", .type = ARG_OBJECT_ARRAY, .maximum = 64,
+        .description = "Optional ordered {tool,args} actions. Omit or pass [] to observe without acting."},
+    {.name = "observe", .type = ARG_OBJECT},
+    {.name = "id", .type = ARG_INTEGER, .minimum = 1, .maximum = MAX_CAPTURE_ID,
+        .description = "Optional full-overview capture used for pixel steps and zoom. Omission uses the latest overview."},
+    {NULL},
+};
+
+static const Argument accessibility_arguments[] = {
+    {.name = "steps", .type = ARG_OBJECT_ARRAY, .maximum = 64,
+        .description = "Optional ordered {tool,args} actions."},
+    {.name = "observations", .type = ARG_INTEGER_ARRAY, .maximum = 64,
+        .description = "Window IDs to read after acting, once per distinct ID in input order. Omit or pass [] to skip tree reads."},
+    {NULL},
+};
+static const char *const require_window[] = {"window_id", NULL};
+static const char *const require_point[] = {"x", "y", NULL};
+static const char *const require_element[] = {"element_token", NULL};
+static const char *const require_drag[] = {"from_x", "from_y", "to_x", "to_y", NULL};
+static const char *const require_scroll[] = {"x", "y", "direction", NULL};
+static const char *const require_text[] = {"text", NULL};
+static const char *const require_targeted_text[] = {"element_token", "text", NULL};
+static const char *const require_value[] = {"element_token", "value", NULL};
+static const char *const require_keys[] = {"keys", NULL};
+static const char *const require_delay[] = {"ms", NULL};
+
+/* Observation schemas are shared by validation and tools/list. */
+static const Tool desktop_schema = {
+    .name = "desktop",
+    .groups = ARGS_NONE,
+    .arguments = capture_arguments,
+};
+
+static const Tool window_schema = {
+    .name = "window",
+    .groups = ARGS_WINDOW,
+    .required = require_window,
+};
+
+static const Tool *const observation_schemas[] = {&desktop_schema, &window_schema};
+
+static const Tool tools[] = {
+    {.name = "status",
+        status_description,
+        ARGS_NONE},
+    {.name = "vision",
+        vision_description,
+        .arguments = vision_arguments, .action = TRUE, .batch = BATCH_VISION},
+    {.name = "accessibility",
+        accessibility_description,
+        .arguments = accessibility_arguments, .action = TRUE, .batch = BATCH_ACCESSIBILITY},
+};
+
+/* Actions are batch steps, never standalone MCP tools. */
+static const Tool action_tools[] = {
+    {.name = "click",
+        "Click desktop image coordinates.",
+        ARGS_POINT,
+        click_arguments,
+        require_point,
+        .action = TRUE, .modes = BATCH_VISION},
+    {.name = "move_cursor",
+        "Move the foreground pointer in desktop image coordinates.",
+        ARGS_POINT,
+        .required = require_point,
+        .action = TRUE, .modes = BATCH_VISION},
+    {.name = "drag",
+        "Drag across the combined canvas using full-overview coordinates.",
+        ARGS_NONE,
+        drag_arguments,
+        require_drag,
+        TRUE, .modes = BATCH_VISION},
+    {.name = "scroll",
+        "Scroll at desktop coordinates for a number of lines.",
+        ARGS_POINT,
+        scroll_arguments,
+        require_scroll,
+        TRUE, .modes = BATCH_VISION},
+    {.name = "press_keys",
+        "Press keys in listed order and release in reverse; put modifiers first. Use keys:[meta] for a single key or keys:[ctrl,a] for a chord.",
+        ARGS_NONE,
+        key_arguments,
+        require_keys,
+        TRUE, .modes = BATCH_VISION},
+    {.name = "activate",
+        "Perform an element's default action, such as following a link or pressing a button.",
+        ARGS_ACTION,
+        .required = require_element,
+        .action = TRUE, .modes = BATCH_ACCESSIBILITY},
+    {.name = "open_context_menu",
+        "Open an element's context menu.",
+        ARGS_ACTION,
+        .required = require_element,
+        .action = TRUE, .modes = BATCH_ACCESSIBILITY},
+    {.name = "type_text",
+        "Insert text at the caret without pressing Enter.",
+        ARGS_NONE,
+        text_arguments,
+        require_text,
+        TRUE, .targeted_required = require_targeted_text, .modes = BATCH_VISION | BATCH_ACCESSIBILITY},
+    {.name = "set_value",
+        "Replace a text field's contents or set a numeric control's value.",
+        ARGS_ACTION,
+        value_arguments,
+        require_value,
+        TRUE, .modes = BATCH_ACCESSIBILITY},
+    {.name = "delay_ms",
+        "Wait 0-30000 milliseconds before continuing. Use a trailing delay to wait before the final observation.",
+        ARGS_NONE,
+        delay_arguments,
+        require_delay,
+        TRUE, .modes = BATCH_VISION | BATCH_ACCESSIBILITY},
+};
+
 /* Shared response state and JSON construction helpers. */
 typedef yyjson_val JsonValue;
 typedef yyjson_mut_val JsonResult;
@@ -99,7 +393,7 @@ static gboolean scu_tick(void);
 static GAsyncQueue *requests;
 static GMutex active_lock;
 static char *active_id;
-static gboolean modern, initialized;
+static gboolean modern, initialized, no_vision;
 static GHashTable *cancelled_ids;
 static JsonResult *scu_fail(const char *code, const char *hint)
 {
@@ -110,245 +404,32 @@ static JsonResult *scu_fail(const char *code, const char *hint)
     return NULL;
 }
 
-typedef enum {
-    ARG_STRING,
-    ARG_NUMBER,
-    ARG_INTEGER,
-    ARG_BOOLEAN,
-    ARG_STRING_ARRAY,
-    ARG_OBJECT,
-    ARG_OBJECT_ARRAY,
-    ARG_NUMBER_ARRAY,
-} ArgumentType;
-
-typedef struct {
-    const char *name;
-    ArgumentType type;
-    const char *const *choices;
-    double minimum;
-    double maximum; /* Zero means no bound in this argument definition. */
-    const char *description;
-} Argument;
-
-typedef enum {
-    ARGS_NONE = 0,
-    ARGS_ACTION = 1 << 0,
-    ARGS_POINT = 1 << 1,
-    ARGS_WINDOW = 1 << 2,
-} ArgumentGroups;
-
-typedef struct {
-    const char *name;
-    const char *description;
-    ArgumentGroups groups;
-    const Argument *arguments;
-    const char *const *required;
-    gboolean action;
-} Tool;
-
-static const char *const pointer_buttons[] = {"left", "right", "middle", NULL};
-static const char *const scroll_directions[] = {"up", "down", "left", "right", NULL};
-
-static const Argument action_arguments[] = {
-    {.name = "element_token", .type = ARG_STRING},
-    {NULL},
-};
-static const Argument point_arguments[] = {
-    {.name = "x", .type = ARG_NUMBER},
-    {.name = "y", .type = ARG_NUMBER},
-    {.name = "id", .type = ARG_INTEGER, .minimum = 1, .maximum = MAX_CAPTURE_ID},
-    {NULL},
-};
-static const Argument window_arguments[] = {
-    {.name = "window_id", .type = ARG_INTEGER},
-    {.name = "screenshot", .type = ARG_BOOLEAN,
-        .description = "Include a window screenshot (default true). False returns only the tree "
-            "and requires a valid previous desktop overview."},
-    {NULL},
-};
-static const Argument capture_arguments[] = {
-    {.name = "zoom", .type = ARG_NUMBER_ARRAY, .minimum = 4, .maximum = 4,
-        .description = "[left,top,right,bottom] in full-overview coordinates. Read native detail without changing the global coordinate frame or capture ID."},
-    {NULL},
-};
-static const Argument click_arguments[] = {
-    {.name = "button", .type = ARG_STRING, .choices = pointer_buttons},
-    {.name = "count", .type = ARG_INTEGER, .minimum = 1, .maximum = 3},
-    {NULL},
-};
-static const Argument drag_arguments[] = {
-    {.name = "id", .type = ARG_INTEGER, .minimum = 1, .maximum = MAX_CAPTURE_ID},
-    {.name = "from_x", .type = ARG_NUMBER},
-    {.name = "from_y", .type = ARG_NUMBER},
-    {.name = "to_x", .type = ARG_NUMBER},
-    {.name = "to_y", .type = ARG_NUMBER},
-    {.name = "duration_ms", .type = ARG_INTEGER, .minimum = 0, .maximum = 10000},
-    {.name = "button", .type = ARG_STRING, .choices = pointer_buttons},
-    {NULL},
-};
-static const Argument scroll_arguments[] = {
-    {.name = "direction", .type = ARG_STRING, .choices = scroll_directions},
-    {.name = "amount", .type = ARG_INTEGER, .minimum = 1, .maximum = 700},
-    {NULL},
-};
-static const Argument text_arguments[] = {
-    {.name = "text", .type = ARG_STRING},
-    {NULL},
-};
-static const Argument value_arguments[] = {
-    {.name = "value", .type = ARG_STRING},
-    {NULL},
-};
-static const Argument key_arguments[] = {
-    {.name = "keys", .type = ARG_STRING_ARRAY, .minimum = 1, .maximum = 5},
-    {NULL},
-};
-static const Argument delay_arguments[] = {
-    {.name = "ms", .type = ARG_INTEGER, .minimum = 0, .maximum = 30000,
-        .description = "Milliseconds to wait."},
-    {NULL},
-};
-static const Argument batch_arguments[] = {
-    {.name = "steps", .type = ARG_OBJECT_ARRAY, .maximum = 64,
-        .description = "Optional ordered {tool,args} actions. Omit or pass [] to observe without acting."},
-    {.name = "observe", .type = ARG_OBJECT},
-    {.name = "id", .type = ARG_INTEGER, .minimum = 1, .maximum = MAX_CAPTURE_ID,
-        .description = "Optional full-overview capture used for pixel steps and zoom. Omission uses the latest overview."},
-    {NULL},
-};
-
-static const char *const require_window[] = {"window_id", NULL};
-static const char *const require_point[] = {"x", "y", NULL};
-static const char *const require_element[] = {"element_token", NULL};
-static const char *const require_drag[] = {"from_x", "from_y", "to_x", "to_y", NULL};
-static const char *const require_scroll[] = {"x", "y", "direction", NULL};
-static const char *const require_text[] = {"text", NULL};
-static const char *const require_value[] = {"element_token", "value", NULL};
-static const char *const require_keys[] = {"keys", NULL};
-static const char *const require_delay[] = {"ms", NULL};
-
-/* Observation schemas are shared by validation and tools/list. */
-static const Tool desktop_schema = {
-    .name = "desktop",
-    .groups = ARGS_NONE,
-    .arguments = capture_arguments,
-};
-
-static const Tool window_schema = {
-    .name = "window",
-    .groups = ARGS_WINDOW,
-    .required = require_window,
-};
-
-static const Tool tools[] = {
-    {.name = "status",
-        "Run first for health checks, canvas metadata, apps/windows and a full desktop screenshot. "
-        "Window bounds, element frames and pixel actions share the full screenshot's coordinates. "
-        "Screenshots unlock the host desktop when needed. ",
-        ARGS_NONE},
-    {.name = "computer",
-        "Execute up to 64 JSON steps shaped {tool,args}, in order and stop "
-        "on failure. Returns one final observation. "
-        "Responses report status:ok/failed and the completed step count. "
-        "Insert {tool:delay_ms,args:{ms:500}} to pause anywhere, the final "
-        "observation waits for all steps including trailing delays (there are "
-        "some default delays if not provided). "
-        "Use observe:false to skip observation or observe:{kind:window,window_id} "
-        "for a screenshot and an accessibility tree. "
-        "Prefer the accessibility tree to locate controls when working with a "
-        "single application, especially browsers. "
-        "When the tree provides the controls you need, use "
-        "observe:{kind:window,window_id,screenshot:false} for subsequent trees "
-        "to skip the screenshot. "
-        "All pixel coordinates are global to the full overview, including after "
-        "observe.zoom. "
-        "Use zoom:[left,top,right,bottom] to read native detail on large desktops. "
-        "Screenshots and foreground input unlock the host desktop when needed; "
-        "accessibility-only steps and tree-only observations leave it locked. ",
-        ARGS_NONE,
-        batch_arguments,
-        .action = TRUE},
-};
-
-/* Actions are steps of computer, never standalone MCP tools. */
-static const Tool action_tools[] = {
-    {.name = "click",
-        "Click desktop image coordinates.",
-        ARGS_POINT,
-        click_arguments,
-        require_point,
-        .action = TRUE},
-    {.name = "move_cursor",
-        "Move the foreground pointer in desktop image coordinates.",
-        ARGS_POINT,
-        .required = require_point,
-        .action = TRUE},
-    {.name = "drag",
-        "Drag across the combined canvas using full-overview coordinates.",
-        ARGS_NONE,
-        drag_arguments,
-        require_drag,
-        TRUE},
-    {.name = "scroll",
-        "Scroll at desktop coordinates for a number of lines.",
-        ARGS_POINT,
-        scroll_arguments,
-        require_scroll,
-        TRUE},
-    {.name = "press_keys",
-        "Press keys in listed order and release in reverse; put modifiers first. Use keys:[meta] for a single key or keys:[ctrl,a] for a chord.",
-        ARGS_NONE,
-        key_arguments,
-        require_keys,
-        TRUE},
-    {.name = "activate",
-        "Perform an element's default action, such as following a link or pressing a button.",
-        ARGS_ACTION,
-        .required = require_element,
-        .action = TRUE},
-    {.name = "open_context_menu",
-        "Open an element's context menu.",
-        ARGS_ACTION,
-        .required = require_element,
-        .action = TRUE},
-    {.name = "type_text",
-        "Insert text at the caret without pressing Enter.",
-        ARGS_ACTION,
-        text_arguments,
-        require_text,
-        TRUE},
-    {.name = "set_value",
-        "Replace a text field's contents or set a numeric control's value.",
-        ARGS_ACTION,
-        value_arguments,
-        require_value,
-        TRUE},
-    {.name = "delay_ms",
-        "Wait 0-30000 milliseconds before continuing. Use a trailing delay to wait before the final observation.",
-        ARGS_NONE,
-        delay_arguments,
-        require_delay,
-        TRUE},
-};
-
+/* Schema construction and runtime validation below consume only this catalog. */
 static const Tool *find_tool(const char *name)
 {
     for (unsigned index = 0; index < G_N_ELEMENTS(tools); index++) {
-        if (g_strcmp0(name, tools[index].name) == 0) {
+        if (g_strcmp0(name, tools[index].name) == 0 &&
+            !(no_vision && tools[index].batch == BATCH_VISION)) {
             return &tools[index];
         }
     }
     return NULL;
 }
 
-static inline const Tool *find_action(const char *name)
+static gboolean find_action(BatchKind batch, const char *name, Tool *selected)
 {
     for (unsigned index = 0; index < G_N_ELEMENTS(action_tools); index++) {
-        if (g_strcmp0(name, action_tools[index].name) == 0) {
-            return &action_tools[index];
+        const Tool *action = &action_tools[index];
+        if ((action->modes & batch) && g_strcmp0(name, action->name) == 0) {
+            *selected = *action;
+            if (batch == BATCH_ACCESSIBILITY && action->targeted_required) {
+                selected->groups |= ARGS_ACTION;
+                selected->required = action->targeted_required;
+            }
+            return TRUE;
         }
     }
-    return NULL;
+    return FALSE;
 }
 
 static void add_argument_schemas(JsonResult *properties, const Argument *arguments)
@@ -375,6 +456,7 @@ static void add_argument_schemas(JsonResult *properties, const Argument *argumen
         case ARG_STRING_ARRAY:
         case ARG_OBJECT_ARRAY:
         case ARG_NUMBER_ARRAY:
+        case ARG_INTEGER_ARRAY:
             type = "array";
             break;
         case ARG_OBJECT:
@@ -396,11 +478,12 @@ static void add_argument_schemas(JsonResult *properties, const Argument *argumen
             result_member(property, "enum", choices);
         }
         if (argument->type == ARG_STRING_ARRAY || argument->type == ARG_OBJECT_ARRAY ||
-            argument->type == ARG_NUMBER_ARRAY) {
+            argument->type == ARG_NUMBER_ARRAY || argument->type == ARG_INTEGER_ARRAY) {
             JsonResult *items = result_object();
             result_string(items, "type",
                 argument->type == ARG_STRING_ARRAY ? "string" :
-                argument->type == ARG_NUMBER_ARRAY ? "number" : "object");
+                argument->type == ARG_NUMBER_ARRAY ? "number" :
+                argument->type == ARG_INTEGER_ARRAY ? "integer" : "object");
             result_member(property, "items", items);
             if (argument->minimum != 0) {
                 result_integer(property, "minItems", argument->minimum);
@@ -431,12 +514,14 @@ static yyjson_doc *build_tool_schema(const Tool *tool)
     if (tool->groups & ARGS_WINDOW) {
         add_argument_schemas(properties, window_arguments);
     }
-    if (strcmp(tool->name, "computer") == 0) {
+    if (tool->batch != BATCH_NONE) {
         /* Advertise the actual nested contract, not an opaque array of objects.
          * Individual steps are validated again after defaults are merged. */
         JsonResult *alternatives = result_array();
         for (unsigned index = 0; index < G_N_ELEMENTS(action_tools); index++) {
-            const Tool *action = &action_tools[index];
+            Tool variant;
+            if (!find_action(tool->batch, action_tools[index].name, &variant)) continue;
+            const Tool *action = &variant;
             yyjson_doc *input = build_tool_schema(action);
             JsonResult *named = result_object(), *named_properties = result_object();
             JsonResult *name = result_object(), *names = result_array();
@@ -462,41 +547,36 @@ static yyjson_doc *build_tool_schema(const Tool *tool)
         result_member(items, "anyOf", alternatives);
         result_member(yyjson_mut_obj_get(properties, "steps"), "items", items);
 
-        JsonResult *observe = result_object(), *choices = result_array();
-        JsonResult *off = result_object(), *off_values = result_array();
-        result_string(off, "type", "boolean");
-        result_append(off_values, yyjson_mut_false(scu.doc));
-        result_member(off, "enum", off_values);
-        result_append(choices, off);
-        const Tool *observation_tools[] = {
-            &desktop_schema, &window_schema};
-        const char *kinds[] = {"desktop", "window"};
-        for (unsigned index = 0; index < 2; index++) {
-            yyjson_doc *input = build_tool_schema(observation_tools[index]);
-            JsonResult *option = yyjson_val_mut_copy(scu.doc, yyjson_doc_get_root(input));
-            JsonResult *kind = result_object(), *values = result_array();
-            result_string(kind, "type", "string");
-            result_append(values, yyjson_mut_str(scu.doc, kinds[index]));
-            result_member(kind, "enum", values);
-            result_member(yyjson_mut_obj_get(option, "properties"), "kind", kind);
-            JsonResult *observe_required = result_array();
-            result_append(observe_required, yyjson_mut_str(scu.doc, "kind"));
-            if (index == 1) {
-                result_append(observe_required, yyjson_mut_str(scu.doc, "window_id"));
+        if (tool->batch == BATCH_VISION) {
+            JsonResult *observe = result_object(), *choices = result_array();
+            JsonResult *off = result_object(), *off_values = result_array();
+            result_string(off, "type", "boolean");
+            result_append(off_values, yyjson_mut_false(scu.doc));
+            result_member(off, "enum", off_values);
+            result_append(choices, off);
+            for (unsigned index = 0; index < G_N_ELEMENTS(observation_schemas); index++) {
+                const Tool *observer = observation_schemas[index];
+                yyjson_doc *input = build_tool_schema(observer);
+                JsonResult *option = yyjson_val_mut_copy(scu.doc, yyjson_doc_get_root(input));
+                JsonResult *kind = result_object(), *values = result_array();
+                result_string(kind, "type", "string");
+                result_append(values, yyjson_mut_str(scu.doc, observer->name));
+                result_member(kind, "enum", values);
+                result_member(yyjson_mut_obj_get(option, "properties"), "kind", kind);
+                JsonResult *observe_required = result_array();
+                result_append(observe_required, yyjson_mut_str(scu.doc, "kind"));
+                if (observer->required) {
+                    for (const char *const *field = observer->required; *field; field++)
+                        result_append(observe_required, yyjson_mut_str(scu.doc, *field));
+                }
+                result_member(option, "required", observe_required);
+                result_append(choices, option);
+                yyjson_doc_free(input);
             }
-            result_member(option, "required", observe_required);
-            result_append(choices, option);
-            yyjson_doc_free(input);
+            result_member(observe, "anyOf", choices);
+            result_string(observe, "description", observation_description);
+            result_member(properties, "observe", observe);
         }
-        result_member(observe, "anyOf", choices);
-        result_string(observe, "description",
-            "Omit for a desktop image with no steps or after foreground input; false disables it. "
-            "Use {kind:desktop,zoom:[left,top,right,bottom]} for an image or native-detail crop. "
-            "Use {kind:window,window_id} for a compact accessibility tree and window screenshot. "
-            "Add screenshot:false for only the tree. "
-            "An explicit object replaces automatic observation. Zoom coordinates and all actions "
-            "stay in the full overview's global pixel space; zoom never changes that frame.");
-        result_member(properties, "observe", observe);
     }
     if (tool->required != NULL) {
         JsonResult *ordered = result_object();
@@ -730,10 +810,7 @@ static void send_response(
  * tools must work even when accessibility permission or guest libraries are absent. */
 static void add_server_info(JsonResult *result)
 {
-    result_string(result, "instructions",
-        "Computer use MCP server. Control the host desktop: screenshots, mouse, "
-        "keyboard, and accessibility. Use `status` to inspect the desktop and "
-        "`computer` to execute actions");
+    result_string(result, "instructions", no_vision ? no_vision_instructions : server_instructions);
     JsonResult *capabilities = result_object();
     JsonResult *info = result_object();
     result_member(capabilities, "tools", result_object());
@@ -754,12 +831,14 @@ static void list_tools(JsonResult *result)
     JsonResult *tool_list = result_array();
     for (unsigned index = 0; index < G_N_ELEMENTS(tools); index++) {
         const Tool *tool = &tools[index];
+        if (no_vision && tool->batch == BATCH_VISION) continue;
         JsonResult *item = result_object();
         JsonResult *annotations = result_object();
         yyjson_doc *schema = build_tool_schema(tool);
 
         result_string(item, "name", tool->name);
-        result_string(item, "description", tool->description);
+        result_string(item, "description", no_vision && !strcmp(tool->name, "status")
+            ? no_vision_status_description : tool->description);
         result_member(item, "inputSchema",
             yyjson_val_mut_copy(scu.doc, yyjson_doc_get_root(schema)));
         result_boolean(annotations, "readOnlyHint", !tool->action);
@@ -796,7 +875,7 @@ static void add_tool_result(JsonResult *result, const Tool *tool, JsonResult *ou
     result_member(result, "content", content);
     result_member(result, "structuredContent", structured);
     gboolean batch_failed = output != NULL && tool != NULL &&
-                            strcmp(tool->name, "computer") == 0 &&
+                            tool->batch != BATCH_NONE &&
                             g_strcmp0(yyjson_mut_get_str(yyjson_mut_obj_get(output, "status")), "failed") == 0;
     result_boolean(result, "isError", output == NULL || batch_failed);
 }
@@ -836,6 +915,16 @@ static gboolean call_tool(JsonValue *id, JsonValue *parameters, JsonResult *resu
     add_tool_result(result, tool, output);
 #else
     if (output) {
+        if (no_vision && !strcmp(tool->name, "status")) {
+            JsonResult *filtered = result_array(), *block;
+            size_t i, n;
+            yyjson_mut_arr_foreach(yyjson_mut_obj_get(output, "content"), i, n, block) {
+                if (g_strcmp0(yyjson_mut_get_str(yyjson_mut_obj_get(block, "type")), "image"))
+                    result_append(filtered, yyjson_mut_val_mut_copy(scu.doc, block));
+            }
+            yyjson_mut_obj_remove_key(output, "content");
+            result_member(output, "content", filtered);
+        }
         size_t index, count;
         JsonResult *key, *value;
         yyjson_mut_obj_foreach(output, index, count, key, value) {
@@ -963,22 +1052,7 @@ static void stop_signal(int sig)
 /* Keep enrollment discoverable without starting MCP or touching the desktop. */
 static void print_help(FILE *stream)
 {
-    fputs("scu - Spaces computer use\n"
-          "\n"
-          "Usage: scu mcp       Serve MCP over stdin/stdout (no listening port).\n"
-          "       scu --help    Show this help.\n"
-          "\n"
-          "Enroll with your agent from inside the Space, as the agent's user:\n"
-          "  Codex:\n"
-          "    codex mcp add scu -- scu mcp\n"
-          "  Claude Code:\n"
-          "    claude mcp add --transport stdio --scope user scu -- scu mcp\n"
-          "  Other MCP clients: command \"scu\", arguments [\"mcp\"], transport stdio.\n"
-          "\n"
-          "Reload the agent's MCP connections after enrollment.\n"
-          "Host permission: run `sudo spaces configure <space>` on the host and\n"
-          "enable Accessibility and Agent computer use.\n",
-        stream);
+    fputs(usage, stream);
 }
 
 static G_GNUC_UNUSED int serve_mcp(void)

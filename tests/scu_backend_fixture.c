@@ -187,7 +187,7 @@ typedef struct {
     GHashTable *bound_seats;
     struct eis_client *keys_client, *buttons_client;
     struct xkb_state *keyboard;
-    GString *text;
+    GString *text, *action_times;
     gint numeric_value;
     gboolean selected;
 } InputOracle;
@@ -230,9 +230,9 @@ static gpointer serve_input(gpointer pointer)
                 yyjson_mut_doc *document=yyjson_mut_doc_new(NULL);
                 yyjson_mut_val *encoded=yyjson_mut_str(document,oracle->text->str);
                 char *text=yyjson_mut_val_write(encoded,0,NULL);
-                char *json=g_strdup_printf("{\"keys_down\":%d,\"buttons_down\":%d,\"keys\":%d,\"clicks\":%d,\"scrolls\":%d,\"motions\":%d,\"dragged_motions\":%d,\"x\":%d,\"y\":%d,\"button\":%d,\"text\":%s,\"selected\":%s,\"numeric_value\":%d}",
+                char *json=g_strdup_printf("{\"keys_down\":%d,\"buttons_down\":%d,\"keys\":%d,\"clicks\":%d,\"scrolls\":%d,\"motions\":%d,\"dragged_motions\":%d,\"x\":%d,\"y\":%d,\"button\":%d,\"text\":%s,\"selected\":%s,\"numeric_value\":%d,\"action_times\":[%s]}",
                     oracle->keys_down,oracle->buttons_down,oracle->keys,oracle->clicks,oracle->scrolls,
-                    oracle->motions,oracle->dragged_motions,oracle->x,oracle->y,oracle->button,text,oracle->selected?"true":"false",oracle->numeric_value);
+                    oracle->motions,oracle->dragged_motions,oracle->x,oracle->y,oracle->button,text,oracle->selected?"true":"false",oracle->numeric_value,oracle->action_times->str);
                 free(text);yyjson_mut_doc_free(document);
                 assert(send(oracle->control,json,strlen(json),0)>0);g_free(json);
             } else if(command=='D') {
@@ -360,6 +360,8 @@ static gpointer serve_input(gpointer pointer)
                 if (down) {
                     oracle->buttons_client = eis_device_get_client(eis_event_get_device(event));
                     g_atomic_int_inc(&oracle->clicks);
+                    if (oracle->action_times->len) g_string_append_c(oracle->action_times, ',');
+                    g_string_append_printf(oracle->action_times, "%.6f", g_get_monotonic_time() / 1000000.0);
                 }
             } else if (type == EIS_EVENT_POINTER_MOTION_ABSOLUTE) {
                 g_atomic_int_set(&oracle->x, (gint)eis_event_pointer_get_absolute_x(event));
@@ -392,6 +394,7 @@ static int run_eis_server(int fd)
     struct xkb_keymap *map=xkb_keymap_new_from_names(context,&names,XKB_KEYMAP_COMPILE_NO_FLAGS);
     oracle.keyboard=xkb_state_new(map);
     oracle.text=g_string_new("");
+    oracle.action_times=g_string_new("");
     oracle.numeric_value=80;
     oracle.clients=g_ptr_array_new_with_free_func(free_oracle_client);
     oracle.bound_seats=g_hash_table_new(g_direct_hash,g_direct_equal);
@@ -403,6 +406,7 @@ static int run_eis_server(int fd)
     g_hash_table_unref(oracle.bound_seats);
     eis_unref(oracle.server);
     g_string_free(oracle.text,TRUE);
+    g_string_free(oracle.action_times,TRUE);
     xkb_state_unref(oracle.keyboard);
     xkb_keymap_unref(map);
     xkb_context_unref(context);

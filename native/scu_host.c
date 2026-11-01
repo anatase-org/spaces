@@ -1308,8 +1308,8 @@ static JsonResult *operate_on_element(const char *tool, JsonValue *arguments)
     Element *element = token != NULL ? g_hash_table_lookup(elements, token) : NULL;
     if (element == NULL) {
         return scu_fail("stale_element",
-            "Element token is absent or stale. Read a window tree with computer "
-            "observe:{kind:window,window_id} and use its new token.");
+            "Element token is absent or stale. Read a window tree with accessibility "
+            "observations:[window_id] and use its new token.");
     }
 
     AtspiAccessible *node = g_object_ref(element->accessible);
@@ -4032,30 +4032,32 @@ static JsonResult *compact_observation(JsonResult *observation)
 /* Preflight structure and supported options for the entire batch before effects.
  * Runtime failure keeps completed counts and one error, never a replayable dump
  * of successful steps. Observation is independent of action confirmation. */
-static JsonResult *computer(JsonValue *args)
+static JsonResult *run_batch(const Tool *batch, JsonValue *args)
 {
     yyjson_doc *steps[64] = {0};
-    const Tool *actions[64] = {0};
+    Tool actions[64] = {0};
+    gboolean accessibility = batch->batch == BATCH_ACCESSIBILITY;
     JsonValue *array = json_member(args, "steps");
     size_t count = yyjson_arr_size(array), index, length;
     JsonValue *step;
     yyjson_doc *observation = NULL;
     const Tool *observer = NULL;
     JsonValue *observe = json_member(args, "observe");
-    gboolean automatic = observe == NULL, has_foreground = FALSE, has_actions = FALSE;
+    gboolean automatic = !accessibility && observe == NULL, has_foreground = FALSE, has_actions = FALSE;
     gboolean valid = FALSE, previous_delay = FALSE;
     JsonResult *result = result_object(), *warnings = result_array();
 
     yyjson_arr_foreach(array, index, length, step) {
         const char *name = json_string(step, "tool");
         JsonValue *arguments = json_member(step, "args");
-        const Tool *action = actions[index] = find_action(name);
-        if (!action || yyjson_obj_size(step) != 2 || !yyjson_is_obj(arguments)) {
+        const Tool *action = &actions[index];
+        if (!find_action(batch->batch, name, &actions[index]) ||
+            yyjson_obj_size(step) != 2 || !yyjson_is_obj(arguments)) {
             goto invalid;
         }
         steps[index] = prepare_arguments(arguments, yyjson_get_uint(json_member(args, "id")), FALSE);
         JsonValue *merged = yyjson_doc_get_root(steps[index]);
-        if (!validate_arguments(actions[index], merged)) {
+        if (!validate_arguments(action, merged)) {
             goto done;
         }
         if (strcmp(action->name, "delay_ms")) {
@@ -4094,7 +4096,7 @@ static JsonResult *computer(JsonValue *args)
     gboolean failed = FALSE, foreground_attempted = FALSE;
     for (index = 0; index < count; index++) {
         JsonValue *merged = yyjson_doc_get_root(steps[index]);
-        gboolean delay = !strcmp(actions[index]->name, "delay_ms");
+        gboolean delay = !strcmp(actions[index].name, "delay_ms");
         foreground_attempted |= !delay &&
             json_string(merged, "element_token") == NULL;
         /* A delay step supplies its own gap. Other action boundaries retain
@@ -4102,7 +4104,7 @@ static JsonResult *computer(JsonValue *args)
         JsonResult *value = NULL;
         keyboard_fallback = FALSE;
         if (!index || delay || previous_delay || wait_for_delay(150)) {
-            value = execute_tool(actions[index], merged);
+            value = execute_tool(&actions[index], merged);
         }
         if (keyboard_fallback) {
             foreground_attempted = TRUE;
@@ -4115,7 +4117,7 @@ static JsonResult *computer(JsonValue *args)
         previous_delay = value != NULL && delay;
         if (value == NULL) {
             release_input();
-            result_member(result, "failed", batch_failure(index, actions[index]));
+            result_member(result, "failed", batch_failure(index, &actions[index]));
             failed = TRUE;
             clear_tool_error();
             break;
@@ -4125,7 +4127,7 @@ static JsonResult *computer(JsonValue *args)
         if (warning) {
             JsonResult *item = result_object();
             result_integer(item, "index", index);
-            result_string(item, "tool", actions[index]->name);
+            result_string(item, "tool", actions[index].name);
             result_member(item, "warning", yyjson_mut_val_mut_copy(scu.doc, warning));
             result_append(warnings, item);
         }
@@ -4163,10 +4165,56 @@ static JsonResult *computer(JsonValue *args)
             clear_tool_error();
         }
     }
+    if (accessibility) {
+        JsonResult *observations = result_array();
+        result_member(result, "observations", observations);
+        JsonValue *requested = json_member(args, "observations"), *window_id;
+        gint64 seen[64];
+        size_t seen_count = 0;
+        yyjson_arr_foreach(requested, index, length, window_id) {
+            gint64 id = yyjson_get_sint(window_id);
+            gboolean duplicate = FALSE;
+            for (size_t i = 0; i < seen_count; i++) duplicate |= seen[i] == id;
+            if (duplicate) continue;
+            seen[seen_count++] = id;
+            if (!scu_tick() || !require_computer_access()) {
+                JsonResult *item = result_object();
+                result_integer(item, "window_id", id);
+                result_member(item, "error", error_payload());
+                result_append(observations, item);
+                failed = TRUE;
+                clear_tool_error();
+                break;
+            }
+            yyjson_mut_doc *document = yyjson_mut_doc_new(NULL);
+            JsonResult *arguments = yyjson_mut_obj(document);
+            yyjson_mut_obj_add_sint(document, arguments, "window_id", id);
+            yyjson_mut_obj_add_bool(document, arguments, "screenshot", FALSE);
+            yyjson_mut_doc_set_root(document, arguments);
+            yyjson_doc *input = yyjson_mut_doc_imut_copy(document, NULL);
+            yyjson_mut_doc_free(document);
+            JsonResult *value = refresh_geometry() ? observe_window(yyjson_doc_get_root(input)) : NULL;
+            yyjson_doc_free(input);
+            if (value) {
+                result_append(observations, value);
+            } else {
+                JsonResult *item = result_object();
+                result_integer(item, "window_id", id);
+                result_member(item, "error", error_payload());
+                result_append(observations, item);
+                failed = TRUE;
+                /* Window-local failures allow later windows. Authority, session
+                 * or deadline loss stops the batch without repairing the session. */
+                gboolean proceed = scu_tick() && require_computer_access();
+                clear_tool_error();
+                if (!proceed) break;
+            }
+        }
+    }
     result_string(result, "status", failed ? "failed" : "ok");
     goto done;
 invalid:
-    scu_fail("invalid_arguments", "Each step must be {tool,args} naming a supported computer action.");
+    scu_fail("invalid_arguments", "Each step must be {tool,args} naming an action supported by this batch tool.");
 done:
     for (index = 0; index < count; index++) {
         yyjson_doc_free(steps[index]);
@@ -4183,8 +4231,8 @@ static JsonResult *execute_tool(const Tool *t, JsonValue *args)
     if (!strcmp(t->name, "status")) {
         return scu_status();
     }
-    if (!strcmp(t->name, "computer")) {
-        return computer(args);
+    if (t->batch != BATCH_NONE) {
+        return run_batch(t, args);
     }
     if (!require_computer_access()) {
         return NULL;
