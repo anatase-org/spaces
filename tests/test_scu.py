@@ -77,7 +77,8 @@ class ScuTests(unittest.TestCase):
         flags = subprocess.run(["pkg-config", "--cflags", *PACKAGES], capture_output=True, text=True)
         if flags.returncode:
             raise unittest.SkipTest("scu development headers unavailable")
-        cls.temporary = tempfile.TemporaryDirectory(prefix="scu-tests-")
+        (ROOT / ".build").mkdir(exist_ok=True)
+        cls.temporary = tempfile.TemporaryDirectory(prefix="scu-tests-", dir=ROOT / ".build")
         cls.addClassCleanup(cls.temporary.cleanup)
         cls.directory = Path(cls.temporary.name)
         cls.socket_path = cls.directory / "accessibility"
@@ -279,8 +280,9 @@ class ScuTests(unittest.TestCase):
         client = self.client()
         app = self.status(client)["structuredContent"]["apps"][0]
         result = client.tool("computer", observe={"kind": "window", "pid": app["pid"], "window_id": app["windows"][0]["window_id"], "tree_format": "elements"})
-        self.assertTrue(result["isError"])
-        self.assertEqual(result["structuredContent"]["observation_error"]["code"], "accessibility_window_unavailable")
+        self.assertFalse(result["isError"], result)
+        self.assertEqual(result["structuredContent"]["observation"]["accessibility_error"]["code"], "accessibility_window_unavailable")
+        self.assertEqual(self.image(result).size, (54, 60))
 
     def test_ambiguous_accessibility_window_is_not_selected_by_title(self):
         self.start_accessibility(duplicates=True)
@@ -289,8 +291,105 @@ class ScuTests(unittest.TestCase):
         app = self.status(client)["structuredContent"]["apps"][0]
         result = client.tool("computer", observe={"kind": "window", "pid": app["pid"],
             "window_id": app["windows"][0]["window_id"], "tree_format": "elements"})
-        self.assertEqual(result["structuredContent"]["observation_error"]["code"], "accessibility_window_unavailable")
+        self.assertEqual(result["structuredContent"]["observation"]["accessibility_error"]["code"], "accessibility_window_unavailable")
         self.assertEqual(json.loads(self.atspi_state.read_text())["clicks"], 0)
+
+    def test_window_image_is_automatic_and_preserves_overview_coordinates(self):
+        self.start_host()
+        client = self.client()
+        status = self.status(client)["structuredContent"]
+        app = status["apps"][0]
+        target = {"kind": "window", "pid": app["pid"], "window_id": app["windows"][0]["window_id"]}
+        result = client.tool("computer", observe={**target, "tree_format": "elements"})
+        self.assertFalse(result["isError"], result)
+        observation = result["structuredContent"]["observation"]
+        self.assertIn("elements", observation)
+        self.assertEqual(observation["id"], status["canvas"]["id"])
+        self.assertEqual(observation["screenshot"], {
+            "width": 80, "height": 60,
+            "bounds": {"x": 20, "y": 20, "width": 80, "height": 60}})
+        image = self.image(result)
+        self.assertEqual(image.size, (80, 60))
+        self.assertEqual(image.getpixel((0, 0)), (20, 20, 123))
+        self.assertEqual(image.getpixel((79, 59)), (99, 79, 123))
+        reduced = client.tool("computer", observe={**target, "max_image_dimension": 20})
+        self.assertEqual(self.image(reduced).size, (20, 15))
+        self.assertEqual(reduced["structuredContent"]["observation"]["id"], observation["id"])
+        self.assertEqual(json.loads(self.state.read_text())["window_captures"], ["window-1", "window-1"])
+        rejected = client.tool("computer", steps=[{"tool": "press_key", "args": {"key": "a"}}],
+            observe={**target, "include_screenshot": True})
+        self.assertEqual(rejected["structuredContent"]["code"], "invalid_arguments")
+        self.assertEqual(json.loads(self.state.read_text())["input"]["keys"], 0)
+
+    def test_window_without_accessibility_still_returns_an_image(self):
+        self.start_host(window_title="No accessibility tree")
+        result = self.client().tool("computer", observe={"kind": "window", "pid": self.atspi.pid,
+            "window_id": 1, "tree_format": "both"})
+        self.assertFalse(result["isError"], result)
+        self.assertEqual(self.image(result).size, (80, 60))
+        observation = result["structuredContent"]["observation"]
+        self.assertNotIn("elements", observation)
+        self.assertEqual(observation["accessibility_error"]["code"], "accessibility_window_unavailable")
+
+    def test_window_capture_failure_preserves_available_tree(self):
+        self.start_host()
+        client = self.client()
+        app = self.status(client)["structuredContent"]["apps"][0]
+        self.configure(refuse=True)
+        result = client.tool("computer", observe={"kind": "window", "pid": app["pid"],
+            "window_id": app["windows"][0]["window_id"], "tree_format": "elements"})
+        self.assertFalse(result["isError"], result)
+        observation = result["structuredContent"]["observation"]
+        self.assertIn("elements", observation)
+        self.assertIn("screenshot_error", observation)
+        self.assertFalse(any(block["type"] == "image" for block in result["content"]))
+
+    def test_window_capture_rejects_geometry_races(self):
+        self.start_host(change_window_on_capture=True)
+        result = self.client().tool("computer", observe={"kind": "window", "pid": self.atspi.pid,
+            "window_id": 1})
+        self.assertEqual(result["structuredContent"]["observation_error"]["code"], "stale_window_geometry")
+        self.assertFalse(any(block["type"] == "image" for block in result["content"]))
+
+    def test_mismatched_pid_matches_only_a_unique_window_and_actions_work(self):
+        self.start_accessibility()
+        self.start_host(app_pid=self.atspi.pid + 100000, buffer_client=True)
+        client = self.client()
+        tree = self.snapshot(client)
+        self.assertFalse(tree["pid_matched"])
+        button = next(row for row in tree["elements"] if row["label"] == "Fixture button")
+        self.assertEqual(button["frame"], {"x": 30, "y": 30, "width": 20, "height": 10})
+        result = client.tool("computer", steps=[{"tool": "click", "args": {"element_token": button["element_token"]}}])
+        self.assertFalse(result["isError"], result)
+        self.assertEqual(json.loads(self.atspi_state.read_text())["clicks"], 1)
+
+    def test_mismatched_pid_rejects_ambiguity_in_both_inventories(self):
+        self.start_accessibility(duplicates=True)
+        self.start_host(app_pid=self.atspi.pid + 100000)
+        client = self.client()
+        tree = self.snapshot(client)
+        self.assertEqual(tree["accessibility_error"]["code"], "accessibility_window_unavailable")
+        self.configure(duplicate_identity=True)
+        tree = self.snapshot(client)
+        self.assertEqual(tree["accessibility_error"]["code"], "accessibility_window_unavailable")
+        self.assertEqual(json.loads(self.atspi_state.read_text())["clicks"], 0)
+
+    def test_mismatched_pid_rejects_multiple_compositor_candidates(self):
+        self.start_accessibility()
+        self.start_host(app_pid=self.atspi.pid + 100000, duplicate_identity=True)
+        tree = self.snapshot(self.client())
+        self.assertEqual(tree["accessibility_error"]["code"], "accessibility_window_unavailable")
+        self.assertNotIn("elements", tree)
+
+    def test_window_screenshot_cannot_retarget_a_stale_pid(self):
+        self.start_host()
+        client = self.client()
+        self.status(client)
+        captures = json.loads(self.state.read_text())["captures"]
+        result = client.tool("computer", observe={"kind": "window", "pid": self.atspi.pid + 1,
+            "window_id": 1})
+        self.assertEqual(result["structuredContent"]["observation_error"]["code"], "window_unavailable")
+        self.assertEqual(json.loads(self.state.read_text())["captures"], captures)
 
     def test_prevalidation_and_removed_arguments_send_no_input(self):
         self.start_host()

@@ -112,6 +112,8 @@ static inline void result_append(JsonResult *a, JsonResult *v)
 }
 
 static JsonResult *scu_fail(const char *code, const char *hint);
+static JsonResult *error_payload(void);
+static void clear_tool_error(void);
 static JsonResult *scu_action(
     const char *route, gboolean confirmed, const char *summary);
 static gboolean scu_gate(void);
@@ -121,7 +123,6 @@ static void *scu_library(const char *soname);
 static JsonResult *scu_status(void);
 static JsonResult *canvas_status(void);
 static JsonResult *kwin_status(void);
-static JsonResult *kwin_window_state(JsonValue *args);
 static gboolean require_computer_access(void);
 static void stop_atspi_worker(void);
 static int run_atspi_worker(guint base);
@@ -1213,8 +1214,7 @@ static JsonResult *scu_atspi(const char *tool, JsonValue *args)
         if (!require_computer_access()) {
             return NULL;
         }
-        return !strcmp(tool, "get_window_state")
-            ? kwin_window_state(args) : atspi_worker_call(tool, args);
+        return atspi_worker_call(tool, args);
     }
     if (!ensure_atspi()) {
         return NULL;
@@ -1229,7 +1229,7 @@ static JsonResult *scu_atspi(const char *tool, JsonValue *args)
         !strcmp(tool, "verify_selection")) {
         return clipboard_selection(tool, args);
     }
-    if (!strcmp(tool, "get_window_state")) {
+    if (!strcmp(tool, "window_state")) {
         return read_window_state(args);
     }
     return operate_on_element(tool, args);
@@ -2404,15 +2404,14 @@ static int lower_integer(double value)
     return value < integer ? integer - 1 : integer;
 }
 
-static GBytes *capture_area(const CanvasRect *view, gboolean native,
-    guint *width, guint *height, CanvasRect *captured)
+static GBytes *capture_pixels(const char *method, GVariant *arguments,
+    guint *width, guint *height)
 {
-    gint left = lower_integer(view->x), top = lower_integer(view->y);
-    gint right = -lower_integer(-(view->x + view->width));
-    gint bottom = -lower_integer(-(view->y + view->height));
     GUnixFDList *fds = NULL;
-    GVariant *reply = computer_call("Capture",
-        g_variant_new("(iiiib)", left, top, right - left, bottom - top, native), &fds);
+    GVariant *reply = computer_call(method, arguments, &fds);
+    if (!reply) {
+        return NULL;
+    }
     gint handle = -1;
     if (reply && g_variant_is_of_type(reply, G_VARIANT_TYPE("(huu)"))) {
         g_variant_get(reply, "(huu)", &handle, width, height);
@@ -2459,8 +2458,44 @@ static GBytes *capture_area(const CanvasRect *view, gboolean native,
         scu_fail("capture_failed", "Host capture was truncated or interrupted.");
         return NULL;
     }
-    *captured = (CanvasRect){left, top, right - left, bottom - top};
     return g_bytes_new_take(data, length);
+}
+
+static GBytes *capture_area(const CanvasRect *view, gboolean native,
+    guint *width, guint *height, CanvasRect *captured)
+{
+    gint left = lower_integer(view->x), top = lower_integer(view->y);
+    gint right = -lower_integer(-(view->x + view->width));
+    gint bottom = -lower_integer(-(view->y + view->height));
+    *captured = (CanvasRect){left, top, right - left, bottom - top};
+    return capture_pixels("Capture",
+        g_variant_new("(iiiib)", left, top, right - left, bottom - top, native), width, height);
+}
+
+static gboolean append_image(GBytes *pixels, guint width, guint height)
+{
+    GdkPixbuf *image = pixbuf.new_from_bytes(pixels, GDK_COLORSPACE_RGB, FALSE,
+        8, width, height, width * 3);
+    char *png = NULL;
+    gsize length = 0;
+    GError *error = NULL;
+    gboolean saved = image && pixbuf.save_to_buffer(image, &png, &length, "png", &error, NULL);
+    g_clear_object(&image);
+    if (!saved || length > 32u * 1024u * 1024u) {
+        scu_fail("capture_failed", error ? error->message : "PNG exceeds the 32 MiB image limit.");
+        g_clear_error(&error);
+        g_free(png);
+        return FALSE;
+    }
+    char *base64 = g_base64_encode((guchar *)png, length);
+    g_free(png);
+    JsonResult *block = result_object();
+    result_string(block, "type", "image");
+    result_string(block, "mimeType", "image/png");
+    result_string(block, "data", base64);
+    result_append(scu.images, block);
+    g_free(base64);
+    return TRUE;
 }
 
 static JsonResult *capture_desktop(JsonValue *arguments)
@@ -2534,18 +2569,9 @@ static JsonResult *capture_desktop(JsonValue *arguments)
         g_free(key);
         return scu_fail("stale_capture", "KWin geometry changed during capture. Request a new overview.");
     }
-    GdkPixbuf *image = pixbuf.new_from_bytes(pixels, GDK_COLORSPACE_RGB, FALSE,
-        8, output_width, output_height, output_width * 3);
+    gboolean saved = append_image(pixels, output_width, output_height);
     g_bytes_unref(pixels);
-    char *png = NULL;
-    gsize length = 0;
-    GError *error = NULL;
-    gboolean saved = image && pixbuf.save_to_buffer(image, &png, &length, "png", &error, NULL);
-    g_clear_object(&image);
-    if (!saved || length > 32u * 1024u * 1024u) {
-        scu_fail("capture_failed", error ? error->message : "PNG exceeds the 32 MiB image limit.");
-        g_clear_error(&error);
-        g_free(png);
+    if (!saved) {
         g_free(key);
         return NULL;
     }
@@ -2557,14 +2583,6 @@ static JsonResult *capture_desktop(JsonValue *arguments)
     } else {
         g_free(key);
     }
-    char *base64 = g_base64_encode((guchar *)png, length);
-    g_free(png);
-    JsonResult *block = result_object();
-    result_string(block, "type", "image");
-    result_string(block, "mimeType", "image/png");
-    result_string(block, "data", base64);
-    result_append(scu.images, block);
-    g_free(base64);
     JsonResult *result = result_object();
     result_integer(result, "id", visual.canvas.id);
     result_integer(result, "width", output_width);
@@ -2678,113 +2696,113 @@ static JsonResult *kwin_status(void)
     return result;
 }
 
+/* A toolkit may expose its client, buffer (including invisible margins), or
+ * decorated frame. Use only compositor-reported rectangles and desktop scales;
+ * never stretch an accessibility tree to an approximately sized window. */
+static gboolean accessibility_geometry(JsonValue *window, JsonValue *candidate,
+    CanvasRect *anchor, CanvasRect *origin, double *ratio)
+{
+    const char *title = json_string(candidate, "title");
+    if (!title || !*title || g_strcmp0(title, json_string(window, "title")) ||
+        !read_rect(json_member(candidate, "bounds"), anchor)) {
+        return FALSE;
+    }
+    const char *rectangles[] = {"client", "buffer", "frame"};
+    for (guint r = 0; r < G_N_ELEMENTS(rectangles); r++) {
+        CanvasRect rect;
+        if (!read_rect(json_member(window, rectangles[r]), &rect)) {
+            continue;
+        }
+        for (guint k = 0; k <= visual.display_count; k++) {
+            double scale = k == 0 ? 1 : (double)visual.displays[k - 1].width /
+                visual.displays[k - 1].logical_width;
+            if (fabs(anchor->width - rect.width * scale) <= 2 &&
+                fabs(anchor->height - rect.height * scale) <= 2) {
+                *origin = rect;
+                *ratio = 1 / scale;
+                return TRUE;
+            }
+        }
+    }
+    return FALSE;
+}
+
 /* Semantic rectangles are private window-relative coordinates until a unique
  * KWin association anchors them. Raw rectangles never cross the MCP boundary. */
-static JsonResult *kwin_window_state(JsonValue *args)
+static JsonResult *window_tree(JsonValue *args, JsonValue *window)
 {
-    if (!ensure_visual_session()) {
-        return NULL;
-    }
-    if (!visual.canvas.id || !validate_canvas(0)) {
-        g_clear_pointer(&scu.code, g_free);
-        g_clear_pointer(&scu.hint, g_free);
-        guint images = yyjson_mut_arr_size(scu.images);
-        if (!capture_desktop(NULL)) {
-            return NULL;
-        }
-        yyjson_mut_arr_remove_range(scu.images, images, yyjson_mut_arr_size(scu.images) - images);
-    }
-    JsonValue *window = NULL, *candidate;
+    CanvasRect client = {0};
+    JsonValue *candidate;
     size_t i, n;
-    yyjson_arr_foreach(json_member(yyjson_doc_get_root(visual.geometry), "windows"), i, n, candidate) {
-        if (json_string(candidate, "key") && kwin_window_id(json_string(candidate, "key")) ==
-                json_number(args, "window_id", -1) && json_number(candidate, "pid", -1) ==
-                json_number(args, "pid", -2)) {
-            window = candidate;
-            break;
-        }
-    }
-    CanvasRect client;
-    if (!window || !read_rect(json_member(window, "client"), &client)) {
-        return scu_fail("window_unavailable", "KWin window is unavailable. Call status again.");
-    }
-    char *window_key = g_strdup(json_string(window, "key"));
-    char *window_signature = yyjson_val_write(window, 0, NULL);
     JsonResult *discovery = atspi_worker_call("list_apps", NULL);
     if (!discovery) {
-        g_free(window_key);
-        free(window_signature);
         return NULL;
     }
     yyjson_doc *listing = yyjson_mut_val_imut_copy(discovery, NULL);
     JsonValue *match = NULL;
     CanvasRect anchor = {0};
-    guint matches = 0;
+    guint matches = 0, best = 0, match_pid = 0;
     double ratio = 1;
     JsonValue *app;
     yyjson_arr_foreach(json_member(yyjson_doc_get_root(listing), "apps"), i, n, app) {
-        if (json_number(app, "pid", -1) != json_number(args, "pid", -2)) {
-            continue;
-        }
+        guint score = json_number(app, "pid", -1) == json_number(args, "pid", -2) ? 2 : 1;
         size_t j, m;
         yyjson_arr_foreach(json_member(app, "windows"), j, m, candidate) {
-            CanvasRect root;
-            if (g_strcmp0(json_string(candidate, "title"), json_string(window, "title")) ||
-                !read_rect(json_member(candidate, "bounds"), &root)) {
+            CanvasRect root, origin;
+            double scale;
+            if (score < best || !accessibility_geometry(window, candidate, &root, &origin, &scale)) {
                 continue;
             }
-            /* Some accessibility bridges use physical pixels. Accept only a
-             * scale present on this desktop, never stretch an arbitrary root. */
-            for (guint k = 0; k <= visual.display_count; k++) {
-                double scale = k == 0 ? 1 : (double)visual.displays[k - 1].width /
-                    visual.displays[k - 1].logical_width;
-                if (fabs(root.width - client.width * scale) <= 2 &&
-                    fabs(root.height - client.height * scale) <= 2) {
-                    match = candidate;
-                    anchor = root;
-                    ratio = 1 / scale;
-                    matches++;
-                    break;
+            /* Bus credentials and compositor PIDs can identify different
+             * processes of a sandboxed application. A PID-independent fallback
+             * must be unique in both inventories, not merely in the AT-SPI list. */
+            if (score == 1) {
+                guint alternatives = 0;
+                size_t w, total;
+                JsonValue *other;
+                yyjson_arr_foreach(json_member(yyjson_doc_get_root(visual.geometry), "windows"), w, total, other) {
+                    CanvasRect unused_anchor, unused_origin;
+                    double unused_ratio;
+                    if (accessibility_geometry(other, candidate, &unused_anchor, &unused_origin, &unused_ratio)) {
+                        alternatives++;
+                    }
+                }
+                if (alternatives != 1) {
+                    continue;
                 }
             }
+            if (score > best) {
+                best = score;
+                matches = 0;
+            }
+            match = candidate;
+            match_pid = json_number(app, "pid", 0);
+            anchor = root;
+            client = origin;
+            ratio = scale;
+            matches++;
         }
     }
     if (matches != 1) {
         yyjson_doc_free(listing);
-        g_free(window_key);
-        free(window_signature);
         return scu_fail("accessibility_window_unavailable", "No unique accessibility window matches this KWin window and client geometry. Use screenshot-based input.");
     }
     yyjson_mut_doc *request = yyjson_mut_doc_new(NULL);
     JsonResult *copy = yyjson_val_mut_copy(request, args);
     yyjson_mut_obj_put(copy, yyjson_mut_str(request, "window_id"),
         yyjson_mut_uint(request, json_number(match, "window_id", 0)));
+    /* The worker validates its own process identity, not the KWin PID. */
+    yyjson_mut_obj_put(copy, yyjson_mut_str(request, "pid"), yyjson_mut_uint(request, match_pid));
     yyjson_mut_obj_put(copy, yyjson_mut_str(request, "tree_format"), yyjson_mut_str(request, "both"));
     yyjson_doc *parameters = yyjson_mut_val_imut_copy(copy, NULL);
     yyjson_mut_doc_free(request);
     yyjson_doc_free(listing);
-    JsonResult *tree = atspi_worker_call("get_window_state", yyjson_doc_get_root(parameters));
+    JsonResult *tree = atspi_worker_call("window_state", yyjson_doc_get_root(parameters));
     yyjson_doc_free(parameters);
-    if (!tree || !refresh_geometry() || !validate_canvas(0)) {
-        g_free(window_key);
-        free(window_signature);
+    if (!tree) {
         return NULL;
     }
-    gboolean same = FALSE;
-    yyjson_arr_foreach(json_member(yyjson_doc_get_root(visual.geometry), "windows"), i, n, candidate) {
-        if (!g_strcmp0(json_string(candidate, "key"), window_key)) {
-            char *signature = yyjson_val_write(candidate, 0, NULL);
-            same = !strcmp(signature, window_signature);
-            free(signature);
-        }
-    }
-    g_free(window_key);
-    free(window_signature);
-    if (!same) {
-        return scu_fail("stale_window_geometry", "Window geometry changed during the tree read. Observe again.");
-    }
-    result_integer(tree, "window_id", json_number(args, "window_id", 0));
-    result_integer(tree, "id", visual.canvas.id);
+    result_boolean(tree, "pid_matched", best == 2);
     JsonResult *rows = yyjson_mut_obj_get(tree, "elements"), *row;
     yyjson_mut_arr_foreach(rows, i, n, row) {
         yyjson_doc *raw = yyjson_mut_val_imut_copy(yyjson_mut_obj_get(row, "frame"), NULL);
@@ -2807,6 +2825,122 @@ static JsonResult *kwin_window_state(JsonValue *args)
         yyjson_mut_obj_remove_str(tree, "tree_markdown");
     }
     return tree;
+}
+
+static JsonValue *requested_kwin_window(JsonValue *args)
+{
+    size_t i, n;
+    JsonValue *window;
+    yyjson_arr_foreach(json_member(yyjson_doc_get_root(visual.geometry), "windows"), i, n, window) {
+        if (json_string(window, "key") && kwin_window_id(json_string(window, "key")) ==
+                json_number(args, "window_id", -1) && json_number(window, "pid", -1) ==
+                json_number(args, "pid", -2)) {
+            return window;
+        }
+    }
+    return NULL;
+}
+
+static JsonResult *window_image(JsonValue *args, JsonValue *window)
+{
+    CanvasRect frame;
+    if (!read_rect(json_member(window, "frame"), &frame) || !prepare_capture()) {
+        return NULL;
+    }
+    guint width = 0, height = 0;
+    GBytes *source = capture_pixels("CaptureWindow",
+        g_variant_new("(s)", json_string(window, "key")), &width, &height);
+    if (!source) {
+        return NULL;
+    }
+    guint maximum = json_number(args, "max_image_dimension", 1600);
+    double scale = maximum && MAX(width, height) > maximum ? (double)maximum / MAX(width, height) : 1;
+    guint output_width = MAX(1, (guint)(width * scale));
+    guint output_height = MAX(1, (guint)(height * scale));
+    CanvasLayout sampling = {.count = 1};
+    sampling.tiles[0] = frame;
+    sampling.native_widths[0] = width;
+    sampling.native_heights[0] = height;
+    GBytes *pixels = render_canvas(&sampling, &frame, output_width, output_height, &source);
+    g_bytes_unref(source);
+    if (!pixels) {
+        return NULL;
+    }
+    gboolean saved = append_image(pixels, output_width, output_height);
+    g_bytes_unref(pixels);
+    if (!saved) {
+        return NULL;
+    }
+    JsonResult *screenshot = result_object();
+    result_integer(screenshot, "width", output_width);
+    result_integer(screenshot, "height", output_height);
+    result_member(screenshot, "bounds", overview_rect(&frame));
+    JsonResult *result = result_object();
+    result_member(result, "screenshot", screenshot);
+    visual.observed_input_sequence = visual.input_sequence;
+    return result;
+}
+
+static JsonResult *observe_window(JsonValue *args)
+{
+    if (!visual.canvas.id || !validate_canvas(0)) {
+        clear_tool_error();
+        guint images = yyjson_mut_arr_size(scu.images);
+        if (!capture_desktop(NULL)) {
+            return NULL;
+        }
+        yyjson_mut_arr_remove_range(scu.images, images, yyjson_mut_arr_size(scu.images) - images);
+    }
+    JsonValue *window = requested_kwin_window(args);
+    if (!window) {
+        return scu_fail("window_unavailable", "KWin window is unavailable. Call status again.");
+    }
+    char *signature = yyjson_val_write(window, 0, NULL);
+    guint images = yyjson_mut_arr_size(scu.images);
+    JsonResult *result = NULL, *tree_error = NULL;
+    JsonResult *tree = window_tree(args, window);
+    if (!tree) {
+        if (g_strcmp0(scu.code, "accessibility_window_unavailable") &&
+            g_strcmp0(scu.code, "accessibility_unavailable")) {
+            goto done;
+        }
+        tree_error = error_payload();
+        clear_tool_error();
+    }
+    JsonResult *image = window_image(args, window);
+    if (!image) {
+        if (!tree || !scu_tick() || !scu_gate() || !require_computer_access()) {
+            goto done;
+        }
+        result_member(tree, "screenshot_error", error_payload());
+        clear_tool_error();
+    }
+    if (!refresh_geometry() || !validate_canvas(0)) {
+        goto done;
+    }
+    window = requested_kwin_window(args);
+    char *current = window ? yyjson_val_write(window, 0, NULL) : NULL;
+    gboolean same = current && !strcmp(signature, current);
+    free(current);
+    if (!same) {
+        scu_fail("stale_window_geometry", "Window changed during observation. Observe again.");
+        goto done;
+    }
+    result = tree ? tree : image;
+    if (tree && image) {
+        result_member(tree, "screenshot", yyjson_mut_obj_get(image, "screenshot"));
+    } else if (tree_error) {
+        result_member(image, "accessibility_error", tree_error);
+    }
+    result_integer(result, "pid", json_number(args, "pid", 0));
+    result_integer(result, "window_id", json_number(args, "window_id", 0));
+    result_integer(result, "id", visual.canvas.id);
+done:
+    free(signature);
+    if (!result) {
+        yyjson_mut_arr_remove_range(scu.images, images, yyjson_mut_arr_size(scu.images) - images);
+    }
+    return result;
 }
 
 
@@ -3453,9 +3587,6 @@ static JsonResult *scu_visual(const char *tool, JsonValue *arguments)
     if (strcmp(tool, "type_text") == 0) {
         return type_foreground_text(arguments);
     }
-    if (strcmp(tool, "get_desktop_state") == 0) {
-        return capture_desktop(arguments);
-    }
     JsonResult *result = pointer_action(tool, arguments);
     if (result == NULL) {
         release_input();
@@ -3525,7 +3656,7 @@ static const Argument window_arguments[] = {
     {.name = "max_elements", .type = ARG_INTEGER, .minimum = 1, .maximum = 2000},
     {.name = "max_depth", .type = ARG_INTEGER, .minimum = 1, .maximum = 32},
     {.name = "tree_format", .type = ARG_STRING, .choices = tree_formats},
-    {.name = "include_screenshot", .type = ARG_BOOLEAN},
+    {.name = "max_image_dimension", .type = ARG_INTEGER, .minimum = 0, .maximum = 16384},
     {NULL},
 };
 static const Argument capture_arguments[] = {
@@ -3599,15 +3730,15 @@ static const char *const require_key[] = {"key", NULL};
 static const char *const require_keys[] = {"keys", NULL};
 static const char *const require_delay[] = {"ms", NULL};
 
-/* Private adapters: computer is the only public observation entry point. */
-static const Tool desktop_observation = {
-    .name = "get_desktop_state",
+/* Observation schemas are shared by validation and tools/list. */
+static const Tool desktop_schema = {
+    .name = "desktop",
     .groups = ARGS_NONE,
     .arguments = capture_arguments,
 };
 
-static const Tool window_observation = {
-    .name = "get_window_state",
+static const Tool window_schema = {
+    .name = "window",
     .groups = ARGS_WINDOW,
     .required = require_window,
 };
@@ -3834,7 +3965,7 @@ static yyjson_doc *build_tool_schema(const Tool *tool)
         result_member(off, "enum", off_values);
         result_append(choices, off);
         const Tool *observation_tools[] = {
-            &desktop_observation, &window_observation};
+            &desktop_schema, &window_schema};
         const char *kinds[] = {"desktop", "window"};
         for (unsigned index = 0; index < 2; index++) {
             yyjson_doc *input = build_tool_schema(observation_tools[index]);
@@ -3986,12 +4117,6 @@ static gboolean validate_arguments(const Tool *t, JsonValue *args)
             "Choose either an element token or pixel coordinates.");
         return FALSE;
     }
-    if (strcmp(t->name, "get_window_state") == 0 &&
-        json_boolean(args, "include_screenshot")) {
-        scu_fail("unsupported_feature",
-            "Window screenshots are unsupported; use computer with no steps for a desktop image.");
-        return FALSE;
-    }
     return TRUE;
 }
 
@@ -4107,21 +4232,21 @@ static JsonResult *computer(JsonValue *args)
     if (automatic && (!has_actions || has_foreground)) {
         const char *defaults = "{\"max_image_dimension\":1600}";
         observation = yyjson_read(defaults, strlen(defaults), 0);
-        observer = &desktop_observation;
+        observer = &desktop_schema;
     } else if (yyjson_is_obj(observe)) {
         gboolean desktop = g_strcmp0(json_string(observe, "kind"), "desktop") == 0;
         observation = prepare_arguments(observe, 0, TRUE);
-        observer = desktop ? &desktop_observation : &window_observation;
+        observer = desktop ? &desktop_schema : &window_schema;
     }
     if (observer && !validate_arguments(observer, yyjson_doc_get_root(observation))) {
         goto done;
     }
-    if (observer == &desktop_observation &&
+    if (observer == &desktop_schema &&
         json_member(yyjson_doc_get_root(observation), "zoom") && visual.canvas.id &&
         !refresh_geometry()) {
         goto done;
     }
-    if (observer == &desktop_observation &&
+    if (observer == &desktop_schema &&
         !validate_zoom(yyjson_doc_get_root(observation), yyjson_get_uint(json_member(args, "id")))) {
         goto done;
     }
@@ -4169,18 +4294,21 @@ static JsonResult *computer(JsonValue *args)
         JsonResult *value = NULL;
         /* Also allow rendering time before a screenshot of a partial batch.
          * Empty observations and tree-only observations need no final pause. */
-        if (observer == &desktop_observation && count && !has_delay && !wait_for_delay(150)) {
+        if (count && !has_delay && !wait_for_delay(150)) {
             release_input();
         } else if (visual.broken || (failed && foreground_attempted &&
-                visual.bus == NULL && !strcmp(observer->name, "get_desktop_state"))) {
+                visual.bus == NULL)) {
             scu_fail("visual_session_closed", "Visual session disconnected during the batch.");
         } else {
-            value = execute_tool(observer, yyjson_doc_get_root(observation));
+            if (ensure_visual_session()) {
+                value = observer == &desktop_schema
+                    ? capture_desktop(yyjson_doc_get_root(observation))
+                    : observe_window(yyjson_doc_get_root(observation));
+            }
         }
         if (value) {
             result_member(result, "observation",
-                !strcmp(observer->name, "get_desktop_state")
-                    ? compact_observation(value) : value);
+                observer == &desktop_schema ? compact_observation(value) : value);
         } else {
             result_member(result, "observation_error", error_payload());
             failed = TRUE;
@@ -4219,14 +4347,7 @@ static JsonResult *execute_tool(const Tool *t, JsonValue *args)
         }
         return result_object();
     }
-    if (!strcmp(t->name, "get_window_state") &&
-        json_boolean(args, "include_screenshot")) {
-        return scu_fail("unsupported_feature",
-            "Window screenshots are unsupported; use computer with no steps for monitor "
-            "pixels.");
-    }
-    if (!strcmp(t->name, "get_window_state") ||
-        !strcmp(t->name, "set_value") || json_string(args, "element_token")) {
+    if (!strcmp(t->name, "set_value") || json_string(args, "element_token")) {
         return scu_atspi(t->name, args);
     }
     return scu_visual(t->name, args);
@@ -4547,6 +4668,8 @@ static const char computer_xml[] =
     "<method name='Capture'><arg type='i' direction='in'/><arg type='i' direction='in'/>"
     "<arg type='i' direction='in'/><arg type='i' direction='in'/><arg type='b' direction='in'/>"
     "<arg type='h' direction='out'/><arg type='u' direction='out'/><arg type='u' direction='out'/></method>"
+    "<method name='CaptureWindow'><arg type='s' direction='in'/>"
+    "<arg type='h' direction='out'/><arg type='u' direction='out'/><arg type='u' direction='out'/></method>"
     "<method name='ConnectInput'><arg type='h' direction='out'/></method>"
     "<method name='SetClipboard'><arg type='s' direction='in'/></method>"
     "</interface></node>";
@@ -4620,7 +4743,7 @@ static const char geometry_script[] =
     "var shown=!w.minimized&&(!w.desktops.length||w.desktops.indexOf(workspace.currentDesktop)>=0)"
     "&&(!w.activities.length||w.activities.indexOf(workspace.currentActivity)>=0);"
     "result.windows.push({key:String(w.internalId),pid:w.pid,app_name:w.resourceClass||w.resourceName,"
-    "title:w.caption,frame:rect(w.frameGeometry),client:rect(w.clientGeometry),shown:shown,active:w===workspace.activeWindow});}\n"
+    "title:w.caption,frame:rect(w.frameGeometry),client:rect(w.clientGeometry),buffer:rect(w.bufferGeometry),shown:shown,active:w===workspace.activeWindow});}\n"
     "callDBus('%s','" GEOMETRY_PATH "','" GEOMETRY_INTERFACE "','Publish','%s',JSON.stringify(result));\n";
 
 static void unload_geometry_script(void)
@@ -4848,17 +4971,37 @@ static int sealed_pixels(GBytes *pixels, GError **error)
     return fd;
 }
 
-static int host_capture(GVariant *args, GDBusConnection *peer, guint *width,
+static int host_capture(GVariant *args, const char *window_key, GDBusConnection *peer, guint *width,
     guint *height, GError **error)
 {
-    gint x, y, w, h;
-    gboolean native;
-    g_variant_get(args, "(iiiib)", &x, &y, &w, &h, &native);
+    gint x = 0, y = 0, w = 0, h = 0;
+    gboolean native = TRUE;
+    if (!window_key) {
+        g_variant_get(args, "(iiiib)", &x, &y, &w, &h, &native);
+    }
     CanvasRect bounds = {0};
     if (!host_geometry(error)) {
         return -1;
     }
-    if (!host_output_bounds(&bounds) || w <= 0 || h <= 0 || x < bounds.x || y < bounds.y ||
+    if (window_key) {
+        yyjson_doc *geometry = yyjson_read(host.geometry, strlen(host.geometry), 0);
+        size_t i, count;
+        JsonValue *window;
+        CanvasRect frame = {0};
+        yyjson_arr_foreach(json_member(yyjson_doc_get_root(geometry), "windows"), i, count, window) {
+            if (!g_strcmp0(json_string(window, "key"), window_key)) {
+                read_rect(json_member(window, "frame"), &frame);
+                break;
+            }
+        }
+        yyjson_doc_free(geometry);
+        if (frame.width <= 0 || frame.height <= 0) {
+            g_set_error(error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND, "KWin window is unavailable");
+            return -1;
+        }
+        w = -lower_integer(-frame.width);
+        h = -lower_integer(-frame.height);
+    } else if (!host_output_bounds(&bounds) || w <= 0 || h <= 0 || x < bounds.x || y < bounds.y ||
         (gint64)x + w > bounds.x + bounds.width || (gint64)y + h > bounds.y + bounds.height) {
         g_set_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT, "Capture is outside the KWin desktop");
         return -1;
@@ -4893,12 +5036,15 @@ static int host_capture(GVariant *args, GDBusConnection *peer, guint *width,
     g_variant_builder_add(&options, "{sv}", "native-resolution", g_variant_new_boolean(native));
     g_variant_builder_add(&options, "{sv}", "include-cursor", g_variant_new_boolean(FALSE));
     g_variant_builder_add(&options, "{sv}", "hide-caller-windows", g_variant_new_boolean(FALSE));
-    gboolean full = x == bounds.x && y == bounds.y && w == bounds.width && h == bounds.height;
-    GVariant *params = full ? g_variant_new("(a{sv}h)", &options, handle) :
+    g_variant_builder_add(&options, "{sv}", "include-decoration", g_variant_new_boolean(TRUE));
+    g_variant_builder_add(&options, "{sv}", "include-shadow", g_variant_new_boolean(FALSE));
+    gboolean full = !window_key && x == bounds.x && y == bounds.y && w == bounds.width && h == bounds.height;
+    GVariant *params = window_key ? g_variant_new("(sa{sv}h)", window_key, &options, handle) :
+        full ? g_variant_new("(a{sv}h)", &options, handle) :
         g_variant_new("(iiuua{sv}h)", x, y, (guint)w, (guint)h, &options, handle);
     GVariant *reply = handle >= 0 ? host_call("org.kde.KWin.ScreenShot2",
         "/org/kde/KWin/ScreenShot2", "org.kde.KWin.ScreenShot2",
-        full ? "CaptureWorkspace" : "CaptureArea", params, fds, NULL, error) : NULL;
+        window_key ? "CaptureWindow" : full ? "CaptureWorkspace" : "CaptureArea", params, fds, NULL, error) : NULL;
     g_object_unref(fds);
     GVariant *metadata = NULL;
     guint stride = 0, format = 0;
@@ -4964,9 +5110,13 @@ static void host_method(GDBusConnection *connection, const char *sender,
         if (host_geometry(&error)) {
             result = g_variant_new("(s)", host.geometry);
         }
-    } else if (!strcmp(method, "Capture")) {
+    } else if (!strcmp(method, "Capture") || !strcmp(method, "CaptureWindow")) {
         guint width = 0, height = 0;
-        int fd = host_capture(args, connection, &width, &height, &error);
+        const char *window_key = NULL;
+        if (!strcmp(method, "CaptureWindow")) {
+            g_variant_get(args, "(&s)", &window_key);
+        }
+        int fd = host_capture(args, window_key, connection, &width, &height, &error);
         if (fd >= 0) {
             fds = g_unix_fd_list_new();
             gint handle = g_unix_fd_list_append(fds, fd, &error);

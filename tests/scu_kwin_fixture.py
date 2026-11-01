@@ -44,6 +44,7 @@ XML = """<node>
 <method name='disconnect'><arg type='i' direction='in'/></method>
 </interface>
 <interface name='org.kde.KWin.ScreenShot2'>
+<method name='CaptureWindow'><arg type='s' direction='in'/><arg type='a{sv}' direction='in'/><arg type='h' direction='in'/><arg type='a{sv}' direction='out'/></method>
 <method name='CaptureArea'><arg type='i' direction='in'/><arg type='i' direction='in'/><arg type='u' direction='in'/><arg type='u' direction='in'/><arg type='a{sv}' direction='in'/><arg type='h' direction='in'/><arg type='a{sv}' direction='out'/></method>
 <method name='CaptureWorkspace'><arg type='a{sv}' direction='in'/><arg type='h' direction='in'/><arg type='a{sv}' direction='out'/></method>
 </interface>
@@ -83,7 +84,7 @@ def geometry():
     if config.get("overlap") and len(outputs) > 1:
         outputs[1]["geometry"]["x"] = -60
     windows = [{"key": "window-1", "pid": config.get("app_pid", 123), "app_name": "scu fixture",
-                "title": "scu test window", "frame": {"x": 10, "y": 10, "width": 40, "height": 30},
+                "title": config.get("window_title", "scu test window"), "frame": {"x": 10, "y": 10, "width": 40, "height": 30},
                 "client": {"x": 10, "y": 10, "width": 40, "height": 30}, "shown": True, "active": True}]
     if config.get("two_windows"):
         windows.append({**windows[0], "key": "window-2", "title": "scu second window",
@@ -91,6 +92,13 @@ def geometry():
                         "client": {"x": 15, "y": 15, "width": 40, "height": 30}})
     if config.get("bad_client"):
         windows[0]["client"]["width"] = 27
+        windows[0]["frame"]["width"] = 27
+    if config.get("buffer_client"):
+        windows[0]["buffer"] = windows[0]["client"]
+        windows[0]["client"] = {"x": 12, "y": 14, "width": 32, "height": 20}
+        windows[0]["frame"] = windows[0]["client"]
+    if config.get("duplicate_identity"):
+        windows.append({**windows[0], "key": "window-duplicate", "pid": 999999})
     return {"outputs": outputs, "windows": windows}
 
 
@@ -167,7 +175,7 @@ def method(connection, sender, path, interface, name, parameters, invocation):
         state["clipboard"] = values[0]
         save()
         invocation.return_value(None)
-    elif name in ("CaptureWorkspace", "CaptureArea"):
+    elif name in ("CaptureWorkspace", "CaptureArea", "CaptureWindow"):
         state["captures"] += 1
         state["capture_times"].append(time.monotonic())
         if config.get("hold_capture"):
@@ -179,8 +187,17 @@ def method(connection, sender, path, interface, name, parameters, invocation):
             save()
             return
         data = geometry()
-        x, y, w, h = bounds(data) if name == "CaptureWorkspace" else values[:4]
         options, handle = values[-2:]
+        if name == "CaptureWindow":
+            assert options["include-decoration"] and not options["include-shadow"]
+            window = next(w for w in data["windows"] if w["key"] == values[0])
+            x, y, w, h = (window["frame"][key] for key in ("x", "y", "width", "height"))
+            state.setdefault("window_captures", []).append(values[0])
+            if config.get("change_window_on_capture"):
+                config["window_title"] = "changed during capture"
+                args.control.write_text(json.dumps(config))
+        else:
+            x, y, w, h = bounds(data) if name == "CaptureWorkspace" else values[:4]
         scale = max(item["scale"] for item in data["outputs"]) if options.get("native-resolution") else 1
         width, height = int(w * scale), int(h * scale)
         raw = bytearray(width * height * 4)
@@ -192,7 +209,8 @@ def method(connection, sender, path, interface, name, parameters, invocation):
                              for r in data["outputs"])
                 offset = (py * width + px) * 4
                 if inside:
-                    raw[offset:offset+4] = bytes((int(gx * 2) % 256, int(gy * 2) % 256, (px % 2) * 255, 255))
+                    raw[offset:offset+4] = bytes((int(gx * 2) % 256, int(gy * 2) % 256,
+                                                123 if name == "CaptureWindow" else (px % 2) * 255, 255))
                 else:
                     raw[offset:offset+4] = b"\0\0\0\xff"
         # Transfer the received descriptor rather than retaining an extra writer
