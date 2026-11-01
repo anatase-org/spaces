@@ -44,6 +44,18 @@ static gboolean desktop_bind(const char *session, const char *wayland, GError **
 static void desktop_maintain(guint clients);
 static void desktop_close(void);
 
+/* Only this private envelope supplies the worker's per-MCP namespace. */
+static void atspi_request_clients(JsonResult *request)
+{
+    result_member(request, "client_id", yyjson_mut_uint(scu.doc, host_current ? host_current->serial : 0));
+    JsonResult *clients = result_array();
+    for (guint i = 0; host_clients && i < host_clients->len; i++) {
+        HostClient *client = g_ptr_array_index(host_clients, i);
+        if (!client->closed) result_append(clients, yyjson_mut_uint(scu.doc, client->serial));
+    }
+    result_member(request, "clients", clients);
+}
+
 static char *client_request_key(HostClient *client, JsonValue *id)
 {
     char *raw = request_id_key(id);

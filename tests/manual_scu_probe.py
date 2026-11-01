@@ -22,8 +22,6 @@ def main():
     parser.add_argument("--visual-actions", action="store_true")
     parser.add_argument("--entry-point", nargs=2, type=float,
                         help="Entry center in the returned 1280-pixel screenshot; inspect the image first")
-    parser.add_argument("--zoom", nargs=4, type=float, metavar=("LEFT", "TOP", "RIGHT", "BOTTOM"),
-                        help="Inspect native detail using full-overview coordinates")
     parser.add_argument("--surface-point", nargs=2, type=float,
                         help="Scroll/drag surface center in the returned screenshot")
     args = parser.parse_args()
@@ -65,29 +63,25 @@ def main():
         target = next({"window_id": window["window_id"]}
                       for app in status["apps"] for window in app["windows"]
                       if window["title"] == title)
-        snapshot = tool("vision", observe={"kind": "window", **target})["observation"]
+        snapshot = tool("vision", observations=[target["window_id"]])["observations"][0]
         rows = {item["label"]: item for item in snapshot["elements"]}
         expected = "Héllo 世界 " + args.token
         semantic = tool("accessibility", steps=[
-            {"tool": "activate", "args": {"element_token": rows["Spaces fixture button"]["element_token"]}},
-            {"tool": "set_value", "args": {"element_token": rows["Spaces fixture entry"]["element_token"], "value": expected}},
-            {"tool": "activate", "args": {"element_token": rows["Spaces fixture checkbox"]["element_token"]}},
+            {"tool": "activate", "args": {"element_id": rows["Spaces fixture button"]["element_id"]}},
+            {"tool": "set_value", "args": {"element_id": rows["Spaces fixture entry"]["element_id"], "value": expected}},
+            {"tool": "activate", "args": {"element_id": rows["Spaces fixture checkbox"]["element_id"]}},
         ], observations=[target["window_id"]])
         rows = {item["label"]: item for item in semantic["observations"][0]["elements"]}
         if args.capture or args.visual_actions:
-            first = tool("vision", observe={"kind": "desktop"})["observation"]
-            if args.zoom is not None:
-                detail = tool("vision", id=first["id"],
-                              observe={"kind": "desktop", "zoom": args.zoom})["observation"]
-                assert detail["id"] == first["id"], detail
+            first = tool("vision", observations=[])["observations"][0]
             if args.visual_actions:
                 if args.entry_point is None:
                     raise AssertionError("Inspect a capture and supply --entry-point X Y for visual tests")
                 image = first
                 x, y = args.entry_point
                 tool("accessibility", steps=[
-                    {"tool": "set_value", "args": {"element_token": rows["Spaces fixture entry"]["element_token"], "value": ""}}])
-                performed = tool("vision", observe={"kind": "desktop"}, steps=[
+                    {"tool": "set_value", "args": {"element_id": rows["Spaces fixture entry"]["element_id"], "value": ""}}])
+                performed = tool("vision", observations=[], steps=[
                     {"tool": "click", "args": {"id": image["id"], "x": x, "y": y}},
                     {"tool": "type_text", "args": {"text": "replace me"}},
                     {"tool": "press_keys", "args": {"keys": ["ctrl", "a"]}},
@@ -97,17 +91,17 @@ def main():
                     {"tool": "type_text", "args": {"text": "!"}},
                 ])
                 # Automatic overview replaces the global pixel capture.
-                image = performed["observation"]
+                image = performed["observations"][0]
                 if args.surface_point is not None:
                     x, y = args.surface_point
-                    tool("vision", observe={"kind": "desktop"}, steps=[
+                    tool("vision", observations=[], steps=[
                         {"tool": "scroll", "args": {"id": image["id"],
                                     "x": x, "y": y, "direction": "down", "amount": 2}},
                         {"tool": "drag", "args": {"id": image["id"],
                                   "from_x": x - 40, "from_y": y,
                                   "to_x": x + 40, "to_y": y + 20, "duration_ms": 300}},
                     ])
-                tool("vision", observe={"kind": "desktop"})
+                tool("vision", observations=[])
         print("probe completed; verify the independent host fixture state", flush=True)
     finally:
         process.stdin.close()

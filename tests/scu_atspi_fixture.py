@@ -14,7 +14,7 @@ from types import SimpleNamespace
 Atspi = SimpleNamespace(
     Role=SimpleNamespace(APPLICATION=75, FRAME=23, PUSH_BUTTON=43, ENTRY=79, PASSWORD_TEXT=40,
                          PANEL=39, SLIDER=51, DOCUMENT_WEB=95, TOOL_TIP=64),
-    StateType=SimpleNamespace(EDITABLE=7, ENABLED=8, FOCUSED=12, SENSITIVE=24, SHOWING=25, VISIBLE=30),
+    StateType=SimpleNamespace(DEFUNCT=6, EDITABLE=7, ENABLED=8, FOCUSED=12, SENSITIVE=24, SHOWING=25, VISIBLE=30),
 )
 
 ROOT = "/org/a11y/atspi/accessible/root"
@@ -128,6 +128,21 @@ def main():
     deep = next((int(arg.split("=", 1)[1]) for arg in sys.argv[3:] if arg.startswith("--deep=")), 0)
     wide = next((int(arg.split("=", 1)[1]) for arg in sys.argv[3:] if arg.startswith("--wide=")), 0)
     long_labels = "--long-labels" in sys.argv[3:]
+    element_ids = "--element-ids" in sys.argv[3:]
+    element_file = Path(state_path).with_suffix(".elements.json")
+    element_version = None
+    element_settings = {}
+    dynamic_paths = set()
+
+    def element_config():
+        nonlocal element_version, element_settings
+        if not element_ids or not element_file.exists(): return {}
+        version = element_file.stat().st_mtime_ns
+        if version != element_version:
+            element_settings = json.loads(element_file.read_text())
+            element_version = version
+        return element_settings
+
     delayed_window = "--delayed-window" in sys.argv[3:]
     title_after_attributes = "--title-after-attributes" in sys.argv[3:]
     geometry_after_attributes = "--geometry-after-attributes" in sys.argv[3:]
@@ -222,6 +237,17 @@ def main():
                 window_pending = True
                 GLib.timeout_add(200, expose_window)
             return []
+        if element_ids and path in window_paths:
+            settings = element_config()
+            names = settings.get("one" if path == WINDOW else "two", ["button", "entry", "password"])
+            paths = ["/org/a11y/atspi/accessible/" + name for name in names]
+            for child in paths:
+                if child.startswith(BUTTON + "/") and child not in dynamic_paths:
+                    for info in node.interfaces:
+                        if info.name in ("org.a11y.atspi.Accessible", "org.a11y.atspi.Component", "org.a11y.atspi.Action"):
+                            app.register_object(child, info, method, property_get, property_set)
+                    dynamic_paths.add(child)
+            return [(app.get_unique_name(), child) for child in paths]
         if path == WINDOW and (not exposed or empty):
             # Chromium can advertise a child while it still returns null.
             return [("", "/org/a11y/atspi/null")] if not empty else []
@@ -255,7 +281,7 @@ def main():
             values += ["org.a11y.atspi.Application"]
         if path != ROOT:
             values += ["org.a11y.atspi.Component"]
-        if path == BUTTON or path.startswith(BUTTON + "/"):
+        if path == BUTTON or path.startswith(BUTTON + "/") or (element_ids and path == ENTRY):
             values += ["org.a11y.atspi.Action"]
         if path in (ENTRY, PASSWORD):
             values += ["org.a11y.atspi.Text"]
@@ -314,6 +340,8 @@ def main():
                 bits &= ~(1 << Atspi.StateType.SHOWING)
             if path == ENTRY:
                 bits |= 1 << Atspi.StateType.EDITABLE
+            if element_ids and original_path.rsplit("/accessible/", 1)[-1] in element_config().get("defunct", []):
+                bits |= 1 << Atspi.StateType.DEFUNCT
             still_focused = focused
             if lose_focus:
                 oracle = Path(state_path).with_name("kwin-state.json")
@@ -343,6 +371,7 @@ def main():
         elif name == "DoAction":
             state["clicks"] += 1
             state["last_action"] = actions()[args[0]]
+            state["last_action_path"] = original_path
             state["action_times"].append(GLib.get_monotonic_time() / 1_000_000)
             save()
             reply = GLib.Variant("(b)", (True,))
@@ -399,6 +428,9 @@ def main():
 
     def property_get(connection, sender, path, interface, name):
         if name == "Name":
+            if element_ids:
+                label = element_config().get("labels", {}).get(path.rsplit("/accessible/", 1)[-1])
+                if label is not None: return GLib.Variant("s", label)
             if path == WINDOW or (path == WINDOW_TWO and duplicate_windows):
                 if title_after_attributes and not frame_ready:
                     return GLib.Variant("s", "Loading")

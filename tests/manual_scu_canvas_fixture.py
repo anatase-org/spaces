@@ -1,4 +1,4 @@
-"""Host-only Qt fixture for combined-canvas, zoom and cross-screen input checks.
+"""Host-only Qt fixture for combined-canvas and cross-screen input checks.
 
 Creates a temporary full-screen window on each host screen. Close the process
 after testing to restore the underlying desktop. JSON state is the independent

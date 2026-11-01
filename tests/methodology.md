@@ -604,9 +604,9 @@ flag. Empty modern client capabilities still expose vision by default: the
 has no standard flag describing model vision support. SCU performs no inference
 from client names, absent capabilities, or sampling support.
 
-`vision` accepts only `steps`, `observe`, and optional `id`.
+`vision` accepts only `steps`, `observations`, and optional `id`.
 The capture `id` is a positive integer issued by the shared host.
-The same numeric ID appears in canvas, desktop/zoom and tree observations.
+The same numeric ID appears in canvas, desktop and tree observations.
 An explicit pixel-step `id` overrides the batch ID; omission uses the latest
 valid overview. Strings and the old `capture_id` spelling are rejected.
 Steps are ordered `{tool,args}` objects, at most 64. Vision actions, in schema order, are `click`, `move_cursor`, `drag`, `scroll`,
@@ -622,13 +622,13 @@ Observation failure is separate from completed actions and also sets status to
 
 `accessibility` accepts only optional `steps` and `observations:[window_id,...]`.
 Its actions, in order, are `activate`, `open_context_menu`, targeted `type_text`,
-`set_value`, and `delay_ms`. Targeted text requires `element_token`; vision text
+`set_value`, and `delay_ms`. Targeted text requires `element_id`; vision text
 rejects it. Both schemas put delay last and reject cross-tool actions before any
 batch effects. Tool descriptions, argument variants, action membership,
 observation declarations and server instructions are maintained together in
 `native/scu_mcp.h`; discovery and runtime validation consume that catalog.
 
-Accessibility executes actions before reading windows, so a token from a vision
+Accessibility executes actions before reading windows, so an element ID from a vision
 observation can be used directly. Omitted observations or `[]` reads no trees.
 The response includes an `observations` array and never images, including after
 verified keyboard editing. At most 64 steps and 64 requested window IDs are
@@ -641,10 +641,10 @@ For example, one missing window followed by a readable window returns:
 {"completed":0,"status":"failed","observations":[{"window_id":99,"error":{"code":"window_unavailable","hint":"KWin window is unavailable. Call status again."}},{"window_id":1,"id":2,"elements":[]}]}
 ```
 
-Vision keeps the previous single-observation shape:
+Vision also returns an `observations` array:
 
 ```json
-{"status":"ok","completed":2,"observation":{"id":2,"width":1600,"height":900}}
+{"status":"ok","completed":2,"observations":[{"id":2,"width":1600,"height":900}]}
 ```
 
 Step failures identify the zero-based index and stop the remaining sequence:
@@ -676,29 +676,28 @@ They are fixed timers and do not check whether an application has finished.
 ```
 
 This submits Enter, waits 1.5 seconds, then returns one screenshot. A delay-only
-sequence waits before observing; `observe:false` suppresses that observation.
+sequence waits before observing; `observations:false` suppresses that observation.
 Accessibility delays do not request screenshots or start a visual session.
 
-An empty vision call captures a full overview. Vision batches return one final
-full overview automatically; `observe:false` suppresses it and an explicit
-observation replaces it. Accessibility never captures automatically.
-Desktop observation metadata contains `id`, `width`, `height`, and
-`zoom` when requested. Width and height describe the returned image, including
-zoom crops; the global input coordinate frame remains the full overview.
-An explicit window observation requests an accessibility tree:
+An empty vision call captures a full overview. Omitted observations or `[]`
+returns the desktop screenshot; `observations:false` suppresses all screenshots
+and tree reads. A window ID array requests screenshots and accessibility trees
+for each distinct window, in input order. Accessibility never captures automatically.
+Desktop observation metadata contains `id`, `width`, and `height`.
+Width and height describe the returned image; the global input coordinate frame
+remains the full overview. For example:
 
 ```json
-{"observe":{"kind":"window","window_id":1}}
+{"observations":[1]}
 ```
 
-The optional boolean `screenshot` defaults to true. Once a desktop overview has
-established the coordinate frame, use
-`{"observe":{"kind":"window","window_id":1,"screenshot":false}}` to return
-only the tree. This performs no capture or unlock, reuses the overview's `id`,
-and preserves its coordinate mapping. Missing or stale overviews return
-`stale_capture`; request a fresh screenshot before continuing. Accessibility
-failures return an observation error without falling back to an image when
-screenshots are disabled.
+Window screenshots cannot be disabled individually. Use the accessibility tool
+with `observations:[window_id,...]` for only trees. This performs no capture or
+unlock, reuses the overview's `id`, and preserves its coordinate mapping.
+Missing or stale overviews return `stale_capture`; request a fresh screenshot
+before continuing. Accessibility failures return an observation error without
+falling back to an image. The old `observe`, `screenshot`, and `zoom` arguments
+are rejected before effects.
 
 Window observations use one structured `elements` tree. SCU owns traversal,
 compaction and response limits; `max_depth`, `max_elements`, `tree_format` and
@@ -722,7 +721,7 @@ Container hypertext is not copied into every ancestor. Offscreen controls stay
 in the tree and remain semantic targets, including controls without visible or
 showing states. Rectangles never determine whether a control is included.
 Dormant tooltips and nodes without semantic content are omitted; unnamed text
-and numeric controls remain. Controls and content retain tokens, roles, labels,
+and numeric controls remain. Controls and content retain element IDs, roles, labels,
 compact ancestry and overview-coordinate
 frames. `actions` names the supported SCU actions, including `activate` and
 `open_context_menu` independently when provided by the toolkit. Only true
@@ -746,8 +745,17 @@ controls. Complexity is not reported as accessibility being unavailable. A
 missing bridge can still return the window screenshot with the specific
 accessibility error.
 
-Element tokens identify action targets; replacing a window's tree invalidates
-its old tokens. Unsupported rectangles are null. Toolkit default-action names
+Integer `element_id` values identify action targets. Each MCP connection owns a
+20000-slot lookup table shared across all windows. AT-SPI application bus name
+and object path preserve an object's ID through repeated tree reads and property
+changes. New objects allocate slots 0 through 19999, then overwrite slots in the
+same order; reads and actions do not refresh eviction order. An overwritten ID
+targets its new occupant. Absent rows remain cached; unallocated or defunct
+objects return `stale_element`. Other clients cannot invalidate these IDs.
+Disconnected clients' tables are discarded at the next worker request, and a
+worker restart resets all tables. `element_index` and `parent_index` describe
+only the current tree structure. The string `element_token` and `snapshot_id`
+fields are removed. Unsupported rectangles are null. Toolkit default-action names
 such as Chromium's `jump`, `open`, `doDefault` and `clickAncestor` map to
 `activate`; unknown action names never invoke an arbitrary action index.
 Scroll `amount` always counts lines; no unit selector is exposed.
@@ -790,19 +798,9 @@ pointer device where possible; another device is used only for a split capabilit
 
 All images have a 2048-pixel long-edge cap set by the shared
 `MAX_IMAGE_DIMENSION` constant. Image size is not configurable over MCP.
-Zoom reads native source detail and preserves aspect ratio within that same cap.
 `canvas` contains only overview `width`, `height`, and `id`.
-Zoom reads fresh native-detail ScreenShot2 pixels, not enlarged overview pixels:
-
-```json
-{"id":1,"observe":{"kind":"desktop","zoom":[100,200,500,450]}}
-```
-
-`zoom` is `[left,top,right,bottom]` in full-overview coordinates. It requires a
-valid overview, preserves that overview's capture ID and coordinate frame, and
-is not sticky. New full observations rotate the ID. KWin/output/input-mapping
-replacement invalidates it. Removed selectors and invalid/stale zoom options
-are rejected before effects.
+New full observations rotate the ID. KWin/output/input-mapping replacement
+invalidates it. Removed selectors are rejected before effects.
 
 After foreground input, observation attempts a bounded EIS round trip and
 allows the existing 100 ms render interval before requesting fresh compositor
@@ -1089,7 +1087,7 @@ Before a window snapshot, SCU requests the selected frame's attributes through
 the standard AT-SPI API. Chromium uses this query as a signal to enable its full
 tree. SCU dispatches events and refreshes the frame cache for up to two seconds
 if no readable children exist, including nonzero counts with null child objects.
-Unsupported attribute queries are nonfatal. Snapshot tokens are allocated after
+Unsupported attribute queries are nonfatal. Element IDs are resolved after
 preparation, and normal cancellation, window matching and geometry checks apply.
 
 The private-bus tests cover consumer reuse, idle event dispatch, explicit
@@ -1241,15 +1239,15 @@ also passed.
 ### Semantic actions and pointer clicks
 
 `activate` invokes an element's default action; `open_context_menu` invokes its
-advertised context-menu action. Both require only `element_token`. They operate
+advertised context-menu action. Both require only `element_id`. They operate
 without a pointer or desktop unlock, including offscreen activation. Unsupported
-actions return `accessible_action_failed`, and replaced snapshots retain the
-existing `stale_element` behavior.
+actions return `accessible_action_failed`; unallocated and defunct targets return
+`stale_element`. New tree observations preserve cached element IDs.
 
 `click` requires `x` and `y`, with optional capture `id`, mouse `button` and
-`count`. It rejects element tokens before any batch effects. Middle and repeated
+`count`. It rejects element IDs before any batch effects. Middle and repeated
 clicks use explicit pixel coordinates; there is no automatic conversion from a
-token into pointer input. Semantic actions are grouped in `accessibility`;
+element ID into pointer input. Semantic actions are grouped in `accessibility`;
 `delay_ms` remains last in both batch schemas.
 
 The browser probe uses semantic activation for buttons, links, an offscreen
@@ -1359,3 +1357,53 @@ not demonstrated. These startup limitations remain separate from the tool split.
 Diagnostic artifacts are in `.build/scu-split-browser`,
 `.build/scu-split-browser-diagnostic` and `.build/scu-split-browser-active-first`;
 the accepted complete run is `.build/scu-split-browser-final`.
+
+### Why SCU unlocks the screen
+
+A locked-screen diagnostic on win5, 2026-11-01, distinguished SCU's current
+unlock policy from compositor requirements. The installed `scu-host` was run
+through its existing private `--host-service` fixture harness, with an owned
+socket and GTK/Qt oracle windows. This harness leaves `desktop.session` unset,
+so it skips SCU's automatic unlock and lock-input guards while using the real
+KWin capture, geometry, EIS and AT-SPI implementations. No installed executable,
+service, permission or SELinux policy was changed.
+
+Both logind `LockedHint` and ScreenSaver `GetActive` remained true around each
+locked operation. The physical display was awake. Results:
+
+| Operation while locked | Observed result |
+|---|---|
+| Full workspace screenshot | Succeeded, showing the locker rather than the application desktop. |
+| Individual application screenshot | Succeeded, showing the Qt window behind the locker. |
+| Window accessibility trees | Succeeded for both GTK and Qt. |
+| Semantic button activation | Incremented the independent Qt fixture's click counter. |
+| Native text replacement/insertion | Updated the independent GTK and Qt fixture text. |
+| EIS pointer motion and keyboard submission | Accepted by SCU/EIS while the desktop remained locked. Foreground typing did not update the application. |
+| Fresh EIS connection and status while already locked | Succeeded; the locker does not inherently prevent connection/device initialization. |
+
+A second capture after foreground input showed the locker password field
+containing the dummy diagnostic text. No Enter or authentication submission was
+sent. After explicit unlocking, the same warm EIS connection immediately
+updated the application with the next marker. This identifies input routing,
+rather than unavailable libraries, a failed EIS connection, or a capture error,
+as the reason foreground application input needs an unlocked desktop.
+
+[KWin 6.8.2's LockScreenFilter](https://github.com/KDE/kwin/blob/v6.8.2/src/input.cpp#L280)
+consumes input while locked and restricts delivery to locker/input-method/locker
+overlay surfaces. Ordinary application surfaces are excluded. This matches the
+observed successful input submission to the locker rather than the fixture.
+
+SCU currently applies `desktop_ready()` before both foreground input and
+captures, including status. That is a broader policy than the backend requires:
+window screenshots and native accessibility operations can work without
+unlocking. An unobscured desktop overview needs unlocking; otherwise its image
+is the locker. Accessibility operations that fall back to foreground keyboard
+input share that input-routing requirement. The existing automatic-unlock tests
+verify the policy; they do not establish that all capture operations require it.
+
+Evidence, oracle state, the driver, and screenshots are retained under
+`.build/scu-lock-diagnostic/artifacts` and
+`.build/scu-lock-diagnostic/followup-artifacts`. The diagnostic restored the
+initially unlocked session and removed its remote fixture directory, processes
+and sockets. Final checks: `LockedHint=no`, shared SCU `MainPID=0`, and SELinux
+`Enforcing`.

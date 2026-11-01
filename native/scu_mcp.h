@@ -17,6 +17,7 @@
 #include <unistd.h>
 #define MAX_CAPTURE_ID G_GUINT64_CONSTANT(9007199254740991)
 #define MAX_IMAGE_DIMENSION 2048
+#define ELEMENT_CAPACITY 20000
 
 /* Public catalog: usage, descriptions, argument variants, membership and observations. */
 static const char usage[] =
@@ -46,43 +47,32 @@ static const char server_instructions[] =
 static const char no_vision_instructions[] =
     "Computer use MCP server. Control the host desktop through accessibility. "
     "Start with status for canvas metadata and window IDs, "
-    "then use accessibility for element actions and window trees. ",
+    "then use accessibility for element actions and window trees. "
     "This MCP has no vision support.";
 
 static const char status_description[] =
     "Run first for health checks, canvas metadata, apps/windows and a full desktop screenshot. "
-    "Window bounds, element frames and pixel actions share the full screenshot's coordinates. "
-    "Screenshots unlock the host desktop when needed. ";
+    "Window bounds, element frames and pixel actions share the full screenshot's coordinates.";
 static const char no_vision_status_description[] =
-    "Run first for health checks, canvas metadata, apps and windows. Initializes the desktop overview internally "
-    "and may unlock the desktop. Returns no images.";
+    "Run first for health checks, canvas metadata, apps and windows.";
 
 static const char vision_description[] =
     "Execute up to 64 JSON steps shaped {tool,args}, in order and stop "
-    "on failure. Returns one final observation. "
+    "on failure. Returns final observations. "
     "Responses report status:ok/failed and the completed step count. "
     "Insert {tool:delay_ms,args:{ms:500}} to pause anywhere, the final "
-    "observation waits for all steps including trailing delays (there are "
+    "observations wait for all steps including trailing delays (there are "
     "some default delays if not provided). "
-    "Use observe:false to skip observation or observe:{kind:window,window_id} "
-    "for a screenshot and an accessibility tree. "
+    "Use observations:false to skip observation or observations:[window_id,...] for screenshots and accessibility trees of Windows. "
+    "Omit observations or pass [] for a desktop screenshot. "
     "Prefer the accessibility tree to locate controls when working with a "
     "single application, especially browsers. "
     "When the tree provides the controls you need, use "
     "accessibility with observations:[window_id] for subsequent trees "
     "to skip the screenshot. "
-    "All pixel coordinates are global to the full overview, including after "
-    "observe.zoom. "
-    "Use zoom:[left,top,right,bottom] to read native detail on large desktops. "
+    "All pixel coordinates are global to the full overview. "
     "Screenshots and foreground input unlock the host desktop when needed; "
     "tree-only observations leave it locked. ";
-static const char observation_description[] =
-    "Omit for a desktop image with no steps or after foreground input; false disables it. "
-    "Use {kind:desktop,zoom:[left,top,right,bottom]} for an image or native-detail crop. "
-    "Use {kind:window,window_id} for a compact accessibility tree and window screenshot. "
-    "Add screenshot:false for only the tree. "
-    "An explicit object replaces automatic observation. Zoom coordinates and all actions "
-    "stay in the full overview's global pixel space; zoom never changes that frame.";
 static const char accessibility_description[] =
     "Execute up to 64 JSON steps shaped {tool,args}, in order and stop "
     "on failure. Responses report status:ok/failed and the completed step count. "
@@ -112,13 +102,13 @@ typedef struct {
     double minimum;
     double maximum; /* Zero means no bound in this argument definition. */
     const char *description;
+    gboolean allow_false;
 } Argument;
 
 typedef enum {
     ARGS_NONE = 0,
     ARGS_ACTION = 1 << 0,
     ARGS_POINT = 1 << 1,
-    ARGS_WINDOW = 1 << 2,
 } ArgumentGroups;
 
 typedef enum { BATCH_NONE = 0, BATCH_VISION = 1, BATCH_ACCESSIBILITY = 2 } BatchKind;
@@ -138,25 +128,14 @@ static const char *const pointer_buttons[] = {"left", "right", "middle", NULL};
 static const char *const scroll_directions[] = {"up", "down", "left", "right", NULL};
 
 static const Argument action_arguments[] = {
-    {.name = "element_token", .type = ARG_STRING},
+    {.name = "element_id", .type = ARG_INTEGER, .minimum = 0, .maximum = ELEMENT_CAPACITY - 1,
+        .description = "Element ID from any window tree. Rolls over after 20k elements. Remains valid while the element exists."},
     {NULL},
 };
 static const Argument point_arguments[] = {
     {.name = "x", .type = ARG_NUMBER},
     {.name = "y", .type = ARG_NUMBER},
     {.name = "id", .type = ARG_INTEGER, .minimum = 1, .maximum = MAX_CAPTURE_ID},
-    {NULL},
-};
-static const Argument window_arguments[] = {
-    {.name = "window_id", .type = ARG_INTEGER},
-    {.name = "screenshot", .type = ARG_BOOLEAN,
-        .description = "Include a window screenshot (default true). False returns only the tree "
-            "and requires a valid previous desktop overview."},
-    {NULL},
-};
-static const Argument capture_arguments[] = {
-    {.name = "zoom", .type = ARG_NUMBER_ARRAY, .minimum = 4, .maximum = 4,
-        .description = "[left,top,right,bottom] in full-overview coordinates. Read native detail without changing the global coordinate frame or capture ID."},
     {NULL},
 };
 static const Argument click_arguments[] = {
@@ -199,9 +178,10 @@ static const Argument delay_arguments[] = {
 static const Argument vision_arguments[] = {
     {.name = "steps", .type = ARG_OBJECT_ARRAY, .maximum = 64,
         .description = "Optional ordered {tool,args} actions. Omit or pass [] to observe without acting."},
-    {.name = "observe", .type = ARG_OBJECT},
+    {.name = "observations", .type = ARG_INTEGER_ARRAY, .maximum = 64, .allow_false = TRUE,
+        .description = "Window IDs for screenshots and trees after acting, once per distinct ID in input order. Omit or pass [] for a desktop screenshot; false skips observation."},
     {.name = "id", .type = ARG_INTEGER, .minimum = 1, .maximum = MAX_CAPTURE_ID,
-        .description = "Optional full-overview capture used for pixel steps and zoom. Omission uses the latest overview."},
+        .description = "Optional full-overview capture used for pixel steps. Omission uses the latest overview."},
     {NULL},
 };
 
@@ -212,31 +192,15 @@ static const Argument accessibility_arguments[] = {
         .description = "Window IDs to read after acting, once per distinct ID in input order. Omit or pass [] to skip tree reads."},
     {NULL},
 };
-static const char *const require_window[] = {"window_id", NULL};
 static const char *const require_point[] = {"x", "y", NULL};
-static const char *const require_element[] = {"element_token", NULL};
+static const char *const require_element[] = {"element_id", NULL};
 static const char *const require_drag[] = {"from_x", "from_y", "to_x", "to_y", NULL};
 static const char *const require_scroll[] = {"x", "y", "direction", NULL};
 static const char *const require_text[] = {"text", NULL};
-static const char *const require_targeted_text[] = {"element_token", "text", NULL};
-static const char *const require_value[] = {"element_token", "value", NULL};
+static const char *const require_targeted_text[] = {"element_id", "text", NULL};
+static const char *const require_value[] = {"element_id", "value", NULL};
 static const char *const require_keys[] = {"keys", NULL};
 static const char *const require_delay[] = {"ms", NULL};
-
-/* Observation schemas are shared by validation and tools/list. */
-static const Tool desktop_schema = {
-    .name = "desktop",
-    .groups = ARGS_NONE,
-    .arguments = capture_arguments,
-};
-
-static const Tool window_schema = {
-    .name = "window",
-    .groups = ARGS_WINDOW,
-    .required = require_window,
-};
-
-static const Tool *const observation_schemas[] = {&desktop_schema, &window_schema};
 
 static const Tool tools[] = {
     {.name = "status",
@@ -495,6 +459,16 @@ static void add_argument_schemas(JsonResult *properties, const Argument *argumen
             result_number(property, "minimum", argument->minimum);
             result_number(property, "maximum", argument->maximum);
         }
+        if (argument->allow_false) {
+            JsonResult *alternatives = result_array(), *off = result_object(), *values = result_array();
+            result_string(off, "type", "boolean");
+            result_append(values, yyjson_mut_false(scu.doc));
+            result_member(off, "enum", values);
+            result_append(alternatives, property);
+            result_append(alternatives, off);
+            property = result_object();
+            result_member(property, "anyOf", alternatives);
+        }
         result_member(properties, argument->name, property);
     }
 }
@@ -510,9 +484,6 @@ static yyjson_doc *build_tool_schema(const Tool *tool)
     }
     if (tool->groups & ARGS_POINT) {
         add_argument_schemas(properties, point_arguments);
-    }
-    if (tool->groups & ARGS_WINDOW) {
-        add_argument_schemas(properties, window_arguments);
     }
     if (tool->batch != BATCH_NONE) {
         /* Advertise the actual nested contract, not an opaque array of objects.
@@ -547,36 +518,6 @@ static yyjson_doc *build_tool_schema(const Tool *tool)
         result_member(items, "anyOf", alternatives);
         result_member(yyjson_mut_obj_get(properties, "steps"), "items", items);
 
-        if (tool->batch == BATCH_VISION) {
-            JsonResult *observe = result_object(), *choices = result_array();
-            JsonResult *off = result_object(), *off_values = result_array();
-            result_string(off, "type", "boolean");
-            result_append(off_values, yyjson_mut_false(scu.doc));
-            result_member(off, "enum", off_values);
-            result_append(choices, off);
-            for (unsigned index = 0; index < G_N_ELEMENTS(observation_schemas); index++) {
-                const Tool *observer = observation_schemas[index];
-                yyjson_doc *input = build_tool_schema(observer);
-                JsonResult *option = yyjson_val_mut_copy(scu.doc, yyjson_doc_get_root(input));
-                JsonResult *kind = result_object(), *values = result_array();
-                result_string(kind, "type", "string");
-                result_append(values, yyjson_mut_str(scu.doc, observer->name));
-                result_member(kind, "enum", values);
-                result_member(yyjson_mut_obj_get(option, "properties"), "kind", kind);
-                JsonResult *observe_required = result_array();
-                result_append(observe_required, yyjson_mut_str(scu.doc, "kind"));
-                if (observer->required) {
-                    for (const char *const *field = observer->required; *field; field++)
-                        result_append(observe_required, yyjson_mut_str(scu.doc, *field));
-                }
-                result_member(option, "required", observe_required);
-                result_append(choices, option);
-                yyjson_doc_free(input);
-            }
-            result_member(observe, "anyOf", choices);
-            result_string(observe, "description", observation_description);
-            result_member(properties, "observe", observe);
-        }
     }
     if (tool->required != NULL) {
         JsonResult *ordered = result_object();

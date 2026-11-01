@@ -32,6 +32,7 @@ static gboolean require_computer_access(void);
 static void stop_atspi_worker(void);
 static int run_atspi_worker(guint base);
 static JsonResult *atspi_worker_call(const char *tool, JsonValue *args);
+static void atspi_request_clients(JsonResult *request);
 static gboolean inside_atspi_worker, retire_atspi_worker;
 static void scu_invalidate(void);
 static JsonResult *scu_atspi(const char *tool, JsonValue *args);
@@ -199,24 +200,22 @@ typedef struct {
 } Window;
 typedef struct {
     AtspiAccessible *accessible;
+    char *key;
     guint window, pid;
 } Element;
+typedef struct {
+    Element slots[ELEMENT_CAPACITY];
+    GHashTable *by_object;
+    guint next;
+} ElementTable;
 static GPtrArray *windows;
-static GHashTable *elements;
-static guint next_window = 1, snapshot;
+static GHashTable *element_tables;
+static ElementTable *element_table;
+static guint next_window = 1;
+
 static void free_window(gpointer p)
 {
     Window *w = p;
-    if (elements != NULL) {
-        GHashTableIter iterator;
-        gpointer value;
-        g_hash_table_iter_init(&iterator, elements);
-        while (g_hash_table_iter_next(&iterator, NULL, &value)) {
-            if (((Element *)value)->window == w->id) {
-                g_hash_table_iter_remove(&iterator);
-            }
-        }
-    }
     g_object_unref(w->accessible);
     g_free(w->key);
     g_free(w->app);
@@ -224,11 +223,60 @@ static void free_window(gpointer p)
     g_free(w);
 }
 
-static void free_element(gpointer p)
+static void free_element_table(gpointer p)
 {
-    Element *e = p;
-    g_object_unref(e->accessible);
-    g_free(e);
+    ElementTable *table = p;
+    g_hash_table_unref(table->by_object);
+    for (guint i = 0; i < ELEMENT_CAPACITY; i++) {
+        g_clear_object(&table->slots[i].accessible);
+        g_free(table->slots[i].key);
+    }
+    g_free(table);
+}
+
+/* The host supplies connection identities, never public tool arguments. Prune
+ * dead clients at this serialized boundary, outside nested AT-SPI dispatch. */
+static void select_element_table(JsonValue *request)
+{
+    if (!element_tables)
+        element_tables = g_hash_table_new_full(g_int64_hash, g_int64_equal, g_free, free_element_table);
+    element_table = NULL;
+    JsonValue *clients = json_member(request, "clients"), *client;
+    GHashTableIter iterator;
+    gpointer key;
+    g_hash_table_iter_init(&iterator, element_tables);
+    while (g_hash_table_iter_next(&iterator, &key, NULL)) {
+        gboolean live = FALSE;
+        size_t i, n;
+        yyjson_arr_foreach(clients, i, n, client) {
+            live |= *(guint64 *)key == yyjson_get_uint(client);
+        }
+        if (!live) g_hash_table_iter_remove(&iterator);
+    }
+    guint64 serial = yyjson_get_uint(json_member(request, "client_id"));
+    size_t i, n;
+    yyjson_arr_foreach(clients, i, n, client) {
+        if (serial && serial == yyjson_get_uint(client)) {
+            element_table = g_hash_table_lookup(element_tables, &serial);
+            if (!element_table) {
+                element_table = g_new0(ElementTable, 1);
+                element_table->by_object = g_hash_table_new(g_str_hash, g_str_equal);
+                guint64 *stored = g_new(guint64, 1);
+                *stored = serial;
+                g_hash_table_insert(element_tables, stored, element_table);
+            }
+            break;
+        }
+    }
+}
+
+static Element *lookup_element(JsonValue *args)
+{
+    JsonValue *id = json_member(args, "element_id");
+    if (!element_table || !yyjson_is_int(id) || yyjson_get_num(id) < 0 ||
+        yyjson_get_num(id) >= ELEMENT_CAPACITY) return NULL;
+    Element *element = &element_table->slots[yyjson_get_uint(id)];
+    return element->accessible ? element : NULL;
 }
 
 /* Keep backend failures reportable as tool errors. Never unload libatspi:
@@ -309,9 +357,8 @@ static void scu_atspi_close(void)
     g_clear_object(&input_target);
     g_clear_pointer(&input_expected, g_free);
     clear_clipboard_selection();
-    if (elements) {
-        g_hash_table_remove_all(elements);
-    }
+    element_table = NULL;
+    if (element_tables) g_hash_table_remove_all(element_tables);
     if (windows) {
         g_ptr_array_set_size(windows, 0);
     }
@@ -382,9 +429,6 @@ static gboolean ensure_atspi(void)
     if (!windows) {
         windows = g_ptr_array_new_with_free_func(free_window);
     }
-    if (!elements) {
-        elements = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, free_element);
-    }
     return TRUE;
 }
 
@@ -403,6 +447,36 @@ static gboolean accessible_has_state(AtspiAccessible *o, AtspiStateType type)
         g_object_unref(s);
     }
     return b;
+}
+
+/* Identity is the AT-SPI endpoint, independent of tree position or labels.
+ * Re-observation does not refresh FIFO order. Only new objects move the ring. */
+static guint cache_element(AtspiAccessible *node, Window *window)
+{
+    char *key = object_key(node);
+    Element *element = g_hash_table_lookup(element_table->by_object, key);
+    if (element && accessible_has_state(element->accessible, ATSPI_STATE_DEFUNCT)) {
+        g_hash_table_remove(element_table->by_object, element->key);
+        g_clear_pointer(&element->key, g_free);
+        g_clear_object(&element->accessible);
+        element = NULL;
+    }
+    if (!element) {
+        element = &element_table->slots[element_table->next];
+        if (element->key) g_hash_table_remove(element_table->by_object, element->key);
+        g_clear_object(&element->accessible);
+        g_free(element->key);
+        element->key = key;
+        g_hash_table_insert(element_table->by_object, key, element);
+        element_table->next = (element_table->next + 1) % ELEMENT_CAPACITY;
+    } else {
+        g_free(key);
+        g_clear_object(&element->accessible);
+    }
+    element->accessible = g_object_ref(node);
+    element->window = window->id;
+    element->pid = window->pid;
+    return (guint)(element - element_table->slots);
 }
 
 static JsonResult *accessible_frame(AtspiAccessible *o)
@@ -622,7 +696,6 @@ typedef struct {
     Window *window;
     JsonResult *rows;
     JsonValue *scales;
-    char snapshot[16];
 } Walk;
 
 static void mark_tree_complex(JsonResult *tree)
@@ -808,10 +881,9 @@ static void append_accessible(Walk *state, AtspiAccessible *node,
     if (emit) {
         guint index = state->count;
         char *role = atspi.accessible_get_role_name(node, NULL);
-        char *token = g_strdup_printf("%s:%u", state->snapshot, index);
         JsonResult *row = result_object();
         result_integer(row, "element_index", index);
-        result_string(row, "element_token", token);
+        result_integer(row, "element_id", cache_element(node, state->window));
         result_integer(row, "parent_index", parent);
         result_integer(row, "depth", depth);
         result_string(row, "role", role);
@@ -856,16 +928,10 @@ static void append_accessible(Walk *state, AtspiAccessible *node,
             g_clear_error(&error);
         }
         if (yyjson_mut_arr_size(actions)) result_member(row, "actions", actions);
-        Element *element = g_new0(Element, 1);
-        element->accessible = g_object_ref(node);
-        element->window = state->window->id;
-        element->pid = state->window->pid;
-        g_hash_table_insert(elements, g_strdup(token), element);
         result_append(state->rows, row);
         state->count++;
         parent = (gint)index;
         depth++;
-        g_free(token);
         g_free(role);
     }
     if (children > 2048) state->truncated = TRUE;
@@ -915,8 +981,7 @@ static gboolean prepare_accessible_window(AtspiAccessible *window)
     return scu_tick();
 }
 
-/* Snapshot IDs distinguish row indices from different reads. Never resolve a
- * stale token by label: a similarly named control may have a different effect. */
+/* Reading a tree preserves cached object identities across every window. */
 static JsonResult *read_window_state(JsonValue *args)
 {
     if (!discover_windows()) {
@@ -937,21 +1002,13 @@ static JsonResult *read_window_state(JsonValue *args)
             "again.");
     }
     if (!prepare_accessible_window(w->accessible)) return NULL;
-    GHashTableIter it;
-    gpointer v;
-    g_hash_table_iter_init(&it, elements);
-    while (g_hash_table_iter_next(&it, NULL, &v)) {
-        if (((Element *)v)->window == w->id) {
-            g_hash_table_iter_remove(&it);
-        }
-    }
+    if (!element_table)
+        return scu_fail("stale_element", "No MCP instance is associated with this tree read.");
     Walk state = {.window = w, .rows = result_array(), .scales = json_member(args, "device_scales"),
         .until = g_get_monotonic_time() + 5 * G_USEC_PER_SEC};
-    g_snprintf(state.snapshot, sizeof(state.snapshot), "s%08x", ++snapshot);
     append_accessible(&state, w->accessible, 0, -1, 0, NULL, 1, NULL);
     if (scu.code) return NULL;
     JsonResult *r = result_object();
-    result_string(r, "snapshot_id", state.snapshot);
     result_integer(r, "window_id", w->id);
     result_boolean(r, "truncated", state.truncated);
     result_member(r, "elements", state.rows);
@@ -1300,16 +1357,15 @@ static JsonResult *accessible_target_input(AtspiAccessible *node, Element *eleme
     return result;
 }
 
-/* Tokens resolve only within this process and the snapshot that created them.
- * Retain the object while acting; a failed/defunct target is never retargeted. */
+/* IDs resolve only in the requesting MCP instance's ring. Retain the object
+ * while acting; overwritten slots intentionally resolve to their new occupant. */
 static JsonResult *operate_on_element(const char *tool, JsonValue *arguments)
 {
-    const char *token = json_string(arguments, "element_token");
-    Element *element = token != NULL ? g_hash_table_lookup(elements, token) : NULL;
+    Element *element = lookup_element(arguments);
     if (element == NULL) {
         return scu_fail("stale_element",
-            "Element token is absent or stale. Read a window tree with accessibility "
-            "observations:[window_id] and use its new token.");
+            "Element ID is unallocated or stale. Read a window tree with accessibility "
+            "observations:[window_id] and use its element ID.");
     }
 
     AtspiAccessible *node = g_object_ref(element->accessible);
@@ -1326,7 +1382,7 @@ static JsonResult *operate_on_element(const char *tool, JsonValue *arguments)
     } else {
         result =
             scu_fail("unsupported_feature", "This action cannot use an accessibility "
-                                            "token. Use desktop foreground input.");
+                                            "element ID. Use desktop foreground input.");
     }
     g_object_unref(node);
     return result;
@@ -1375,8 +1431,7 @@ static JsonResult *clipboard_selection(const char *tool, JsonValue *args)
     JsonResult *result = result_object();
     if (!strcmp(tool, "save_selection")) {
         clear_clipboard_selection();
-        const char *token = json_string(args, "element_token");
-        Element *element = token ? g_hash_table_lookup(elements, token) : NULL;
+        Element *element = lookup_element(args);
         if (element && element->accessible == input_target &&
             accessible_has_state(input_target, ATSPI_STATE_FOCUSED)) {
             clipboard_selection_node = g_object_ref(input_target);
@@ -1560,6 +1615,7 @@ static JsonResult *atspi_worker_call(const char *tool, JsonValue *args)
     }
     JsonResult *request = result_object();
     result_string(request, "tool", tool);
+    atspi_request_clients(request);
     result_member(request, "args",
         args != NULL ? yyjson_val_mut_copy(scu.doc, args) : result_object());
     char *serialized = yyjson_mut_val_write(request, 0, NULL);
@@ -1663,7 +1719,7 @@ static gboolean atspi_read_input(gint fd, GIOCondition condition, gpointer data)
 static int run_atspi_worker(guint base)
 {
     inside_atspi_worker = TRUE;
-    next_window = snapshot = base;
+    next_window = base;
     signal(SIGPIPE, SIG_IGN);
     AtspiInput input = {.input = g_string_new(NULL), .lines = G_QUEUE_INIT};
     fcntl(STDIN_FILENO, F_SETFL, fcntl(STDIN_FILENO, F_GETFL) | O_NONBLOCK);
@@ -1687,6 +1743,7 @@ static int run_atspi_worker(guint base)
         g_clear_pointer(&scu.code, g_free);
         g_clear_pointer(&scu.hint, g_free);
         JsonResult *result = result_object();
+        select_element_table(request);
         JsonResult *output =
             scu_tick() ? scu_atspi(tool, json_member(request, "args")) : NULL;
         if (output != NULL) {
@@ -1820,8 +1877,7 @@ typedef struct {
     gboolean failed;
 } Display;
 
-/* Output rectangles remain private. The agent sees only the overview's pixel
- * grid; a zoom is an observation of that grid, never a new coordinate system. */
+/* Output rectangles remain private. The agent sees only the overview's pixel grid. */
 typedef struct {
     double x, y, width, height;
 } CanvasRect;
@@ -2432,7 +2488,7 @@ static gboolean validate_canvas(guint64 id)
 {
     CanvasSnapshot *canvas = &visual.canvas;
     if (canvas->id == 0 || (id && id != canvas->id)) {
-        scu_fail("stale_capture", "Take a full desktop overview before zooming or sending pixel input.");
+        scu_fail("stale_capture", "Take a full desktop overview before sending pixel input.");
         return FALSE;
     }
     CanvasLayout current;
@@ -2470,40 +2526,6 @@ static JsonResult *canvas_status(void)
     result_integer(result, "height", canvas->height);
     result_integer(result, "id", canvas->id);
     return result;
-}
-
-static gboolean validate_zoom(JsonValue *arguments, guint64 id)
-{
-    JsonValue *zoom = json_member(arguments, "zoom");
-    if (!zoom) {
-        return TRUE;
-    }
-    if (!yyjson_is_arr(zoom) || yyjson_arr_size(zoom) != 4) {
-        scu_fail("invalid_arguments", "zoom must be [left,top,right,bottom] in overview coordinates.");
-        return FALSE;
-    }
-    double corners[4];
-    for (guint i = 0; i < 4; i++) {
-        JsonValue *value = yyjson_arr_get(zoom, i);
-        corners[i] = yyjson_get_num(value);
-        if (!yyjson_is_num(value) || !isfinite(corners[i])) {
-            scu_fail("invalid_arguments", "Zoom coordinates must be finite numbers.");
-            return FALSE;
-        }
-    }
-    if (corners[0] < 0 || corners[1] < 0 || corners[2] <= corners[0] ||
-        corners[3] <= corners[1]) {
-        scu_fail("invalid_arguments", "Zoom must describe a positive rectangle inside the overview.");
-        return FALSE;
-    }
-    if (!validate_canvas(id)) {
-        return FALSE;
-    }
-    if (corners[2] > visual.canvas.width || corners[3] > visual.canvas.height) {
-        scu_fail("invalid_arguments", "Zoom rectangle lies outside the full desktop overview.");
-        return FALSE;
-    }
-    return TRUE;
 }
 
 /* A compositor capture is fresh by construction. Synchronize submitted input
@@ -2656,13 +2678,9 @@ static gboolean append_image(GBytes *pixels, guint width, guint height)
     return TRUE;
 }
 
-static JsonResult *capture_desktop(JsonValue *arguments)
+static JsonResult *capture_desktop(void)
 {
-    gboolean zoomed = json_member(arguments, "zoom") != NULL;
-    if (zoomed && !validate_zoom(arguments, 0)) {
-        return NULL;
-    }
-    if (!zoomed && next_capture == MAX_CAPTURE_ID) {
+    if (next_capture == MAX_CAPTURE_ID) {
         return scu_fail("capture_limit", "Capture IDs exhausted. Reconnect the MCP client.");
     }
     CanvasLayout layout;
@@ -2671,20 +2689,8 @@ static JsonResult *capture_desktop(JsonValue *arguments)
         return NULL;
     }
     CanvasRect view = {layout.x, layout.y, layout.width, layout.height};
-    if (zoomed) {
-        JsonValue *zoom = json_member(arguments, "zoom");
-        double left = yyjson_get_num(yyjson_arr_get(zoom, 0));
-        double top = yyjson_get_num(yyjson_arr_get(zoom, 1));
-        double right = yyjson_get_num(yyjson_arr_get(zoom, 2));
-        double bottom = yyjson_get_num(yyjson_arr_get(zoom, 3));
-        view = (CanvasRect){layout.x + left * layout.width / visual.canvas.width,
-            layout.y + top * layout.height / visual.canvas.height,
-            (right - left) * layout.width / visual.canvas.width,
-            (bottom - top) * layout.height / visual.canvas.height};
-    }
-    /* Overviews need orientation pixels, while zoom always requests native
-     * detail. Avoid a huge native workspace allocation for ordinary overviews. */
-    gboolean native = zoomed || MAX_IMAGE_DIMENSION > MAX(view.width, view.height);
+    /* Avoid a huge native workspace allocation for ordinary overviews. */
+    gboolean native = MAX_IMAGE_DIMENSION > MAX(view.width, view.height);
     guint source_width = 0, source_height = 0;
     CanvasRect captured;
     GBytes *source = capture_area(&view, native, &source_width, &source_height, &captured);
@@ -2704,7 +2710,7 @@ static JsonResult *capture_desktop(JsonValue *arguments)
         (guint64)output_width * output_height * 4 > MAX_FRAME_BYTES) {
         g_bytes_unref(source);
         g_free(key);
-        return scu_fail("capture_failed", "Canvas exceeds the image memory limits. Observe a smaller area using zoom.");
+        return scu_fail("capture_failed", "Canvas exceeds the image memory limits.");
     }
     CanvasLayout sampling = {.count = 1};
     sampling.tiles[0] = captured;
@@ -2732,21 +2738,14 @@ static JsonResult *capture_desktop(JsonValue *arguments)
         g_free(key);
         return NULL;
     }
-    if (!zoomed) {
-        g_free(visual.canvas.key);
-        visual.canvas = (CanvasSnapshot){.id = ++next_capture,
-            .key = key, .width = output_width, .height = output_height,
-            .layout = layout};
-    } else {
-        g_free(key);
-    }
+    g_free(visual.canvas.key);
+    visual.canvas = (CanvasSnapshot){.id = ++next_capture,
+        .key = key, .width = output_width, .height = output_height,
+        .layout = layout};
     JsonResult *result = result_object();
     result_integer(result, "id", visual.canvas.id);
     result_integer(result, "width", output_width);
     result_integer(result, "height", output_height);
-    if (zoomed) {
-        result_member(result, "zoom", yyjson_val_mut_copy(scu.doc, json_member(arguments, "zoom")));
-    }
     visual.observed_input_sequence = visual.input_sequence;
     return result;
 }
@@ -2840,7 +2839,7 @@ static JsonResult *kwin_status(void)
     if (!require_computer_ready() || !ensure_visual_session()) {
         return NULL;
     }
-    if (!capture_desktop(NULL)) {
+    if (!capture_desktop()) {
         return NULL;
     }
     JsonResult *result = result_object();
@@ -3099,14 +3098,13 @@ static JsonResult *window_image(JsonValue *window)
     return result;
 }
 
-static JsonResult *observe_window(JsonValue *args)
+static JsonResult *observe_window(JsonValue *args, gboolean screenshot)
 {
-    gboolean screenshot = !yyjson_is_false(json_member(args, "screenshot"));
     if (!validate_canvas(0)) {
         if (!screenshot) return NULL;
         clear_tool_error();
         guint images = yyjson_mut_arr_size(scu.images);
-        if (!capture_desktop(NULL)) {
+        if (!capture_desktop()) {
             return NULL;
         }
         yyjson_mut_arr_remove_range(scu.images, images, yyjson_mut_arr_size(scu.images) - images);
@@ -3202,7 +3200,7 @@ static InputDevice *wait_for_device(enum ei_device_capability capability)
     return device;
 }
 
-/* Resolve overview coordinates without ever interpreting them as zoom-local.
+/* Resolve overview coordinates.
  * A gap is allowed only for intermediate samples of a held-button drag. */
 static gboolean pointer_target(JsonValue *arguments, double x, double y,
     gboolean allow_gap, struct ei_device **device_out, double *screen_x, double *screen_y)
@@ -3871,7 +3869,7 @@ static JsonResult *type_target_value(const char *tool, JsonValue *args, gboolean
     gboolean replace = !strcmp(tool, "set_value");
     const char *contents = json_string(args, replace ? "value" : "text");
     JsonResult *parameters = result_object();
-    result_string(parameters, "element_token", json_string(args, "element_token"));
+    result_member(parameters, "element_id", yyjson_val_mut_copy(scu.doc, json_member(args, "element_id")));
     result_string(parameters, numeric ? "value" : "text", contents);
     result_boolean(parameters, "replace", replace);
     result_boolean(parameters, "numeric", numeric);
@@ -3967,17 +3965,14 @@ static JsonResult *scu_visual(const char *tool, JsonValue *arguments)
  * definitions build tools/list schemas and validate direct and batched calls.
  * Optional upstream arguments are absent until their behavior is implemented.
  */
-/* The only shared action default is a pixel capture. Semantic tokens carry
+/* The only shared action default is a pixel capture. Semantic element IDs carry
  * their own identity; window observations always name their window explicitly. */
-static yyjson_doc *prepare_arguments(JsonValue *args, guint64 id,
-    gboolean observation)
+static yyjson_doc *prepare_arguments(JsonValue *args, guint64 id)
 {
     yyjson_mut_doc *document = yyjson_mut_doc_new(NULL);
     JsonResult *copy = yyjson_val_mut_copy(document, args);
     yyjson_mut_doc_set_root(document, copy);
-    if (observation) {
-        yyjson_mut_obj_remove_str(copy, "kind");
-    } else if (id && !json_string(args, "element_token") &&
+    if (id && !json_member(args, "element_id") &&
         (json_member(args, "x") || json_member(args, "from_x")) &&
         !json_member(args, "id")) {
         yyjson_mut_obj_add_uint(document, copy, "id", id);
@@ -4019,7 +4014,7 @@ static JsonResult *batch_failure(guint index, const Tool *tool)
 static JsonResult *compact_observation(JsonResult *observation)
 {
     JsonResult *result = result_object();
-    const char *fields[] = {"id", "width", "height", "zoom", NULL};
+    const char *fields[] = {"id", "width", "height", NULL};
     for (unsigned index = 0; fields[index]; index++) {
         JsonResult *value = yyjson_mut_obj_get(observation, fields[index]);
         if (value != NULL) {
@@ -4040,10 +4035,7 @@ static JsonResult *run_batch(const Tool *batch, JsonValue *args)
     JsonValue *array = json_member(args, "steps");
     size_t count = yyjson_arr_size(array), index, length;
     JsonValue *step;
-    yyjson_doc *observation = NULL;
-    const Tool *observer = NULL;
-    JsonValue *observe = json_member(args, "observe");
-    gboolean automatic = !accessibility && observe == NULL, has_foreground = FALSE, has_actions = FALSE;
+    JsonValue *requested = json_member(args, "observations");
     gboolean valid = FALSE, previous_delay = FALSE;
     JsonResult *result = result_object(), *warnings = result_array();
 
@@ -4055,38 +4047,11 @@ static JsonResult *run_batch(const Tool *batch, JsonValue *args)
             yyjson_obj_size(step) != 2 || !yyjson_is_obj(arguments)) {
             goto invalid;
         }
-        steps[index] = prepare_arguments(arguments, yyjson_get_uint(json_member(args, "id")), FALSE);
+        steps[index] = prepare_arguments(arguments, yyjson_get_uint(json_member(args, "id")));
         JsonValue *merged = yyjson_doc_get_root(steps[index]);
         if (!validate_arguments(action, merged)) {
             goto done;
         }
-        if (strcmp(action->name, "delay_ms")) {
-            has_actions = TRUE;
-            has_foreground |= json_string(merged, "element_token") == NULL;
-        }
-    }
-    /* Delays are neutral: semantic-only sequences stay semantic. With no
-     * input actions, they provide a delayed observation of ongoing loading. */
-    if (automatic && (!has_actions || has_foreground)) {
-        const char *defaults = "{}";
-        observation = yyjson_read(defaults, strlen(defaults), 0);
-        observer = &desktop_schema;
-    } else if (yyjson_is_obj(observe)) {
-        gboolean desktop = g_strcmp0(json_string(observe, "kind"), "desktop") == 0;
-        observation = prepare_arguments(observe, 0, TRUE);
-        observer = desktop ? &desktop_schema : &window_schema;
-    }
-    if (observer && !validate_arguments(observer, yyjson_doc_get_root(observation))) {
-        goto done;
-    }
-    if (observer == &desktop_schema &&
-        json_member(yyjson_doc_get_root(observation), "zoom") && visual.canvas.id &&
-        !refresh_geometry()) {
-        goto done;
-    }
-    if (observer == &desktop_schema &&
-        !validate_zoom(yyjson_doc_get_root(observation), yyjson_get_uint(json_member(args, "id")))) {
-        goto done;
     }
     if (!require_computer_ready()) {
         goto done;
@@ -4098,7 +4063,7 @@ static JsonResult *run_batch(const Tool *batch, JsonValue *args)
         JsonValue *merged = yyjson_doc_get_root(steps[index]);
         gboolean delay = !strcmp(actions[index].name, "delay_ms");
         foreground_attempted |= !delay &&
-            json_string(merged, "element_token") == NULL;
+            json_member(merged, "element_id") == NULL;
         /* A delay step supplies its own gap. Other action boundaries retain
          * their default wait, including after an earlier explicit delay. */
         JsonResult *value = NULL;
@@ -4106,14 +4071,7 @@ static JsonResult *run_batch(const Tool *batch, JsonValue *args)
         if (!index || delay || previous_delay || wait_for_delay(150)) {
             value = execute_tool(&actions[index], merged);
         }
-        if (keyboard_fallback) {
-            foreground_attempted = TRUE;
-            if (automatic && !observer) {
-                const char *defaults = "{}";
-                observation = yyjson_read(defaults, strlen(defaults), 0);
-                observer = &desktop_schema;
-            }
-        }
+        if (keyboard_fallback) foreground_attempted = TRUE;
         previous_delay = value != NULL && delay;
         if (value == NULL) {
             release_input();
@@ -4136,81 +4094,86 @@ static JsonResult *run_batch(const Tool *batch, JsonValue *args)
     if (yyjson_mut_arr_size(warnings) > 0) {
         result_member(result, "warnings", warnings);
     }
-    if (observer && (!automatic || !has_actions || foreground_attempted) &&
-        !g_atomic_int_get(&scu.cancelled) && !g_atomic_int_get(&scu.stopping)) {
-        /* A broken visual session is not reconnected inside the interrupted
-         * batch. Only a subsequent request may establish another grant. */
-        JsonResult *value = NULL;
-        /* Only a completed trailing delay replaces the final rendering wait. */
+    JsonResult *observations = result_array();
+    result_member(result, "observations", observations);
+    if (yyjson_is_false(requested)) goto observed;
+    if (!accessibility) {
+        /* Only a completed trailing delay replaces the final rendering wait.
+         * Never reconnect a broken visual session inside the interrupted batch. */
+        gboolean ready = FALSE;
         if (!previous_delay && !wait_for_delay(300)) {
             release_input();
-        } else if (visual.broken || (failed && foreground_attempted &&
-                visual.bus == NULL)) {
+        } else if (visual.broken || (failed && foreground_attempted && visual.bus == NULL)) {
             scu_fail("visual_session_closed", "Visual session disconnected during the batch.");
         } else {
-            gboolean screenshot = observer == &desktop_schema ||
-                !yyjson_is_false(json_member(yyjson_doc_get_root(observation), "screenshot"));
-            if (screenshot ? ensure_visual_session() : refresh_geometry()) {
-                value = observer == &desktop_schema
-                    ? capture_desktop(yyjson_doc_get_root(observation))
-                    : observe_window(yyjson_doc_get_root(observation));
-            }
+            ready = ensure_visual_session();
         }
-        if (value) {
-            result_member(result, "observation",
-                observer == &desktop_schema ? compact_observation(value) : value);
-        } else {
-            result_member(result, "observation_error", error_payload());
+        if (!ready) {
+            JsonResult *item = result_object();
+            if (yyjson_arr_size(requested))
+                result_member(item, "window_id", yyjson_val_mut_copy(scu.doc, yyjson_arr_get_first(requested)));
+            result_member(item, "error", error_payload());
+            result_append(observations, item);
             failed = TRUE;
             clear_tool_error();
+            goto observed;
         }
-    }
-    if (accessibility) {
-        JsonResult *observations = result_array();
-        result_member(result, "observations", observations);
-        JsonValue *requested = json_member(args, "observations"), *window_id;
-        gint64 seen[64];
-        size_t seen_count = 0;
-        yyjson_arr_foreach(requested, index, length, window_id) {
-            gint64 id = yyjson_get_sint(window_id);
-            gboolean duplicate = FALSE;
-            for (size_t i = 0; i < seen_count; i++) duplicate |= seen[i] == id;
-            if (duplicate) continue;
-            seen[seen_count++] = id;
-            if (!scu_tick() || !require_computer_access()) {
-                JsonResult *item = result_object();
-                result_integer(item, "window_id", id);
-                result_member(item, "error", error_payload());
-                result_append(observations, item);
-                failed = TRUE;
-                clear_tool_error();
-                break;
-            }
-            yyjson_mut_doc *document = yyjson_mut_doc_new(NULL);
-            JsonResult *arguments = yyjson_mut_obj(document);
-            yyjson_mut_obj_add_sint(document, arguments, "window_id", id);
-            yyjson_mut_obj_add_bool(document, arguments, "screenshot", FALSE);
-            yyjson_mut_doc_set_root(document, arguments);
-            yyjson_doc *input = yyjson_mut_doc_imut_copy(document, NULL);
-            yyjson_mut_doc_free(document);
-            JsonResult *value = refresh_geometry() ? observe_window(yyjson_doc_get_root(input)) : NULL;
-            yyjson_doc_free(input);
+        if (!yyjson_arr_size(requested)) {
+            JsonResult *value = capture_desktop();
             if (value) {
-                result_append(observations, value);
+                result_append(observations, compact_observation(value));
             } else {
                 JsonResult *item = result_object();
-                result_integer(item, "window_id", id);
                 result_member(item, "error", error_payload());
                 result_append(observations, item);
                 failed = TRUE;
-                /* Window-local failures allow later windows. Authority, session
-                 * or deadline loss stops the batch without repairing the session. */
-                gboolean proceed = scu_tick() && require_computer_access();
                 clear_tool_error();
-                if (!proceed) break;
             }
         }
     }
+    JsonValue *window_id;
+    gint64 seen[64];
+    size_t seen_count = 0;
+    yyjson_arr_foreach(requested, index, length, window_id) {
+        gint64 id = yyjson_get_sint(window_id);
+        gboolean duplicate = FALSE;
+        for (size_t i = 0; i < seen_count; i++) duplicate |= seen[i] == id;
+        if (duplicate) continue;
+        seen[seen_count++] = id;
+        if (!scu_tick() || !require_computer_access()) {
+            JsonResult *item = result_object();
+            result_integer(item, "window_id", id);
+            result_member(item, "error", error_payload());
+            result_append(observations, item);
+            failed = TRUE;
+            clear_tool_error();
+            break;
+        }
+        yyjson_mut_doc *document = yyjson_mut_doc_new(NULL);
+        JsonResult *arguments = yyjson_mut_obj(document);
+        yyjson_mut_obj_add_sint(document, arguments, "window_id", id);
+        yyjson_mut_doc_set_root(document, arguments);
+        yyjson_doc *input = yyjson_mut_doc_imut_copy(document, NULL);
+        yyjson_mut_doc_free(document);
+        JsonResult *value = refresh_geometry() ? observe_window(yyjson_doc_get_root(input), !accessibility) : NULL;
+        yyjson_doc_free(input);
+        if (value) {
+            result_append(observations, value);
+            if (yyjson_mut_obj_get(value, "screenshot_error")) failed = TRUE;
+        } else {
+            JsonResult *item = result_object();
+            result_integer(item, "window_id", id);
+            result_member(item, "error", error_payload());
+            result_append(observations, item);
+            failed = TRUE;
+            /* Window-local failures preserve later observations. Authority,
+             * session or deadline loss stops without repairing the session. */
+            gboolean proceed = scu_tick() && require_computer_access();
+            clear_tool_error();
+            if (!proceed) break;
+        }
+    }
+observed:
     result_string(result, "status", failed ? "failed" : "ok");
     goto done;
 invalid:
@@ -4219,7 +4182,6 @@ done:
     for (index = 0; index < count; index++) {
         yyjson_doc_free(steps[index]);
     }
-    yyjson_doc_free(observation);
     return valid ? result : NULL;
 }
 
@@ -4243,7 +4205,7 @@ static JsonResult *execute_tool(const Tool *t, JsonValue *args)
         }
         return result_object();
     }
-    if (!strcmp(t->name, "set_value") || json_string(args, "element_token")) {
+    if (!strcmp(t->name, "set_value") || json_member(args, "element_id")) {
         JsonResult *result = scu_atspi(t->name, args);
         if (result && yyjson_mut_is_true(yyjson_mut_obj_get(result, "keyboard_required")))
             return type_target_value(t->name, args, yyjson_mut_is_true(yyjson_mut_obj_get(result, "numeric")));

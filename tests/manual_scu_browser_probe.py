@@ -98,7 +98,7 @@ def main():
         status = probe.tool("status")
         target = next({"window_id": window["window_id"]}
                       for app in status["apps"] for window in app["windows"] if title in window["title"])
-        observation = probe.tool("vision", observe={"kind": "window", **target})["observation"]
+        observation = probe.tool("vision", observations=[target["window_id"]])["observations"][0]
         elements = observation.get("elements", [])
         wanted = {("heading", "SCU browser probe"), ("button", "Probe button"), ("entry", "Probe field")}
         found = {(row["role"], row["label"]) for row in elements} & wanted
@@ -116,7 +116,7 @@ def main():
 
         def snapshot(*, vision=False):
             if vision:
-                return probe.tool("vision", observe={"kind": "window", **target})["observation"]
+                return probe.tool("vision", observations=[target["window_id"]])["observations"][0]
             return probe.tool("accessibility", observations=[target["window_id"]])["observations"][0]
 
         def point(tree, label):
@@ -127,29 +127,29 @@ def main():
 
         tree = snapshot(vision=True)
         result = probe.tool("vision", steps=[{"tool": "click", "args": {
-            **point(tree, "Probe button"), "count": 2}}], observe={"kind": "window", **target})
+            **point(tree, "Probe button"), "count": 2}}], observations=[target["window_id"]])
         assert result["status"] == "ok", result
-        assert any(row["label"] == "Button double clicked" for row in result["observation"]["elements"]), result
+        assert any(row["label"] == "Button double clicked" for row in result["observations"][0]["elements"]), result
         record("pixel-double-click", status=result["status"])
         result = probe.tool("vision", steps=[
-            {"tool": "click", "args": {**point(result["observation"], "Probe link"), "button": "middle"}},
+            {"tool": "click", "args": {**point(result["observations"][0], "Probe link"), "button": "middle"}},
             {"tool": "press_keys", "args": {"keys": ["CTRL", "Tab"]}},
-            {"tool": "delay_ms", "args": {"ms": 500}}], observe={"kind": "window", **target})
+            {"tool": "delay_ms", "args": {"ms": 500}}], observations=[target["window_id"]])
         assert result["status"] == "ok", result
         assert any(row["label"] == "Address and search bar" and row.get("value") == "about:blank"
-                   for row in result["observation"]["elements"]), result
+                   for row in result["observations"][0]["elements"]), result
         record("pixel-middle-click", new_tab="about:blank", status=result["status"])
-        probe.tool("vision", steps=[{"tool": "press_keys", "args": {"keys": ["CTRL", "w"]}}], observe=False)
-        tree = probe.tool("vision", observe={"kind": "window", **target})["observation"]
+        probe.tool("vision", steps=[{"tool": "press_keys", "args": {"keys": ["CTRL", "w"]}}], observations=False)
+        tree = probe.tool("vision", observations=[target["window_id"]])["observations"][0]
         link = next(row for row in tree["elements"] if row["label"] == "Probe link")
         assert {"activate", "open_context_menu"} <= set(link["actions"]), link
         assert "click_buttons" not in link, link
         result = probe.tool("accessibility", steps=[{"tool": "open_context_menu", "args": {
-            "element_token": link["element_token"]}}], observations=[target["window_id"]])
+            "element_id": link["element_id"]}}], observations=[target["window_id"]])
         assert result["status"] == "ok", result
         menu = next(row for row in result["observations"][0]["elements"] if row["label"] == "Probe menu item")
         result = probe.tool("accessibility", steps=[{"tool": "activate", "args": {
-            "element_token": menu["element_token"]}}], observations=[target["window_id"]])
+            "element_id": menu["element_id"]}}], observations=[target["window_id"]])
         assert result["status"] == "ok", result
         assert any(row["label"] == "Context menu selected" for row in result["observations"][0]["elements"]), result
         record("open_context_menu", status=result["status"])
@@ -160,7 +160,7 @@ def main():
             row = next(row for row in tree["elements"] if row["label"] == label)
             if label == "Offscreen button":
                 assert row["frame"]["y"] > bounds["y"] + bounds["height"], row
-            result = probe.tool("accessibility", steps=[{"tool": "activate", "args": {"element_token": row["element_token"]}}],
+            result = probe.tool("accessibility", steps=[{"tool": "activate", "args": {"element_id": row["element_id"]}}],
                 observations=[target["window_id"]])
             assert result["status"] == "ok", result
             assert any(text in (row.get("label", "") + row.get("value", "")) for row in result["observations"][0]["elements"]), result
@@ -173,7 +173,7 @@ def main():
             tree = snapshot()
             row = next(row for row in tree["elements"] if row["label"] == "Probe field")
             result = probe.tool("accessibility", steps=[{"tool": tool, "args": {
-                "element_token": row["element_token"], field: text}}],
+                "element_id": row["element_id"], field: text}}],
                 observations=[target["window_id"]])
             assert result["status"] == "ok", result
             actual = next(row for row in result["observations"][0]["elements"] if row["label"] == "Probe field")
@@ -185,7 +185,7 @@ def main():
             row = next(row for row in tree["elements"] if row["label"] == label)
             assert (row["value"], row["minimum"], row["maximum"]) == (80, 0, 100), row
             result = probe.tool("accessibility", steps=[{"tool": "set_value", "args": {
-                "element_token": row["element_token"], "value": "50"}}],
+                "element_id": row["element_id"], "value": "50"}}],
                 observations=[target["window_id"]])
             assert result["status"] == "ok", result
             actual = next(row for row in result["observations"][0]["elements"] if row["label"] == label)
@@ -197,7 +197,7 @@ def main():
         tree = snapshot()
         row = next(row for row in tree["elements"] if row["label"] == "Address and search bar")
         result = probe.tool("accessibility", steps=[{"tool": "set_value", "args": {
-            "element_token": row["element_token"], "value": "about:blank"}}],
+            "element_id": row["element_id"], "value": "about:blank"}}],
             observations=[target["window_id"]])
         assert result["status"] == "ok", result
         address = next(row for row in result["observations"][0]["elements"] if row["label"] == "Address and search bar")
@@ -221,13 +221,13 @@ def main():
         status = probe.tool("status")
         window = next(window["window_id"] for app in status["apps"] for window in app["windows"]
                       if title in window["title"])
-        orientation = probe.tool("vision", observe={"kind": "window", "window_id": window})["observation"]
+        orientation = probe.tool("vision", observations=[window])["observations"][0]
         reload = next(row for row in orientation["elements"] if row["label"] == "Reload")
-        probe.tool("accessibility", steps=[{"tool": "activate", "args": {"element_token": reload["element_token"]}}])
+        probe.tool("accessibility", steps=[{"tool": "activate", "args": {"element_id": reload["element_id"]}}])
         entry = next(row for row in orientation["elements"] if row["label"] == "Address and search bar")
         edited = probe.tool("accessibility", steps=[
-            {"tool": "set_value", "args": {"element_token": entry["element_token"], "value": "about:blank"}},
-            {"tool": "type_text", "args": {"element_token": entry["element_token"], "text": "#scu"}}])
+            {"tool": "set_value", "args": {"element_id": entry["element_id"], "value": "about:blank"}},
+            {"tool": "type_text", "args": {"element_id": entry["element_id"], "text": "#scu"}}])
         assert edited["completed"] == 2 and edited["observations"] == [], edited
         # Renew the canvas explicitly after input mapping initialization. Keyboard
         # fallback itself must return no automatic screenshot or tree observation.
@@ -244,7 +244,7 @@ def main():
         assert observations[0]["error"]["code"] == "window_unavailable", observations
         entry = next(row for row in observations[1]["elements"] if row["label"] == "Address and search bar")
         assert entry["value"] == "about:blank#scu", entry
-        probe.tool("vision", steps=[{"tool": "press_keys", "args": {"keys": ["Escape"]}}], observe=False)
+        probe.tool("vision", steps=[{"tool": "press_keys", "args": {"keys": ["Escape"]}}], observations=False)
         assert not any(block["type"] == "image" for block in trees["content"]), trees
         # A normal frontend continues to return images while --no-vision remains connected.
         visible = probe.call("tools/call", {"name": "vision", "arguments": {}})

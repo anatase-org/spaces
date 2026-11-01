@@ -159,18 +159,18 @@ def main():
         target = next({"window_id": window["window_id"]}
                       for app in status["apps"] for window in app["windows"]
                       if window["title"] == "Spaces AT-SPI fixture " + token)
-        tree = probe.tool("vision", observe={"kind": "window", **target})["observation"]
+        tree = probe.tool("vision", observations=[target["window_id"]])["observations"][0]
         rows = {item["label"]: item for item in tree["elements"]}
         return status, rows
 
     def focus_entry(probe):
         status, rows = fixture_window(probe)
         frame = rows["Spaces fixture entry"]["frame"]
-        probe.tool("vision", id=status["canvas"]["id"], observe=False, steps=[
+        probe.tool("vision", id=status["canvas"]["id"], observations=False, steps=[
             {"tool": "click", "args": {"x": frame["x"] + frame["width"] / 2,
                                        "y": frame["y"] + frame["height"] / 2}}])
         probe.tool("accessibility", steps=[
-            {"tool": "set_value", "args": {"element_token": rows["Spaces fixture entry"]["element_token"], "value": ""}},
+            {"tool": "set_value", "args": {"element_id": rows["Spaces fixture entry"]["element_id"], "value": ""}},
         ])
         return rows
 
@@ -228,7 +228,7 @@ def main():
             assert (current["canvas"]["width"], current["canvas"]["height"]) == (1280, 720), current["canvas"]
             rows = focus_entry(first)
             expected = "Headless " + token
-            first.tool("vision", steps=[{"tool": "type_text", "args": {"text": expected}}], observe=False)
+            first.tool("vision", steps=[{"tool": "type_text", "args": {"text": expected}}], observations=False)
             assert fixture_state()["text"] == expected
             assert not locked()
             helpers = host("pgrep", "-af", "^/usr/bin/krfb-virtualmonitor --name Spaces-SCU-")
@@ -258,7 +258,7 @@ def main():
             clicks = fixture_state()["clicks"]
             lock_visible()
             first.tool("accessibility", steps=[{"tool": "activate", "args": {
-                "element_token": rows["Spaces fixture button"]["element_token"]}}])
+                "element_id": rows["Spaces fixture button"]["element_id"]}}])
             assert fixture_state()["clicks"] == clicks + 1
             assert locked(), "accessibility action unlocked the session"
             record("accessibility-stayed-locked", fixture=fixture_state())
@@ -268,7 +268,7 @@ def main():
             focus_entry(first)
             lock_visible()
             expected = "Unlocked EIS " + token
-            first.tool("vision", steps=[{"tool": "type_text", "args": {"text": expected}}], observe=False)
+            first.tool("vision", steps=[{"tool": "type_text", "args": {"text": expected}}], observations=False)
             wait(lambda: not locked(), "EIS did not unlock")
             assert fixture_state()["text"] == expected, fixture_state()
             assert any(item["name"].startswith("eDP") and item["enabled"] for item in outputs())
