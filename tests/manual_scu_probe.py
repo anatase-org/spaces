@@ -69,9 +69,9 @@ def main():
         rows = {item["label"]: item for item in snapshot["elements"]}
         expected = "Héllo 世界 " + args.token
         semantic = tool("computer", steps=[
-            {"tool": "click", "args": {"element_token": rows["Spaces fixture button"]["element_token"]}},
+            {"tool": "activate", "args": {"element_token": rows["Spaces fixture button"]["element_token"]}},
             {"tool": "set_value", "args": {"element_token": rows["Spaces fixture entry"]["element_token"], "value": expected}},
-            {"tool": "click", "args": {"element_token": rows["Spaces fixture checkbox"]["element_token"]}},
+            {"tool": "activate", "args": {"element_token": rows["Spaces fixture checkbox"]["element_token"]}},
         ], observe={"kind": "window", **target})
         rows = {item["label"]: item for item in semantic["observation"]["elements"]}
         if args.capture or args.visual_actions:

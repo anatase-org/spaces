@@ -219,6 +219,7 @@ static const Argument batch_arguments[] = {
 
 static const char *const require_window[] = {"window_id", NULL};
 static const char *const require_point[] = {"x", "y", NULL};
+static const char *const require_element[] = {"element_token", NULL};
 static const char *const require_drag[] = {"from_x", "from_y", "to_x", "to_y", NULL};
 static const char *const require_scroll[] = {"x", "y", "direction", NULL};
 static const char *const require_text[] = {"text", NULL};
@@ -272,12 +273,10 @@ static const Tool tools[] = {
 /* Actions are steps of computer, never standalone MCP tools. */
 static const Tool action_tools[] = {
     {.name = "click",
-        "Invoke an accessible element or click desktop image coordinates. "
-        "Use button:right for a context menu and count:2 for a double click. "
-        "Middle click or repeated clicks with an element target require it "
-        "to be on-screen.",
-        ARGS_ACTION | ARGS_POINT,
+        "Click desktop image coordinates.",
+        ARGS_POINT,
         click_arguments,
+        require_point,
         .action = TRUE},
     {.name = "move_cursor",
         "Move the foreground pointer in desktop image coordinates.",
@@ -296,6 +295,22 @@ static const Tool action_tools[] = {
         scroll_arguments,
         require_scroll,
         TRUE},
+    {.name = "press_keys",
+        "Press keys in listed order and release in reverse; put modifiers first. Use keys:[meta] for a single key or keys:[ctrl,a] for a chord.",
+        ARGS_NONE,
+        key_arguments,
+        require_keys,
+        TRUE},
+    {.name = "activate",
+        "Perform an element's default action, such as following a link or pressing a button.",
+        ARGS_ACTION,
+        .required = require_element,
+        .action = TRUE},
+    {.name = "open_context_menu",
+        "Open an element's context menu.",
+        ARGS_ACTION,
+        .required = require_element,
+        .action = TRUE},
     {.name = "type_text",
         "Insert text at the caret without pressing Enter.",
         ARGS_ACTION,
@@ -307,12 +322,6 @@ static const Tool action_tools[] = {
         ARGS_ACTION,
         value_arguments,
         require_value,
-        TRUE},
-    {.name = "press_keys",
-        "Press keys in listed order and release in reverse; put modifiers first. Use keys:[meta] for a single key or keys:[ctrl,a] for a chord.",
-        ARGS_NONE,
-        key_arguments,
-        require_keys,
         TRUE},
     {.name = "delay_ms",
         "Wait 0-30000 milliseconds before continuing. Use a trailing delay to wait before the final observation.",
@@ -605,26 +614,7 @@ static gboolean validate_arguments(const Tool *t, JsonValue *args)
         scu_fail("invalid_arguments",
             "Arguments do not match this scu tool's advertised supported schema.");
     }
-    if (!ok) {
-        return FALSE;
-    }
-    gboolean semantic = json_string(args, "element_token") != NULL;
-    gboolean pointer =
-        strcmp(t->name, "click") == 0 || strcmp(t->name, "move_cursor") == 0 ||
-        strcmp(t->name, "scroll") == 0;
-    if (pointer && !semantic &&
-        (json_member(args, "x") == NULL || json_member(args, "y") == NULL)) {
-        scu_fail("invalid_arguments", "Pixel actions require both x and y, or a "
-                                      "supported accessibility element_token.");
-        return FALSE;
-    }
-    if (semantic &&
-        (json_member(args, "x") != NULL || json_member(args, "y") != NULL)) {
-        scu_fail("invalid_arguments",
-            "Choose either an element token or pixel coordinates.");
-        return FALSE;
-    }
-    return TRUE;
+    return ok;
 }
 
 static JsonResult *error_payload(void)

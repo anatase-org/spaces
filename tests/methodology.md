@@ -599,8 +599,8 @@ The same numeric ID appears in canvas, desktop/zoom and tree observations.
 An explicit pixel-step `id` overrides the batch ID; omission uses the latest
 valid overview. Strings and the old `capture_id` spelling are rejected.
 Steps are ordered `{tool,args}` objects, at most 64. The supported actions are
-`click`, `move_cursor`, `drag`, `scroll`, `type_text`, `set_value`,
-`press_keys`, and `delay_ms`. Use `click` with `button:"right"` or `count:2`,
+`click`, `move_cursor`, `drag`, `scroll`, `press_keys`, `activate`,
+`open_context_menu`, `type_text`, `set_value`, and `delay_ms`. Use `click` with `button:"right"` or `count:2`,
 and `press_keys` with `keys:["ctrl","a"]` for chords. A standalone Meta key is
 `press_keys` with `keys:["meta"]`. Keys are pressed in listed order and released
 in reverse, so modifier keys come first. Whole-batch validation precedes effects; execution
@@ -690,8 +690,9 @@ showing states. Rectangles never determine whether a control is included.
 Dormant tooltips and nodes without semantic content are omitted; unnamed text
 and numeric controls remain. Controls and content retain tokens, roles, labels,
 compact ancestry and overview-coordinate
-frames. `actions` names the supported SCU actions, and `click_buttons` identifies
-supported click buttons. Only true focused/selected/checked states are included;
+frames. `actions` names the supported SCU actions, including `activate` and
+`open_context_menu` independently when provided by the toolkit. Only true
+focused/selected/checked states are included;
 password values remain excluded. Text values preserve whitespace, and clipped
 labels/values carry `text_truncated:true`.
 
@@ -712,9 +713,9 @@ missing bridge can still return the window screenshot with the specific
 accessibility error.
 
 Element tokens identify action targets; replacing a window's tree invalidates
-its old tokens. Unsupported rectangles are null. Toolkit click names such as
-Chromium's `jump`, `open`, `doDefault` and `clickAncestor` use the existing
-`click` action; unknown action names never invoke an arbitrary action index.
+its old tokens. Unsupported rectangles are null. Toolkit default-action names
+such as Chromium's `jump`, `open`, `doDefault` and `clickAncestor` map to
+`activate`; unknown action names never invoke an arbitrary action index.
 Scroll `amount` always counts lines; no unit selector is exposed.
 
 `type_text` inserts and `set_value` replaces. Native EditableText remains the
@@ -1128,8 +1129,8 @@ venv/bin/python tests/manual_scu_browser_probe.py \
 
 Live validation on 2026-11-01 with Chromium 156.0.8078.73 on win5/win5f passed
 without accessibility environment overrides or force-renderer flags. The page
-exposed 43 elements after hidden-node filtering. `click` invoked both the button
-and link, with independent page text confirming each action. `set_value` changed
+exposed 43 elements after hidden-node filtering. Semantic actions invoked both
+the button and link, with independent page text confirming each action. `set_value` changed
 the input from empty to `hello`, then `changed`; `type_text` inserted ` world`
 without discarding the existing value, and `set_value` cleared it. The address
 bar accepted `set_value` with `value:"about:blank"` without navigation, and
@@ -1203,37 +1204,27 @@ tests passed, covering an untruncated 1,001-row tree, a result near the 512 KiB
 limit, usable tokens, depth limits and screenshot metadata. Native ABI checks
 also passed.
 
-### Middle and repeated clicks on element tokens
+### Semantic actions and pointer clicks
 
-Single left/right token clicks invoke the advertised accessibility action.
-Middle clicks and repeated clicks use foreground pointer input, preserving the
-requested button and count. SCU queries fresh element and ancestor bounds,
-normalizes Chromium document coordinates and clips the target to its viewports,
-window and desktop outputs. The uniquely matched window must be shown and
-active. An element without a usable on-screen target returns
-`element_off_screen`; SCU does not substitute a left click or scroll it into
-view. Ordinary semantic clicks remain usable on offscreen elements.
+`activate` invokes an element's default action; `open_context_menu` invokes its
+advertised context-menu action. Both require only `element_token`. They operate
+without a pointer or desktop unlock, including offscreen activation. Unsupported
+actions return `accessible_action_failed`, and replaced snapshots retain the
+existing `stale_element` behavior.
 
-The browser probe checks the distinction with a page double-click handler and
-a link opened in a new tab using token middle-click, followed by Ctrl+Tab and
-address-bar readback. It also verifies that an offscreen middle-click returns
-`element_off_screen` before the same button is invoked semantically. Run with:
+`click` requires `x` and `y`, with optional capture `id`, mouse `button` and
+`count`. It rejects element tokens before any batch effects. Middle and repeated
+clicks use explicit pixel coordinates; there is no automatic conversion from a
+token into pointer input. The semantic actions appear together before `delay_ms`,
+which remains last in the schema.
+
+The browser probe uses semantic activation for buttons, links, an offscreen
+button and a custom context-menu item. It opens the link's menu through
+`open_context_menu`, checking independent page state. Separate pixel clicks
+exercise the page's double-click handler and open `about:blank` in a new tab,
+confirmed after Ctrl+Tab. Run with:
 
 ```sh
 venv/bin/python tests/manual_scu_browser_probe.py \
-  --artifacts .build/scu-token-pointer-browser
+  --artifacts .build/scu-semantic-actions-browser
 ```
-
-On 2026-11-01, the deployed fallback passed on win5/win5f without accessibility
-launch overrides. Token double-click triggered the page's double-click handler;
-token middle-click opened `about:blank` in a new tab, confirmed after Ctrl+Tab.
-Offscreen middle-click returned `element_off_screen`, and the subsequent
-semantic click invoked the same offscreen button. Text, numeric value, shared
-client retention, teardown and reactivation checks also passed. The instance
-launched before consumer activation again exposed no tree; the instance
-launched afterward exposed all probe controls. Temporary profiles were removed,
-and final state was `IsEnabled=false`, no registered events, `MainPID=0` and
-SELinux enforcing. Artifacts are in `.build/scu-token-pointer-browser-final`.
-Eight focused regression checks and native ABI checks passed. The fixture
-resets its bounds override between tests so moved targets cannot affect later
-coordinate or shared-session checks.

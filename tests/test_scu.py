@@ -223,7 +223,6 @@ class ScuTests(unittest.TestCase):
                               (numeric_readonly, "--numeric-readonly"), (numeric_delay, "--numeric-delay")):
             if enabled: command.append(flag)
         self.atspi_state.with_suffix(".actions.json").unlink(missing_ok=True)
-        self.atspi_state.with_suffix(".bounds.json").unlink(missing_ok=True)
         self.atspi_state.with_suffix(".title").unlink(missing_ok=True)
         self.atspi = self.child(command)
         self.ready(self.atspi)
@@ -361,13 +360,16 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
 
     def test_shared_unlock_is_visual_only_and_accessibility_stays_locked(self):
         self.start_shared()
+        self.atspi_state.with_suffix(".actions.json").write_text(json.dumps(["click", "showContextMenu"]))
         client = self.client()
         tree = self.snapshot(client)
         button = next(row for row in tree["elements"] if row["label"] == "Fixture button")
         self.login_call("SetLocked", "true")
-        result = client.tool("computer", steps=[{"tool": "click", "args": {
+        result = client.tool("computer", steps=[{"tool": "activate", "args": {
+            "element_token": button["element_token"]}}, {"tool": "open_context_menu", "args": {
             "element_token": button["element_token"]}}], observe=False)
         self.assertFalse(result["isError"], result)
+        self.assertEqual(json.loads(self.atspi_state.read_text())["last_action"], "showContextMenu")
         self.assertTrue(json.loads(self.login_state.read_text())["locked"])
         self.assertEqual(json.loads(self.login_state.read_text())["unlocks"], 0)
         captures = json.loads(self.state.read_text())["captures"]
@@ -574,7 +576,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.configure(headless=True, helper_fail=True)
         result = client.tool("status")
         self.assertTrue(result["isError"], result)
-        result = client.tool("computer", steps=[{"tool": "click", "args": {
+        result = client.tool("computer", steps=[{"tool": "activate", "args": {
             "element_token": button["element_token"]}}], observe=False)
         self.assertFalse(result["isError"], result)
 
@@ -627,7 +629,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         client = self.client()
         tree = self.snapshot(client)
         button = next(row for row in tree["elements"] if row["label"] == "Fixture button")
-        result = client.tool("computer", steps=[{"tool": "click", "args": {
+        result = client.tool("computer", steps=[{"tool": "activate", "args": {
             "element_token": button["element_token"]}}], observe=False)
         self.assertFalse(result["isError"], result)
         self.assertEqual(json.loads(self.atspi_state.read_text())["clicks"], 1)
@@ -642,7 +644,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertFalse(result["isError"], result)
         tree = self.snapshot(first)
         button = next(row for row in tree["elements"] if row["label"] == "Fixture button")
-        result = second.tool("computer", steps=[{"tool": "click", "args": {
+        result = second.tool("computer", steps=[{"tool": "activate", "args": {
             "element_token": button["element_token"]}}], observe=False)
         self.assertFalse(result["isError"], result)
         children = Path(f"/proc/{self.host.pid}/task/{self.host.pid}/children")
@@ -786,10 +788,15 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
                       if option.get("properties", {}).get("kind", {}).get("enum") == ["window"])
         self.assertEqual(window["properties"]["screenshot"]["type"], "boolean")
         self.assertNotIn("screenshot", window["required"])
-        advertised = {step["properties"]["tool"]["enum"][0]
-                      for step in schema["properties"]["steps"]["items"]["anyOf"]}
-        self.assertEqual(advertised, {"click", "move_cursor", "drag", "scroll",
-                                     "type_text", "set_value", "press_keys", "delay_ms"})
+        actions = {step["properties"]["tool"]["enum"][0]: step["properties"]["args"]
+                   for step in schema["properties"]["steps"]["items"]["anyOf"]}
+        self.assertEqual(list(actions), ["click", "move_cursor", "drag", "scroll", "press_keys",
+                                         "activate", "open_context_menu", "type_text", "set_value", "delay_ms"])
+        self.assertEqual(actions["click"]["required"], ["x", "y"])
+        self.assertEqual(set(actions["click"]["properties"]), {"x", "y", "id", "button", "count"})
+        for name in ("activate", "open_context_menu"):
+            self.assertEqual(actions[name]["required"], ["element_token"])
+            self.assertEqual(set(actions[name]["properties"]), {"element_token"})
         for field in ('"max_depth"', '"max_elements"', '"tree_format"', '"max_image_dimension"', '"pid"', '"by"'):
             self.assertNotIn(field, json.dumps(schema))
         delay = next(step["properties"]["args"] for step in schema["properties"]["steps"]["items"]["anyOf"]
@@ -831,7 +838,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertIn("id", tree)
         self.assertIs(type(tree["id"]), int)
         rows = {row["label"]: row for row in tree["elements"]}
-        self.assertEqual(rows["Fixture button"]["actions"], ["click"])
+        self.assertEqual(rows["Fixture button"]["actions"], ["activate"])
         self.assertEqual(rows["Fixture entry"]["actions"], ["type_text", "set_value"])
         self.assertNotIn("text_input", rows["Fixture entry"])
         self.assertNotIn("actions", rows["Fixture password"])
@@ -839,7 +846,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertNotIn("value", rows["Fixture password"])
         captures = json.loads(self.state.read_text())["captures"]
         result = client.tool("computer", steps=[
-            {"tool": "click", "args": {"element_token": rows["Fixture button"]["element_token"]}},
+            {"tool": "activate", "args": {"element_token": rows["Fixture button"]["element_token"]}},
             {"tool": "set_value", "args": {"element_token": rows["Fixture entry"]["element_token"], "value": "Héllo 世界"}},
             {"tool": "type_text", "args": {"element_token": rows["Fixture entry"]["element_token"], "text": "!"}},
             {"tool": "delay_ms", "args": {"ms": 50}},
@@ -854,7 +861,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertEqual(state["text"], "Héllo 世界!")
         self.assertEqual(state["password_reads"], 0)
         self.snapshot(client)
-        stale = client.tool("computer", steps=[{"tool": "click", "args": {"element_token": rows["Fixture button"]["element_token"]}}])
+        stale = client.tool("computer", steps=[{"tool": "activate", "args": {"element_token": rows["Fixture button"]["element_token"]}}])
         self.assertEqual(stale["structuredContent"]["failed"]["code"], "stale_element")
 
     def test_numeric_value_and_range_are_observed_and_set_without_keyboard(self):
@@ -962,37 +969,68 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertEqual(result["failed"]["code"], "text_readback_failed", result)
         self.assertEqual(json.loads(self.atspi_state.read_text())["text"], "")
 
-    def test_browser_action_names_reuse_click(self):
+    def test_toolkit_actions_advertise_and_invoke_semantic_actions(self):
         self.start_host()
         client = self.client()
-        for name in ("jump", "open", "doDefault", "press", "clickAncestor", "check", "toggle"):
+        for name in ("click", "jump", "open", "doDefault", "press", "clickAncestor", "check", "toggle"):
             with self.subTest(name=name):
-                self.atspi_state.with_suffix(".actions.json").write_text(json.dumps([name, "showContextMenu"]))
-                tree = self.snapshot(client)
-                row = next(row for row in tree["elements"] if row["label"] == "Fixture button")
-                self.assertEqual(row["actions"], ["click"])
-                self.assertEqual(row["click_buttons"], ["left", "right"])
-                for button, expected in (("left", name), ("right", "showContextMenu")):
-                    result = client.tool("computer", steps=[{"tool": "click", "args": {
-                        "element_token": row["element_token"], "button": button}}])["structuredContent"]
+                self.atspi_state.with_suffix(".actions.json").write_text(json.dumps(["scroll", "showContextMenu", name]))
+                row = next(row for row in self.snapshot(client)["elements"] if row["label"] == "Fixture button")
+                self.assertEqual(row["actions"], ["activate", "open_context_menu"])
+                self.assertNotIn("click_buttons", row)
+                for tool, expected in (("activate", name), ("open_context_menu", "showContextMenu")):
+                    result = client.tool("computer", steps=[{"tool": tool, "args": {
+                        "element_token": row["element_token"]}}], observe=False)["structuredContent"]
                     self.assertEqual(result["status"], "ok", result)
                     self.assertEqual(json.loads(self.atspi_state.read_text())["last_action"], expected)
-        self.atspi_state.with_suffix(".actions.json").write_text(json.dumps(["scroll", "showContextMenu"]))
-        row = next(row for row in self.snapshot(client)["elements"] if row["label"] == "Fixture button")
-        self.assertEqual(row["click_buttons"], ["right"])
-        result = client.tool("computer", steps=[{"tool": "click", "args": {"element_token": row["element_token"]}}])
-        self.assertEqual(result["structuredContent"]["failed"]["code"], "accessible_action_failed")
+        for names, advertised, unsupported in ((["scroll", "showContextMenu"], ["open_context_menu"], "activate"),
+                                                (["jump"], ["activate"], "open_context_menu"),
+                                                (["scroll"], [], "activate")):
+            with self.subTest(names=names):
+                self.atspi_state.with_suffix(".actions.json").write_text(json.dumps(names))
+                row = next(row for row in self.snapshot(client)["elements"] if row["label"] == "Fixture button")
+                self.assertEqual(row.get("actions", []), advertised)
+                self.assertNotIn("click_buttons", row)
+                before = json.loads(self.atspi_state.read_text())["clicks"]
+                result = client.tool("computer", steps=[{"tool": unsupported, "args": {
+                    "element_token": row["element_token"]}}], observe=False)["structuredContent"]
+                self.assertEqual(result["failed"]["code"], "accessible_action_failed", result)
+                self.assertEqual(json.loads(self.atspi_state.read_text())["clicks"], before)
+        self.status(client)
+        self.assertEqual(json.loads(self.state.read_text())["input"]["clicks"], 0)
 
-    def test_token_pointer_clicks_preserve_button_and_count(self):
+    def test_semantic_and_pointer_arguments_fail_before_batch_effects(self):
         self.start_host()
         client = self.client()
-        row = next(row for row in self.snapshot(client)["elements"] if row["label"] == "Fixture button")
+        self.status(client)
+        invalid = [("click", {"element_token": "unused"}),
+                   ("click", {"x": 60, "y": 50, "element_token": "unused"}),
+                   ("click", {"x": 60}), ("click", {"y": 50})]
+        for tool in ("activate", "open_context_menu"):
+            invalid.append((tool, {}))
+            for extra in ({"button": "left"}, {"count": 2}, {"x": 60}, {"y": 50}, {"id": 1}):
+                invalid.append((tool, {"element_token": "unused", **extra}))
+        for tool, arguments in invalid:
+            with self.subTest(tool=tool, arguments=arguments):
+                result = client.tool("computer", steps=[
+                    {"tool": "click", "args": {"x": 60, "y": 50}},
+                    {"tool": tool, "args": arguments}], observe=False)
+                self.assertTrue(result["isError"], result)
+                self.assertEqual(result["structuredContent"]["code"], "invalid_arguments", result)
+        self.status(client)
+        self.assertEqual(json.loads(self.state.read_text())["input"]["clicks"], 0)
+        self.assertEqual(json.loads(self.atspi_state.read_text())["clicks"], 0)
+
+    def test_pixel_clicks_preserve_button_and_count(self):
+        self.start_host()
+        client = self.client()
+        self.status(client)
         clicks = 0
         for button, count, code in (("middle", 1, 274), ("left", 2, 272),
                                     ("right", 3, 273), ("middle", 2, 274)):
             with self.subTest(button=button, count=count):
                 result = client.tool("computer", steps=[{"tool": "click", "args": {
-                    "element_token": row["element_token"], "button": button, "count": count}}])["structuredContent"]
+                    "x": 60, "y": 50, "button": button, "count": count}}])["structuredContent"]
                 self.assertEqual(result["status"], "ok", result)
                 clicks += count
                 received = json.loads(self.state.read_text())["input"]
@@ -1000,63 +1038,6 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
                 self.assertEqual(received["button"], code)
                 self.assertEqual(received["buttons_down"], 0)
                 self.assertEqual(json.loads(self.atspi_state.read_text())["clicks"], 0)
-
-    def test_token_pointer_click_uses_fresh_bounds_and_document_scale(self):
-        self.start_accessibility(browser=True)
-        self.start_host()
-        client = self.client()
-        row = next(row for row in self.snapshot(client)["elements"] if row["label"] == "Fixture button")
-        self.atspi_state.with_suffix(".bounds.json").write_text(json.dumps([20, 15, 10, 5]))
-        result = client.tool("computer", steps=[{"tool": "click", "args": {
-            "element_token": row["element_token"], "button": "middle"}}])["structuredContent"]
-        self.assertEqual(result["status"], "ok", result)
-        received = json.loads(self.state.read_text())["input"]
-        # The EIS receiver maps 80x60 logical desktop units to 1920x1080.
-        self.assertEqual((received["x"], received["y"]), (840, 495))
-        self.assertEqual(received["button"], 274)
-
-    def test_token_pointer_click_rejects_offscreen_but_semantic_click_works(self):
-        self.start_accessibility(offscreen=True)
-        self.start_host()
-        client = self.client()
-        row = next(row for row in self.snapshot(client)["elements"] if row["label"] == "Fixture button")
-        for options in ({"button": "middle"}, {"count": 2}):
-            result = client.tool("computer", steps=[{"tool": "click", "args": {
-                "element_token": row["element_token"], **options}}], observe=False)["structuredContent"]
-            self.assertEqual(result["failed"]["code"], "element_off_screen", result)
-        result = client.tool("computer", steps=[{"tool": "click", "args": {
-            "element_token": row["element_token"]}}], observe=False)["structuredContent"]
-        self.assertEqual(result["status"], "ok", result)
-        self.assertEqual(json.loads(self.atspi_state.read_text())["clicks"], 1)
-        self.assertEqual(json.loads(self.state.read_text())["input"]["clicks"], 0)
-
-    def test_token_pointer_click_requires_active_window_and_usable_bounds(self):
-        self.start_host()
-        client = self.client()
-        row = next(row for row in self.snapshot(client)["elements"] if row["label"] == "Fixture button")
-        for bounds, active in (([5, 5, 0, 0], True), ([5, 5, 10, 5], False), ([5, 300, 10, 5], True)):
-            with self.subTest(bounds=bounds, active=active):
-                self.atspi_state.with_suffix(".bounds.json").write_text(json.dumps(bounds))
-                self.configure(active=active)
-                result = client.tool("computer", steps=[{"tool": "click", "args": {
-                    "element_token": row["element_token"], "button": "middle"}}], observe=False)["structuredContent"]
-                self.assertEqual(result["failed"]["code"], "element_off_screen", result)
-                self.assertEqual(json.loads(self.state.read_text())["input"]["clicks"], 0)
-
-    def test_token_pointer_click_unlocks_and_rejects_stale_tokens(self):
-        self.start_shared()
-        client = self.client()
-        row = next(row for row in self.snapshot(client)["elements"] if row["label"] == "Fixture button")
-        self.login_call("SetLocked", "true")
-        result = client.tool("computer", steps=[{"tool": "click", "args": {
-            "element_token": row["element_token"], "count": 2}}], observe=False)["structuredContent"]
-        self.assertEqual(result["status"], "ok", result)
-        self.assertFalse(json.loads(self.login_state.read_text())["locked"])
-        self.snapshot(client)
-        result = client.tool("computer", steps=[{"tool": "click", "args": {
-            "element_token": row["element_token"], "button": "middle"}}], observe=False)["structuredContent"]
-        self.assertEqual(result["failed"]["code"], "stale_element", result)
-        self.assertEqual(json.loads(self.state.read_text())["input"]["clicks"], 2)
 
     def test_keyboard_text_target_and_readback(self):
         self.start_accessibility(keyboard=True)
@@ -1093,7 +1074,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         client = self.client()
         tree = self.snapshot(client)
         button = next(row for row in tree["elements"] if row["label"] == "Fixture button")
-        result = client.tool("computer", steps=[{"tool": "click", "args": {
+        result = client.tool("computer", steps=[{"tool": "activate", "args": {
             "element_token": button["element_token"]}}], observe=False)
         self.assertEqual(result["structuredContent"]["status"], "ok", result)
         self.assertEqual(json.loads(self.atspi_state.read_text())["clicks"], 1)
@@ -1105,7 +1086,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         tree = self.snapshot(client)
         button = next(row for row in tree["elements"] if row["label"] == "Fixture button")
         self.assertEqual(button["frame"]["y"], 620)
-        result = client.tool("computer", steps=[{"tool": "click", "args": {
+        result = client.tool("computer", steps=[{"tool": "activate", "args": {
             "element_token": button["element_token"]}}], observe=False)
         self.assertEqual(result["structuredContent"]["status"], "ok", result)
         self.assertEqual(json.loads(self.atspi_state.read_text())["clicks"], 1)
@@ -1216,7 +1197,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertEqual(len(tree["elements"]), 4)
         button = next(row for row in tree["elements"] if row["label"] == "Fixture button")
         self.assertEqual((button["depth"], button["parent_index"]), (1, 0))
-        result = client.tool("computer", steps=[{"tool": "click", "args": {"element_token": button["element_token"]}}])
+        result = client.tool("computer", steps=[{"tool": "activate", "args": {"element_token": button["element_token"]}}])
         self.assertEqual(result["structuredContent"]["status"], "ok", result)
 
     def test_large_tree_is_bounded_and_reports_complexity(self):
@@ -1231,7 +1212,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertLessEqual(size, 512 * 1024)
         self.assertNotIn("tree_markdown", tree)
         button = next(row for row in tree["elements"] if row["role"] == "button")
-        result = client.tool("computer", steps=[{"tool": "click", "args": {"element_token": button["element_token"]}}])
+        result = client.tool("computer", steps=[{"tool": "activate", "args": {"element_token": button["element_token"]}}])
         self.assertEqual(result["structuredContent"]["status"], "ok", result)
 
     def test_large_tree_is_not_cut_off_by_previous_byte_or_row_limits(self):
@@ -1244,7 +1225,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertGreater(len(json.dumps(tree, separators=(",", ":")).encode()), 18 * 1024)
         button = tree["elements"][-1]
         self.assertEqual(button["label"], "Repeated button 999")
-        result = client.tool("computer", steps=[{"tool": "click", "args": {
+        result = client.tool("computer", steps=[{"tool": "activate", "args": {
             "element_token": button["element_token"]}}], observe=False)
         self.assertEqual(result["structuredContent"]["status"], "ok", result)
 
@@ -1375,7 +1356,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertFalse(any(block["type"] == "image" for block in result["content"]))
         button = next(row for row in tree["elements"] if row["label"] == "Fixture button")
         self.assertEqual(button["frame"], {"x": 30, "y": 30, "width": 20, "height": 10})
-        result = client.tool("computer", steps=[{"tool": "click", "args": {
+        result = client.tool("computer", steps=[{"tool": "activate", "args": {
             "element_token": button["element_token"]}}], observe=target)
         self.assertEqual(result["structuredContent"]["status"], "ok", result)
         self.assertEqual(json.loads(self.atspi_state.read_text())["clicks"], 1)
@@ -1459,7 +1440,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertNotIn("pid_matched", tree)
         button = next(row for row in tree["elements"] if row["label"] == "Fixture button")
         self.assertEqual(button["frame"], {"x": 30, "y": 30, "width": 20, "height": 10})
-        result = client.tool("computer", steps=[{"tool": "click", "args": {"element_token": button["element_token"]}}])
+        result = client.tool("computer", steps=[{"tool": "activate", "args": {"element_token": button["element_token"]}}])
         self.assertFalse(result["isError"], result)
         self.assertEqual(json.loads(self.atspi_state.read_text())["clicks"], 1)
 
@@ -1522,7 +1503,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         client = self.client()
         tree = self.snapshot(client)
         button = next(row for row in tree["elements"] if row["label"] == "Fixture button")
-        click = {"tool": "click", "args": {"element_token": button["element_token"]}}
+        click = {"tool": "activate", "args": {"element_token": button["element_token"]}}
         result = client.tool("computer", steps=[click] * 3, observe={"kind": "desktop"})
         self.assertFalse(result["isError"], result)
         self.assertEqual(result["structuredContent"]["completed"], 3)
@@ -1539,7 +1520,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         client = self.client()
         tree = self.snapshot(client)
         button = next(row for row in tree["elements"] if row["label"] == "Fixture button")
-        click = {"tool": "click", "args": {"element_token": button["element_token"]}}
+        click = {"tool": "activate", "args": {"element_token": button["element_token"]}}
         result = client.tool("computer", steps=[click] * 6 + [
             {"tool": "delay_ms", "args": {"ms": 0}}], observe={"kind": "desktop"})
         self.assertFalse(result["isError"], result)
@@ -1555,7 +1536,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         client = self.client()
         tree = self.snapshot(client)
         button = next(row for row in tree["elements"] if row["label"] == "Fixture button")
-        click = {"tool": "click", "args": {"element_token": button["element_token"]}}
+        click = {"tool": "activate", "args": {"element_token": button["element_token"]}}
         result = client.tool("computer", steps=[click,
             {"tool": "delay_ms", "args": {"ms": 0}}, click, click], observe={"kind": "desktop"})
         self.assertFalse(result["isError"], result)
@@ -1570,7 +1551,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         client = self.client()
         tree = self.snapshot(client)
         button = next(row for row in tree["elements"] if row["label"] == "Fixture button")
-        click = {"tool": "click", "args": {"element_token": button["element_token"]}}
+        click = {"tool": "activate", "args": {"element_token": button["element_token"]}}
         result = client.tool("computer", steps=[click,
             {"tool": "delay_ms", "args": {"ms": 200}}, click,
             {"tool": "delay_ms", "args": {"ms": 50}}], observe={"kind": "desktop"})
@@ -1596,9 +1577,9 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         tree = self.snapshot(client)
         button = next(row for row in tree["elements"] if row["label"] == "Fixture button")
         result = client.tool("computer", steps=[
-            {"tool": "click", "args": {"element_token": button["element_token"]}},
+            {"tool": "activate", "args": {"element_token": button["element_token"]}},
             {"tool": "delay_ms", "args": {"ms": 0}},
-            {"tool": "click", "args": {"element_token": "stale"}},
+            {"tool": "activate", "args": {"element_token": "stale"}},
             {"tool": "delay_ms", "args": {"ms": 0}},
         ], observe={"kind": "desktop"})
         self.assertEqual(result["structuredContent"]["completed"], 2)
@@ -1612,7 +1593,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         client = self.client()
         tree = self.snapshot(client)
         button = next(row for row in tree["elements"] if row["label"] == "Fixture button")
-        click = {"tool": "click", "args": {"element_token": button["element_token"]}}
+        click = {"tool": "activate", "args": {"element_token": button["element_token"]}}
         client.serial += 1
         client.process.stdin.write(json.dumps({"jsonrpc": "2.0", "id": client.serial,
             "method": "tools/call", "params": {"name": "computer", "arguments": {

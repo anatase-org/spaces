@@ -68,7 +68,10 @@ def main():
                 '<button onclick="document.getElementById(\'result\').textContent=\'Button clicked\'" '
                 'ondblclick="document.getElementById(\'result\').textContent=\'Button double clicked\'">Probe button</button>'
                 '<input aria-label="Probe field">'
-                '<a href="about:blank" onclick="event.preventDefault();document.getElementById(\'result\').textContent=\'Link clicked\'">Probe link</a>'
+                '<a href="about:blank" onclick="event.preventDefault();document.getElementById(\'result\').textContent=\'Link clicked\'" '
+                'oncontextmenu="event.preventDefault();document.getElementById(\'context\').hidden=false">Probe link</a>'
+                '<div id="context" role="menu" hidden><button role="menuitem" '
+                'onclick="document.getElementById(\'result\').textContent=\'Context menu selected\';this.parentElement.hidden=true">Probe menu item</button></div>'
                 '<p id="result">Ready</p>'
                 '<input id="native" type="range" min="0" max="100" value="80" aria-label="Native volume">'
                 '<p id="native-result">Native value 80</p>'
@@ -111,32 +114,40 @@ def main():
         def snapshot():
             return probe.tool("computer", observe={"kind": "window", **target})["observation"]
 
+        def point(tree, label):
+            frame = next(row["frame"] for row in tree["elements"] if row["label"] == label)
+            assert frame, (label, tree)
+            return {"id": tree["id"], "x": frame["x"] + frame["width"] / 2,
+                    "y": frame["y"] + frame["height"] / 2}
+
         tree = snapshot()
-        button = next(row for row in tree["elements"] if row["label"] == "Probe button")
         result = probe.tool("computer", steps=[{"tool": "click", "args": {
-            "element_token": button["element_token"], "count": 2}}], observe={"kind": "window", **target})
+            **point(tree, "Probe button"), "count": 2}}], observe={"kind": "window", **target})
         assert result["status"] == "ok", result
         assert any(row["label"] == "Button double clicked" for row in result["observation"]["elements"]), result
-        record("double-click", status=result["status"])
-        link = next(row for row in result["observation"]["elements"] if row["label"] == "Probe link")
+        record("pixel-double-click", status=result["status"])
         result = probe.tool("computer", steps=[
-            {"tool": "click", "args": {"element_token": link["element_token"], "button": "middle"}},
+            {"tool": "click", "args": {**point(result["observation"], "Probe link"), "button": "middle"}},
             {"tool": "press_keys", "args": {"keys": ["CTRL", "Tab"]}},
             {"tool": "delay_ms", "args": {"ms": 500}}], observe={"kind": "window", **target})
         assert result["status"] == "ok", result
         assert any(row["label"] == "Address and search bar" and row.get("value") == "about:blank"
                    for row in result["observation"]["elements"]), result
-        record("middle-click", new_tab="about:blank", status=result["status"])
+        record("pixel-middle-click", new_tab="about:blank", status=result["status"])
         probe.tool("computer", steps=[{"tool": "press_keys", "args": {"keys": ["CTRL", "w"]}}], observe=False)
         tree = snapshot()
-        offscreen = next(row for row in tree["elements"] if row["label"] == "Offscreen button")
-        reply = probe.call("tools/call", {"name": "computer", "arguments": {
-            "steps": [{"tool": "click", "args": {
-                "element_token": offscreen["element_token"], "button": "middle"}}], "observe": False}})
-        result = reply.get("structuredContent", {})
-        assert reply.get("isError"), reply
-        assert result.get("failed", {}).get("code") == "element_off_screen", result
-        record("offscreen-middle-click", error="element_off_screen")
+        link = next(row for row in tree["elements"] if row["label"] == "Probe link")
+        assert {"activate", "open_context_menu"} <= set(link["actions"]), link
+        assert "click_buttons" not in link, link
+        result = probe.tool("computer", steps=[{"tool": "open_context_menu", "args": {
+            "element_token": link["element_token"]}}], observe={"kind": "window", **target})
+        assert result["status"] == "ok", result
+        menu = next(row for row in result["observation"]["elements"] if row["label"] == "Probe menu item")
+        result = probe.tool("computer", steps=[{"tool": "activate", "args": {
+            "element_token": menu["element_token"]}}], observe={"kind": "window", **target})
+        assert result["status"] == "ok", result
+        assert any(row["label"] == "Context menu selected" for row in result["observation"]["elements"]), result
+        record("open_context_menu", status=result["status"])
 
         for label, text in (("Probe button", "Button clicked"), ("Probe link", "Link clicked"),
                             ("Offscreen button", "Offscreen button clicked")):
@@ -145,11 +156,11 @@ def main():
             if label == "Offscreen button":
                 bounds = tree["screenshot"]["bounds"]
                 assert row["frame"]["y"] > bounds["y"] + bounds["height"], row
-            result = probe.tool("computer", steps=[{"tool": "click", "args": {"element_token": row["element_token"]}}],
+            result = probe.tool("computer", steps=[{"tool": "activate", "args": {"element_token": row["element_token"]}}],
                 observe={"kind": "window", **target})
             assert result["status"] == "ok", result
             assert any(text in (row.get("label", "") + row.get("value", "")) for row in result["observation"]["elements"]), result
-            record("click", target=label, actions=row["actions"], status=result["status"])
+            record("activate", target=label, actions=row["actions"], status=result["status"])
 
         for tool, field, text, expected in (("set_value", "value", "hello", "hello"),
                                              ("set_value", "value", "changed", "changed"),

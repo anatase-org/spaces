@@ -254,7 +254,7 @@ def main():
             rows = focus_entry(first)
             clicks = fixture_state()["clicks"]
             lock_visible()
-            first.tool("computer", steps=[{"tool": "click", "args": {
+            first.tool("computer", steps=[{"tool": "activate", "args": {
                 "element_token": rows["Spaces fixture button"]["element_token"]}}], observe=False)
             assert fixture_state()["clicks"] == clicks + 1
             assert locked(), "accessibility action unlocked the session"
