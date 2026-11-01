@@ -1,7 +1,7 @@
 /* Include the production translation unit to test backend invariants without
  * exporting a second API or adding test-only hooks to the injected executable. */
 #define main scu_program_main
-#include "../native/scu.c"
+#include "../native/scu_host.c"
 #undef main
 
 #include <assert.h>
@@ -139,11 +139,6 @@ static void test_images(void)
 {
     scu.doc = yyjson_mut_doc_new(NULL);
     GError *error = NULL;
-    GCredentials *credentials = g_credentials_new();
-    assert(authorize_peer(NULL, NULL, credentials, NULL));
-    assert(g_credentials_set_unix_user(credentials, getuid() + 1, &error));
-    assert(!authorize_peer(NULL, NULL, credentials, NULL));
-    g_object_unref(credentials);
     const guchar rgb[] = {10,20,30, 40,50,60};
     GBytes *pixels = decode_kwin_pixels(rgb, sizeof(rgb), 2, 1, 6, 13, &error);
     assert(pixels && !error && g_bytes_equal(pixels, g_bytes_new_static(rgb, sizeof(rgb))));
@@ -156,10 +151,6 @@ static void test_images(void)
     pixels = decode_kwin_pixels((const guchar *)argb, sizeof(argb), 2, 1, 8, 5, &error);
     const guchar expected[] = {0x11,0x22,0x33, 0x20,0x10,0x08};
     assert(pixels && !memcmp(g_bytes_get_data(pixels, NULL), expected, sizeof(expected)));
-    int fd = sealed_pixels(pixels, &error);
-    assert(fd >= 0 && (fcntl(fd, F_GET_SEALS) & F_SEAL_WRITE));
-    assert(write(fd, "x", 1) == -1 && errno == EPERM);
-    close(fd);
     g_bytes_unref(pixels);
     /* Native detail survives a tiny overview. Three independently patterned
      * streams occupy a mixed-scale layout with a black inter-output gap. */

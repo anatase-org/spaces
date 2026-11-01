@@ -84,17 +84,26 @@ class ScuTests(unittest.TestCase):
         cls.socket_path = cls.directory / "accessibility"
         cls.computer_path = cls.directory / "computer"
         cls.binary = cls.directory / "scu"
+        cls.host_binary = cls.directory / "scu-host"
         cls.backend = cls.directory / "backend"
         common = ["cc", "-O1", "-g", "-std=gnu11", "-Wall", "-Wextra", "-Werror",
-            "-DYYJSON_READER_DEPTH_LIMIT=64", f'-DSCU_ATSPI_SOCKET="{cls.socket_path}"',
-            f'-DSCU_ATSPI_ADDRESS="unix:path={cls.socket_path}"',
-            f'-DSCU_COMPUTER_SOCKET="{cls.computer_path}"', *shlex.split(flags.stdout)]
+            "-DYYJSON_READER_DEPTH_LIMIT=64",
+            f'-DSCU_COMPUTER_SOCKET="{cls.computer_path}"']
         libraries = shlex.split(subprocess.check_output(["pkg-config", "--libs", "gio-unix-2.0"], text=True))
-        link = [str(ROOT / "native/vendor/yyjson.c"), "-Wl,--wrap=__libc_start_main",
-                "-Wl,--wrap=dlopen", "-Wl,--wrap=dlsym", "-ldl", *libraries]
-        for source, binary in ((ROOT / "native/scu.c", cls.binary), (ROOT / "tests/scu_backend_fixture.c", cls.backend)):
-            extra = ["-leis", "-lxkbcommon"] if binary == cls.backend else []
-            build = subprocess.run([*common, str(source), *link, *extra, "-o", str(binary)], capture_output=True, text=True)
+        for source, binary in ((ROOT / "native/scu.c", cls.binary), (ROOT / "native/scu_host.c", cls.host_binary),
+                               (ROOT / "tests/scu_backend_fixture.c", cls.backend)):
+            headers = shlex.split(flags.stdout)
+            if binary == cls.binary:
+                headers = shlex.split(subprocess.check_output(["pkg-config", "--cflags", "glib-2.0"], text=True))
+                link = [str(ROOT / "native/vendor/yyjson.c"),
+                        *shlex.split(subprocess.check_output(["pkg-config", "--libs", "glib-2.0"], text=True))]
+            else:
+                link = [str(ROOT / "native/vendor/yyjson.c"), *libraries]
+            extra = (["-Wl,--wrap=__libc_start_main"] if binary == cls.binary else ["-ldl"])
+            if binary == cls.backend:
+                extra += ["-leis", "-lxkbcommon"]
+            build = subprocess.run([*common, *headers, str(source), *link, *extra, "-o", str(binary)],
+                capture_output=True, text=True)
             if build.returncode:
                 raise AssertionError(build.stderr)
 
@@ -102,12 +111,12 @@ class ScuTests(unittest.TestCase):
         self.socket_path.unlink(missing_ok=True)
         self.computer_path.unlink(missing_ok=True)
         self.environment = os.environ.copy()
-        for key in ("DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "WAYLAND_DISPLAY", "DISPLAY", "SPACES_NAME"):
+        for key in ("DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "WAYLAND_DISPLAY", "DISPLAY", "SPACES_NAME", "AT_SPI_BUS_ADDRESS", "LD_LIBRARY_PATH"):
             self.environment.pop(key, None)
         self.state = self.directory / "kwin-state.json"
         self.control = self.directory / "kwin-control.json"
-        self.config = {}
-        self.control.write_text("{}")
+        self.config = {"atspi_address": f"unix:path={self.socket_path}"}
+        self.control.write_text(json.dumps(self.config))
 
     def child(self, command, **kwargs):
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **kwargs)
@@ -160,7 +169,7 @@ class ScuTests(unittest.TestCase):
             command.append("--registry-unavailable")
         self.atspi = self.child(command)
         self.ready(self.atspi)
-        self.configure(app_pid=self.atspi.pid, two_windows=two_windows)
+        self.configure(app_pid=self.atspi.pid, two_windows=two_windows, atspi_address=address)
 
     def start_host(self, accessibility=True, **config):
         if accessibility and not hasattr(self, "atspi"):
@@ -174,7 +183,7 @@ class ScuTests(unittest.TestCase):
 
     def start_service(self):
         ready_read, ready_write = os.pipe()
-        self.host = self.child([str(self.binary), "--host-service", str(self.computer_path), str(ready_write)],
+        self.host = self.child([str(self.host_binary), "--host-service", str(self.computer_path), str(ready_write)],
             pass_fds=(ready_write,), env={**self.environment, "DBUS_SESSION_BUS_ADDRESS": self.address})
         os.close(ready_write)
         try:
@@ -204,6 +213,97 @@ class ScuTests(unittest.TestCase):
     def image(result):
         block = next(block for block in result["content"] if block["type"] == "image")
         return Image.open(io.BytesIO(base64.b64decode(block["data"]))).convert("RGB")
+
+    def test_offline_mcp_recovers_without_reinitializing(self):
+        client = self.client()
+        self.assertIn("tools", client.call("tools/list", {})["result"])
+        self.assertTrue(client.tool("status")["isError"])
+        self.assertIn("result", client.call("ping", {}))
+        self.start_host()
+        metadata = {"io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities": {}}
+        result = client.call("tools/call", {"name": "status", "arguments": {}, "_meta": metadata})["result"]
+        self.assertFalse(result["isError"], result)
+        self.assertEqual(result["resultType"], "complete")
+        self.assertIn("io.modelcontextprotocol/serverInfo", result["_meta"])
+        self.status(client)
+
+    def test_guest_has_no_desktop_dependencies_or_accessibility_bus(self):
+        self.start_host()
+        # These invalid libraries and address affect only the guest frontend.
+        library_dir = self.directory / "guest-without-desktop"
+        library_dir.mkdir(exist_ok=True)
+        for library in ("libatspi.so.0", "libei.so.1", "libxkbcommon.so.0", "libgdk_pixbuf-2.0.so.0"):
+            (library_dir / library).write_bytes(b"invalid ELF")
+        self.environment["LD_LIBRARY_PATH"] = str(library_dir)
+        self.environment["AT_SPI_BUS_ADDRESS"] = "unix:path=/nonexistent/guest-a11y"
+        client = self.client()
+        tree = self.snapshot(client)
+        button = next(row for row in tree["elements"] if row["label"] == "Fixture button")
+        result = client.tool("computer", steps=[{"tool": "click", "args": {
+            "element_token": button["element_token"]}}], observe=False)
+        self.assertFalse(result["isError"], result)
+        self.assertEqual(json.loads(self.atspi_state.read_text())["clicks"], 1)
+
+    def test_workers_isolate_handles_and_survive_another_workers_crash(self):
+        self.start_host()
+        children = Path(f"/proc/{self.host.pid}/task/{self.host.pid}/children")
+        first = self.client()
+        one = self.status(first)["structuredContent"]
+        first_pid = int(children.read_text().split()[0])
+        semantic_children = Path(f"/proc/{first_pid}/task/{first_pid}/children")
+        semantic_pid = int(semantic_children.read_text().split()[0])
+        second = self.client()
+        two = self.status(second)["structuredContent"]
+        self.assertNotEqual(one["canvas"]["id"], two["canvas"]["id"])
+        foreign = second.tool("computer", id=one["canvas"]["id"],
+            steps=[{"tool": "click", "args": {"x": 40, "y": 40}}], observe=False)
+        self.assertTrue(foreign["isError"], foreign)
+        os.kill(first_pid, 9)
+        deadline = time.monotonic() + 2
+        while Path(f"/proc/{semantic_pid}").exists() and time.monotonic() < deadline:
+            time.sleep(.01)
+        self.assertFalse(Path(f"/proc/{semantic_pid}").exists(), "semantic child was not reaped")
+        self.assertTrue(first.tool("status")["isError"])
+        self.status(second)
+        fresh = self.status(first)["structuredContent"]
+        self.assertNotEqual(one["canvas"]["id"], fresh["canvas"]["id"])
+        self.assertIsNone(self.host.poll())
+
+    def test_host_connection_limit_and_revocation_reap_workers(self):
+        self.start_host()
+        peers = []
+        for _ in range(33):
+            peer = socket.socket(socket.AF_UNIX)
+            self.addCleanup(peer.close)
+            peer.settimeout(3)
+            peer.connect(str(self.computer_path))
+            peers.append(peer)
+        # The last connection exceeds the existing 32-client limit.
+        self.assertEqual(peers[-1].recv(1), b"")
+        children = Path(f"/proc/{self.host.pid}/task/{self.host.pid}/children")
+        workers = [int(pid) for pid in children.read_text().split()]
+        self.assertEqual(len(workers), 32)
+        self.stop(self.host)
+        for pid in workers:
+            self.assertFalse(Path(f"/proc/{pid}").exists(), "host worker survived revocation")
+        self.assertFalse(self.computer_path.exists())
+
+    def test_large_image_crosses_relay_buffers(self):
+        self.start_host(large_capture=True)
+        result = self.status(self.client())
+        self.assertEqual(self.image(result).size, (512, 512))
+        block = next(item for item in result["content"] if item["type"] == "image")
+        self.assertGreater(len(block["data"]), 65536)
+
+    def test_unsafe_socket_permissions_fail_without_ending_mcp(self):
+        self.start_host()
+        self.computer_path.chmod(0o666)
+        client = self.client()
+        self.assertEqual(client.tool("status")["structuredContent"]["code"], "accessibility_permission_required")
+        self.assertIn("result", client.call("ping", {}))
+        self.computer_path.chmod(0o600)
+        self.status(client)
 
     def test_catalog_and_permission_errors(self):
         client = self.client()
@@ -323,8 +423,10 @@ class ScuTests(unittest.TestCase):
 
     def test_window_without_accessibility_still_returns_an_image(self):
         self.start_host(window_title="No accessibility tree")
-        result = self.client().tool("computer", observe={"kind": "window", "pid": self.atspi.pid,
-            "window_id": 1, "tree_format": "both"})
+        client = self.client()
+        window = client.windows()[0]
+        result = client.tool("computer", observe={"kind": "window", "pid": self.atspi.pid,
+            "window_id": window["window_id"], "tree_format": "both"})
         self.assertFalse(result["isError"], result)
         self.assertEqual(self.image(result).size, (80, 60))
         observation = result["structuredContent"]["observation"]
@@ -346,8 +448,10 @@ class ScuTests(unittest.TestCase):
 
     def test_window_capture_rejects_geometry_races(self):
         self.start_host(change_window_on_capture=True)
-        result = self.client().tool("computer", observe={"kind": "window", "pid": self.atspi.pid,
-            "window_id": 1})
+        client = self.client()
+        window = client.windows()[0]
+        result = client.tool("computer", observe={"kind": "window", "pid": self.atspi.pid,
+            "window_id": window["window_id"]})
         self.assertEqual(result["structuredContent"]["observation_error"]["code"], "stale_window_geometry")
         self.assertFalse(any(block["type"] == "image" for block in result["content"]))
 
@@ -384,10 +488,10 @@ class ScuTests(unittest.TestCase):
     def test_window_screenshot_cannot_retarget_a_stale_pid(self):
         self.start_host()
         client = self.client()
-        self.status(client)
+        window = client.windows()[0]
         captures = json.loads(self.state.read_text())["captures"]
         result = client.tool("computer", observe={"kind": "window", "pid": self.atspi.pid + 1,
-            "window_id": 1})
+            "window_id": window["window_id"]})
         self.assertEqual(result["structuredContent"]["observation_error"]["code"], "window_unavailable")
         self.assertEqual(json.loads(self.state.read_text())["captures"], captures)
 
@@ -530,10 +634,8 @@ class ScuTests(unittest.TestCase):
         self.assertTrue(select.select([client.process.stdout], [], [], 2)[0])
         result = json.loads(client.process.stdout.readline())["result"]
         data = result["structuredContent"]
-        self.assertEqual(data["completed"], 1)
-        self.assertEqual(data["status"], "failed")
-        self.assertEqual(data["failed"]["index"], 1)
-        self.assertEqual(data["failed"]["code"], "accessibility_permission_required")
+        self.assertTrue(result["isError"], result)
+        self.assertEqual(data["code"], "computer_use_disconnected")
         self.assertEqual(json.loads(self.atspi_state.read_text())["clicks"], 1)
 
     def test_explicit_delays_finish_before_one_final_screenshot(self):
@@ -615,11 +717,7 @@ class ScuTests(unittest.TestCase):
         result = json.loads(client.process.stdout.readline())["result"]
         data = result["structuredContent"]
         self.assertTrue(result["isError"], result)
-        self.assertEqual(data["completed"], 0)
-        self.assertEqual(data["status"], "failed")
-        self.assertEqual(data["failed"]["index"], 0)
-        self.assertEqual(data["failed"]["tool"], "delay_ms")
-        self.assertEqual(data["failed"]["code"], "accessibility_permission_required")
+        self.assertEqual(data["code"], "computer_use_disconnected")
         state = json.loads(self.state.read_text())
         self.assertEqual((state["connections"], state["captures"]), (0, 0))
 
@@ -697,7 +795,7 @@ class ScuTests(unittest.TestCase):
         self.assertEqual(result["structuredContent"]["completed"], 0)
         self.assertEqual(json.loads(self.state.read_text())["input"]["keys"], 0)
 
-    def test_cancellation_interrupts_a_stalled_peer_authentication(self):
+    def test_cancellation_interrupts_a_stalled_host(self):
         listener = socket.socket(socket.AF_UNIX)
         self.addCleanup(listener.close)
         listener.bind(str(self.computer_path))
@@ -838,7 +936,9 @@ class ScuTests(unittest.TestCase):
                 library_dir = self.directory / ("missing-" + library)
                 library_dir.mkdir(exist_ok=True)
                 (library_dir / library).write_bytes(b"invalid ELF")
+                self.stop(self.host)
                 self.environment["LD_LIBRARY_PATH"] = str(library_dir)
+                self.start_service()
                 client = self.client()
                 self.assertIn("tools", client.call("tools/list", {})["result"])
                 for name, args in (("status", {}), ("computer", {"steps": [
@@ -850,14 +950,14 @@ class ScuTests(unittest.TestCase):
         state = json.loads(self.state.read_text())
         self.assertEqual((state["captures"], state["connections"]), (0, 0))
 
-    def test_missing_accessibility_fails_before_capture_or_input(self):
+    def test_missing_native_accessibility_fails_before_capture_or_input(self):
         self.start_host(accessibility=False)
         client = self.client()
         for name, args in (("status", {}), ("computer", {"steps": [
             {"tool": "press_key", "args": {"key": "a"}}]})):
             result = client.tool(name, **args)
             self.assertTrue(result["isError"], result)
-            self.assertEqual(result["structuredContent"]["code"], "accessibility_permission_required")
+            self.assertEqual(result["structuredContent"]["code"], "accessibility_unavailable")
             self.assertTrue(all(block["type"] == "text" for block in result["content"]))
             self.assertNotIn("canvas", result["structuredContent"])
             self.assertNotIn("apps", result["structuredContent"])

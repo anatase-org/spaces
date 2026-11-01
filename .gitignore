@@ -4,6 +4,7 @@ test
 *.pyc
 *.egg-info
 build/
+.build/
 dist/
 pkg/
 !pkg/PKGBUILD
@@ -19,3 +20,5 @@ pkg/
 
 /native/spaces-system-broker
 /native/scu
+
+/native/scu-host

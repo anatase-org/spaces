@@ -52,6 +52,10 @@ Requires:       arch-install-scripts
 Requires:       systemd
 Requires:       systemd-container
 Requires:       glib2
+Requires:       at-spi2-core
+Requires:       libei >= 1.6
+Requires:       libxkbcommon
+Requires:       gdk-pixbuf2
 Requires:       dconf
 Requires:       xdg-dbus-proxy
 Requires:       %{name}-selinux

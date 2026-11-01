@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import random
 import select
 import socket
 import subprocess
@@ -29,7 +30,7 @@ parser.add_argument("backend")
 args = parser.parse_args()
 flags = Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION
 bus = Gio.DBusConnection.new_for_address_sync(args.address, flags, None, None)
-for name in ("org.kde.KWin", "org.kde.KWin.ScreenShot2", "org.kde.klipper"):
+for name in ("org.kde.KWin", "org.kde.KWin.ScreenShot2", "org.kde.klipper", "org.a11y.Bus"):
     bus.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
                   "RequestName", GLib.Variant("(su)", (name, 0)), None,
                   Gio.DBusCallFlags.NONE, 2000, None)
@@ -49,6 +50,7 @@ XML = """<node>
 <method name='CaptureWorkspace'><arg type='a{sv}' direction='in'/><arg type='h' direction='in'/><arg type='a{sv}' direction='out'/></method>
 </interface>
 <interface name='org.kde.klipper.klipper'><method name='setClipboardContents'><arg type='s' direction='in'/></method></interface>
+<interface name='org.a11y.Bus'><method name='GetAddress'><arg type='s' direction='out'/></method></interface>
 </node>"""
 node = Gio.DBusNodeInfo.new_for_xml(XML)
 parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
@@ -79,6 +81,8 @@ def geometry():
     if config.get("triple"):
         outputs = [{"name": name, "geometry": {"x": x, "y": y, "width": 80, "height": 60}, "scale": scale}
                    for name, x, y, scale in (("left", -80, -10, 2), ("center", 0, 0, 1), ("right", 90, 0, 1))]
+    if config.get("large_capture"):
+        outputs = [{"name": "large", "geometry": {"x": 0, "y": 0, "width": 512, "height": 512}, "scale": 1}]
     if config.get("resize"):
         outputs[0]["geometry"]["width"] += 10
     if config.get("overlap") and len(outputs) > 1:
@@ -123,6 +127,9 @@ def write_pixels(fd, pixels):
 
 
 def method(connection, sender, path, interface, name, parameters, invocation):
+    if name == "GetAddress":
+        invocation.return_value(GLib.Variant("(s)", (control()["atspi_address"],)))
+        return
     values = parameters.unpack()
     config = control()
     if name == "loadScript":
@@ -213,6 +220,9 @@ def method(connection, sender, path, interface, name, parameters, invocation):
                                                 123 if name == "CaptureWindow" else (px % 2) * 255, 255))
                 else:
                     raw[offset:offset+4] = b"\0\0\0\xff"
+        if config.get("large_capture"):
+            raw = bytearray(random.Random(0).randbytes(width * height * 4))
+            raw[3::4] = b"\xff" * (width * height)
         # Transfer the received descriptor rather than retaining an extra writer
         # in the invocation. Truncation must produce EOF for the host reader.
         descriptors = invocation.get_message().get_unix_fd_list().steal_fds()
@@ -232,7 +242,7 @@ def method(connection, sender, path, interface, name, parameters, invocation):
 
 
 for path, interfaces in (("/Scripting", [0]), ("/org/kde/KWin/EIS/RemoteDesktop", [2]),
-                         ("/org/kde/KWin/ScreenShot2", [3]), ("/klipper", [4])):
+                         ("/org/kde/KWin/ScreenShot2", [3]), ("/klipper", [4]), ("/org/a11y/bus", [5])):
     for index in interfaces:
         bus.register_object(path, node.interfaces[index], method, None, None)
 save()

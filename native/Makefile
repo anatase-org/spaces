@@ -12,15 +12,19 @@ TARGET_ARCH ?= $(shell uname -m)
 .PHONY: all check-guest-abi clean install
 
 all: pam_spaces.so spaces-pam spaces spaces-portal \
-	spaces-secret-helper spaces-open spaces-broker spaces-system-broker scu
+	spaces-secret-helper spaces-open spaces-broker spaces-system-broker scu scu-host
 
-# Desktop libraries supply headers at build time and are dlopen'd in the guest.
-# Only the existing GLib/GIO baseline is a required runtime dependency.
-scu: scu.c vendor/yyjson.c vendor/yyjson.h
+# The injected frontend needs only the established GLib guest baseline.
+scu: scu.c scu_mcp.h vendor/yyjson.c vendor/yyjson.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DYYJSON_READER_DEPTH_LIMIT=64 \
+		$$(pkg-config --cflags glib-2.0) \
+		-o $@ scu.c vendor/yyjson.c $(LDFLAGS) \
+		-Wl,--wrap=__libc_start_main $$(pkg-config --libs glib-2.0)
+
+scu-host: scu_host.c scu_mcp.h vendor/yyjson.c vendor/yyjson.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -DYYJSON_READER_DEPTH_LIMIT=64 \
 		$$(pkg-config --cflags gio-unix-2.0 atspi-2 libei-1.0 xkbcommon gdk-pixbuf-2.0) \
-		-o $@ scu.c vendor/yyjson.c $(LDFLAGS) \
-		-Wl,--wrap=__libc_start_main -Wl,--wrap=dlopen -Wl,--wrap=dlsym \
+		-o $@ scu_host.c vendor/yyjson.c $(LDFLAGS) \
 		$$(pkg-config --libs gio-unix-2.0) -ldl
 
 pam_spaces.so: pam_spaces.c protocol.h
@@ -74,11 +78,11 @@ check-guest-abi: all
 		--glibc-max 2.17 \
 		--guest pam_spaces.so spaces spaces-portal \
 			spaces-secret-helper spaces-open spaces-system-broker scu \
-		--host spaces-pam spaces-broker
+		--host spaces-pam spaces-broker scu-host
 
 install: check-guest-abi
 	install -Dm755 scu $(DESTDIR)$(GUESTDIR)/scu
-	install -Dm755 scu $(DESTDIR)$(LIBEXECDIR)/scu-host
+	install -Dm755 scu-host $(DESTDIR)$(LIBEXECDIR)/scu-host
 	install -Dm644 ../data/applications/org.anatase.spaces.scu.desktop $(DESTDIR)$(PREFIX)/share/applications/org.anatase.spaces.scu.desktop
 	install -Dm644 vendor/yyjson.LICENSE $(DESTDIR)$(PREFIX)/share/licenses/spaces/yyjson.LICENSE
 	install -Dm755 spaces-system-broker $(DESTDIR)$(GUESTDIR)/spaces-system-broker
@@ -100,4 +104,4 @@ install: check-guest-abi
 
 clean:
 	rm -f pam_spaces.so spaces-pam spaces \
-		spaces-portal spaces-secret-helper spaces-open spaces-broker spaces-system-broker scu
+		spaces-portal spaces-secret-helper spaces-open spaces-broker spaces-system-broker scu scu-host
