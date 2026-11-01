@@ -590,6 +590,11 @@ Step failures identify the zero-based index and stop the remaining sequence:
 {"status":"failed","completed":1,"failed":{"index":1,"tool":"click","code":"invalid_coordinates","hint":"Coordinates lie outside the full desktop overview."}}
 ```
 
+Without any `delay_ms` step, a batch pauses 150 ms between steps and before its
+final screenshot. Empty observations have no added pause. Any explicit delay,
+including zero, disables all automatic pauses for that batch. Automatic pauses
+remain cancellable and stop on permission loss; they do not count as steps.
+
 `delay_ms` is an explicit step with a required integer `ms` from 0 to 30000;
 the old top-level `delay_ms` argument is rejected. Place delays between actions
 or at the end. The final observation occurs after all steps, including trailing
@@ -831,3 +836,26 @@ A click outside the canvas was rejected before input delivery, returning
 `isError:true`. Both responses omit the removed fields. Old contract examples
 were removed from this document. The latest 40-test suite and native ABI checks
 passed before deployment; live verification sent no keyboard or pointer input.
+
+Settings reconciliation regression, 2026-11-01: atomically replacing host
+`kdeglobals` now refreshes the changed settings mounts without terminating SCU,
+the AT-SPI proxy, or the guest graphical session. The portal bridge is rebuilt
+because its broker pins file-mapping descriptors. Changes to permission,
+selected login, environment, or non-settings mounts retain full teardown.
+Failed settings updates retain the actual mounted subset for the next retry;
+the original source-identity and read-only mount checks still apply.
+
+Reproduce the controller regression checks without accessing a desktop:
+
+```sh
+PYTHONPATH=src venv/bin/python -m unittest tests.test_computer_integration -v
+```
+
+All 16 lifecycle tests pass, covering settings replacement, untouched mounts,
+portal mapping refresh, mount/unmount failure and recovery, a second atomic
+replacement between planning and mounting, permission downgrade, session
+replacement and logout. The SCU/private-backend and native ABI suites also
+passed; affected session, accessibility, launch, broker and packaging checks ran
+190 tests with 2 skips. `make -C native check-guest-abi` passed. This fix was
+tested locally with private fixtures and mocked machine operations; it has not
+been deployed or live-tested on win5. No host GUI was controlled.

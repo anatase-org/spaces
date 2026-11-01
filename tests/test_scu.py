@@ -312,6 +312,75 @@ class ScuTests(unittest.TestCase):
         for removed in ("run_steps", "act", "get_desktop_state", "get_window_state", "list_windows", "health_report", "click"):
             self.assertEqual(client.tool(removed)["structuredContent"]["code"], "unknown_tool")
 
+    def test_automatic_delays_separate_actions_and_final_screenshot(self):
+        self.start_accessibility()
+        self.start_host()
+        client = self.client()
+        tree = self.snapshot(client)
+        button = next(row for row in tree["elements"] if row["label"] == "Fixture button")
+        click = {"tool": "click", "args": {"element_token": button["element_token"]}}
+        result = client.tool("computer", steps=[click] * 3, observe={"kind": "desktop"})
+        self.assertFalse(result["isError"], result)
+        self.assertEqual(result["structuredContent"]["completed"], 3)
+        times = json.loads(self.atspi_state.read_text())["action_times"]
+        for earlier, later in zip(times, times[1:]):
+            self.assertGreaterEqual(later - earlier, .15)
+        capture_time = json.loads(self.state.read_text())["capture_times"][-1]
+        self.assertGreaterEqual(capture_time - times[-1], .15)
+        self.assertEqual(sum(block["type"] == "image" for block in result["content"]), 1)
+
+    def test_explicit_zero_delay_disables_all_automatic_pauses(self):
+        self.start_accessibility()
+        self.start_host()
+        client = self.client()
+        tree = self.snapshot(client)
+        button = next(row for row in tree["elements"] if row["label"] == "Fixture button")
+        click = {"tool": "click", "args": {"element_token": button["element_token"]}}
+        # Six actions would otherwise introduce at least 750 ms of pauses.
+        result = client.tool("computer", steps=[click] * 6 + [
+            {"tool": "delay_ms", "args": {"ms": 0}}], observe={"kind": "desktop"})
+        self.assertFalse(result["isError"], result)
+        self.assertEqual(result["structuredContent"]["completed"], 7)
+        times = json.loads(self.atspi_state.read_text())["action_times"]
+        self.assertLess(times[-1] - times[0], .6)
+        capture_time = json.loads(self.state.read_text())["capture_times"][-1]
+        self.assertLess(capture_time - times[-1], .15)
+
+    def test_automatic_delay_stops_on_permission_revocation(self):
+        self.start_accessibility()
+        self.start_host()
+        client = self.client()
+        tree = self.snapshot(client)
+        button = next(row for row in tree["elements"] if row["label"] == "Fixture button")
+        click = {"tool": "click", "args": {"element_token": button["element_token"]}}
+        client.serial += 1
+        client.process.stdin.write(json.dumps({"jsonrpc": "2.0", "id": client.serial,
+            "method": "tools/call", "params": {"name": "computer", "arguments": {
+                "steps": [click, click], "observe": False}}}) + "\n")
+        client.process.stdin.flush()
+        end = time.monotonic() + 2
+        while time.monotonic() < end:
+            try:
+                if json.loads(self.atspi_state.read_text())["clicks"]:
+                    break
+            except json.JSONDecodeError:
+                pass
+            time.sleep(.002)
+        else:
+            self.fail("first action did not arrive")
+        # The fixture saves state before replying to the first action. Allow
+        # that reply to finish so revocation lands in the 150 ms batch pause.
+        time.sleep(.04)
+        self.computer_path.unlink()
+        self.assertTrue(select.select([client.process.stdout], [], [], 2)[0])
+        result = json.loads(client.process.stdout.readline())["result"]
+        data = result["structuredContent"]
+        self.assertEqual(data["completed"], 1)
+        self.assertEqual(data["status"], "failed")
+        self.assertEqual(data["failed"]["index"], 1)
+        self.assertEqual(data["failed"]["code"], "accessibility_permission_required")
+        self.assertEqual(json.loads(self.atspi_state.read_text())["clicks"], 1)
+
     def test_explicit_delays_finish_before_one_final_screenshot(self):
         self.start_host()
         client = self.client()

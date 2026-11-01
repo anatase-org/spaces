@@ -2410,7 +2410,9 @@ class DesktopController:
                 ),
             )
             raise DesktopSetupError(str(error)) from error
-        if current is not None and current.plan == plan:
+        if current is not None and (
+            current.plan == plan or self._refresh_settings(user, current, plan)
+        ):
             self._repair_portal(user, current)
             self._repair_accessibility(user, current)
             self._repair_computer(user, current)
@@ -2471,6 +2473,65 @@ class DesktopController:
             and previous.plan.generated_root != plan.generated_root
         ):
             self._remove_generated(previous.plan)
+
+    def _refresh_settings(
+        self, user: DesktopUser, current: _ActiveDesktop, plan: DesktopPlan
+    ) -> bool:
+        """Refresh appearance mounts without revoking login-scoped services.
+
+        KDE atomically replaces kdeglobals when saving file-dialog settings.
+        Its new inode needs a new bind, not a new accessibility/input session.
+        Changes outside these settings still use the full teardown path.
+        """
+
+        if replace(plan, binds=current.plan.binds) != current.plan:
+            return False
+        previous = set(current.plan.binds)
+        desired = set(plan.binds)
+        removed = sorted(previous - desired)
+        added = sorted(desired - previous)
+        config = user.guest_home / ".config"
+        settings = {
+            config / name for name in (*CONFIG_FILES, *CONFIG_DIRECTORIES)
+        }
+        root = PurePosixPath(DESKTOP_ROOT / str(user.uid))
+        settings.add(root / "fonts.conf")
+        settings_roots = tuple(root / name for name in ("data", "fonts", "dconf"))
+        for binding in (*removed, *added):
+            destination = PurePosixPath(binding.destination)
+            if destination not in settings and not any(
+                destination.is_relative_to(prefix) for prefix in settings_roots
+            ):
+                return False
+
+        # The portal broker holds descriptors for these file mappings. Retire
+        # it before changing them; _repair_portal rebuilds just that bridge.
+        # Never stop the graphical-session target or touch AT-SPI/SCU here.
+        try:
+            if current.portal is not None:
+                current.portal.close()
+                current.portal.socket_path.unlink(missing_ok=True)
+                current.portal = None
+            if current.portal_binding is not None:
+                self._unmount(user.uid, current.portal_binding)
+                current.portal_binding = None
+            # Record each successful change immediately. If a source changes
+            # again or a mount fails, reconciliation retries from the mounts
+            # actually left in place, not an already-replaced source inode.
+            for binding in removed:
+                self._unmount(user.uid, binding)
+                previous.remove(binding)
+                current.plan = replace(current.plan, binds=tuple(sorted(previous)))
+            for binding in added:
+                self._mount(user.uid, binding)
+                previous.add(binding)
+                current.plan = replace(current.plan, binds=tuple(sorted(previous)))
+        except Exception as error:
+            raise DesktopSetupError(
+                _("Could not refresh host desktop settings: {error}", error=error)
+            ) from error
+        current.plan = plan
+        return True
 
     def deactivate(self, user: DesktopUser) -> None:
         current = self.active.get(user.uid)

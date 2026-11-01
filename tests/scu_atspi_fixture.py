@@ -88,7 +88,7 @@ def main():
                       GLib.Variant("(su)", ("org.a11y.atspi.Registry", 0)),
                       None, Gio.DBusCallFlags.NONE, 3000, None)
     node = Gio.DBusNodeInfo.new_for_xml(XML)
-    state = {"clicks": 0, "text": "", "password_reads": 0}
+    state = {"clicks": 0, "action_times": [], "text": "", "password_reads": 0}
     selected_fixture = "--selection" in sys.argv[3:] or "--selection-unstable" in sys.argv[3:]
     unstable_selection = "--selection-unstable" in sys.argv[3:]
     selection_queries = 0
@@ -157,6 +157,7 @@ def main():
         elif name == "GetActions": reply = GLib.Variant("(a(sss))", ([("click", "activate", "")],))
         elif name == "DoAction":
             state["clicks"] += 1
+            state["action_times"].append(GLib.get_monotonic_time() / 1_000_000)
             save()
             reply = GLib.Variant("(b)", (True,))
         elif name == "SetTextContents":
