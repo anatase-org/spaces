@@ -18,7 +18,7 @@ all: pam_spaces.so spaces-pam spaces spaces-portal \
 # Only the existing GLib/GIO baseline is a required runtime dependency.
 scu: scu.c vendor/yyjson.c vendor/yyjson.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -DYYJSON_READER_DEPTH_LIMIT=64 \
-		$$(pkg-config --cflags gio-unix-2.0 atspi-2 libpipewire-0.3 libei-1.0 xkbcommon gdk-pixbuf-2.0) \
+		$$(pkg-config --cflags gio-unix-2.0 atspi-2 libei-1.0 xkbcommon gdk-pixbuf-2.0) \
 		-o $@ scu.c vendor/yyjson.c $(LDFLAGS) \
 		-Wl,--wrap=__libc_start_main -Wl,--wrap=dlopen -Wl,--wrap=dlsym \
 		$$(pkg-config --libs gio-unix-2.0) -ldl
@@ -78,6 +78,8 @@ check-guest-abi: all
 
 install: check-guest-abi
 	install -Dm755 scu $(DESTDIR)$(GUESTDIR)/scu
+	install -Dm755 scu $(DESTDIR)$(LIBEXECDIR)/scu-host
+	install -Dm644 ../data/applications/org.anatase.spaces.scu.desktop $(DESTDIR)$(PREFIX)/share/applications/org.anatase.spaces.scu.desktop
 	install -Dm644 vendor/yyjson.LICENSE $(DESTDIR)$(PREFIX)/share/licenses/spaces/yyjson.LICENSE
 	install -Dm755 spaces-system-broker $(DESTDIR)$(GUESTDIR)/spaces-system-broker
 	install -Dm755 spaces-system-broker $(DESTDIR)$(LIBEXECDIR)/spaces-system-broker

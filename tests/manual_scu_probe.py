@@ -22,7 +22,8 @@ def main():
     parser.add_argument("--visual-actions", action="store_true")
     parser.add_argument("--entry-point", nargs=2, type=float,
                         help="Entry center in the returned 1280-pixel screenshot; inspect the image first")
-    parser.add_argument("--display-id", default="primary")
+    parser.add_argument("--zoom", nargs=4, type=float, metavar=("LEFT", "TOP", "RIGHT", "BOTTOM"),
+                        help="Inspect native detail using full-overview coordinates")
     parser.add_argument("--surface-point", nargs=2, type=float,
                         help="Scroll/drag surface center in the returned screenshot")
     args = parser.parse_args()
@@ -58,52 +59,56 @@ def main():
 
     try:
         call("initialize", {"protocolVersion": "2025-11-25"})
-        health = tool("health_report")
-        assert health["ready"], health
+        status = tool("status")
+        assert status["apps"], status
         title = "Spaces AT-SPI fixture " + args.token
-        window = next(item for item in tool("list_windows")["windows"] if item["title"] == title)
-        target = {key: window[key] for key in ("pid", "window_id")}
-        snapshot = tool("get_window_state", **target, tree_format="elements")
+        target = next({"pid": app["pid"], "window_id": window["window_id"]}
+                      for app in status["apps"] for window in app["windows"]
+                      if window["title"] == title)
+        snapshot = tool("computer", observe={"kind": "window", **target, "tree_format": "elements"})["observation"]
         rows = {item["label"]: item for item in snapshot["elements"]}
         expected = "Héllo 世界 " + args.token
-        tool("run_steps", steps=[
-            {"click": {"element_token": rows["Spaces fixture button"]["element_token"]}},
-            {"set_value": {"element_token": rows["Spaces fixture entry"]["element_token"], "value": expected}},
-            {"click": {"element_token": rows["Spaces fixture checkbox"]["element_token"]}},
-        ], observe={**target, "tree_format": "elements"})
+        semantic = tool("computer", steps=[
+            {"tool": "click", "args": {"element_token": rows["Spaces fixture button"]["element_token"]}},
+            {"tool": "set_value", "args": {"element_token": rows["Spaces fixture entry"]["element_token"], "value": expected}},
+            {"tool": "click", "args": {"element_token": rows["Spaces fixture checkbox"]["element_token"]}},
+        ], observe={"kind": "window", **target, "tree_format": "elements"})
+        rows = {item["label"]: item for item in semantic["observation"]["elements"]}
         if args.capture or args.visual_actions:
-            first = tool("get_desktop_state", max_image_dimension=1280)
-            captures = {first["display"]: first}
-            for display in first["displays"]:
-                if display["display_id"] not in captures:
-                    captures[display["display_id"]] = tool("get_desktop_state",
-                        display_id=display["display_id"], max_image_dimension=1280)
+            first = tool("computer", observe={"kind": "desktop", "max_image_dimension": 1280})["observation"]
+            if args.zoom is not None:
+                detail = tool("computer", id=first["id"],
+                              observe={"kind": "desktop", "zoom": args.zoom})["observation"]
+                assert detail["id"] == first["id"], detail
             if args.visual_actions:
                 if args.entry_point is None:
                     raise AssertionError("Inspect a capture and supply --entry-point X Y for visual tests")
-                display_id = first["display"] if args.display_id == "primary" else args.display_id
-                image = captures[display_id]
+                image = first
                 x, y = args.entry_point
-                pixel_target = {"kind": "desktop", "display_id": display_id}
-                performed = tool("run_steps", delivery_mode="foreground", steps=[
-                    {"click": {"target": pixel_target, "capture_id": image["capture_id"], "x": x, "y": y}},
-                    {"hotkey": {"keys": ["ctrl", "a"]}},
-                    {"type_text": {"text": "Visual Unicode 世界 " + args.token}},
-                    {"press_key": {"key": "End"}},
-                    {"type_text": {"text": "!"}},
+                performed = tool("computer", observe={"kind": "desktop", "max_image_dimension": 1280}, steps=[
+                    {"tool": "set_value", "args": {"element_token": rows["Spaces fixture entry"]["element_token"], "value": ""}},
+                    {"tool": "click", "args": {"id": image["id"], "x": x, "y": y}},
+                    {"tool": "type_text", "args": {"text": "replace me"}},
+                    {"tool": "hotkey", "args": {"keys": ["ctrl", "a"]}},
+                    {"tool": "type_text", "args": {"text": "Visual "}},
+                    {"tool": "type_text", "args": {"text": "Unicode 世界 " + args.token}},
+                    {"tool": "press_key", "args": {"key": "End"}},
+                    {"tool": "type_text", "args": {"text": "!"}},
                 ])
-                # Automatic final observation supersedes this monitor's capture.
+                # Automatic overview replaces the global pixel capture. Request
+                # the same size so the supplied global coordinates stay valid.
                 image = performed["observation"]
                 if args.surface_point is not None:
                     x, y = args.surface_point
-                    tool("run_steps", delivery_mode="foreground", steps=[
-                        {"scroll": {"target": pixel_target, "capture_id": image["capture_id"],
+                    tool("computer", observe={"kind": "desktop", "max_image_dimension": 1280}, steps=[
+                        {"tool": "scroll", "args": {"id": image["id"],
                                     "x": x, "y": y, "direction": "down", "amount": 2}},
-                        {"drag": {"target": pixel_target, "capture_id": image["capture_id"],
+                        {"tool": "drag", "args": {"id": image["id"],
                                   "from_x": x - 40, "from_y": y,
                                   "to_x": x + 40, "to_y": y + 20, "duration_ms": 300}},
                     ])
-                tool("get_desktop_state", display_id=display_id, max_image_dimension=1280)
+                tool("computer", observe={"kind": "desktop",
+                    "max_image_dimension": 1280})
         print("probe completed; verify the independent host fixture state", flush=True)
     finally:
         process.stdin.close()

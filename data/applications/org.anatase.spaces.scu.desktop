@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Spaces computer use
+NoDisplay=true
+Exec=/usr/lib/spaces/scu-host
+X-KDE-DBUS-Restricted-Interfaces=org.kde.KWin.ScreenShot2

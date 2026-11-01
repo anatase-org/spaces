@@ -8,7 +8,6 @@ RUN dnf -y install \
         container-selinux \
         glib2-devel \
         at-spi2-core-devel \
-        pipewire-devel \
         libei-devel \
         libxkbcommon-devel \
         gdk-pixbuf2-devel \

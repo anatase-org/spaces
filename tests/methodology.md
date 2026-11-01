@@ -505,205 +505,329 @@ a user action; never run `sync.sh --selinux` as the agent.
 
 ## scu computer use
 
-`scu mcp` runs inside the guest, through the existing portal
-and accessibility forwarding. Spaces changes for this executable are limited
-to its native bundle and command exposure. There is no added status mount or
-host computer-control service. The accessibility socket gates every desktop
-operation, including each batch step. An absent socket returns
-`accessibility_permission_required` with `spaces configure <space>`; an
-unusable forwarded registry reports `accessibility_unavailable`. Because there
-is no separate permission record, absence cannot distinguish a disabled tier
-from integration that has not started. `health_report` records that distinction
-as `forwarded` versus actual registry `ready` and reports missing libraries.
+### Current KWin-only backend
 
-### Action and observation contract
+`scu mcp` exposes exactly `status` and `computer` over stdio. All computer use
+requires the **Plus Accessibility and Agent computer use** desktop tier. Basic
+and disabled spaces receive a configuration error with `spaces configure
+<space>`. MCP initialization and schema discovery remain available without the
+permission or optional libraries. Preset defaults are unchanged.
 
-Read `get_desktop_state` (or a semantic window tree) before acting. Use
-`run_steps` for a known sequence. A foreground batch returns counts, one final
-PNG image block and observation metadata; it does not return successful step
-dumps or capture between steps. For example, with a browser already focused:
+The desktop controller starts `/usr/lib/spaces/scu-host --host-service` as the
+selected host user, independently of portal and AT-SPI readiness. It forwards
+only the private peer socket at `/run/spaces/desktop/<uid>/computer/bus`.
+Directory/socket permissions and D-Bus authentication restrict it to that UID.
+The same C source builds the guest executable and host service; the installed
+hidden desktop identity authorizes ScreenShot2 on KWin versions that require
+it. No screenshot permission dialog is involved.
+
+The host service provides only geometry, capture, EIS connection and clipboard
+text methods. A fixed embedded read-only KWin script supplies window/output
+geometry. Neither agent-authored scripts nor arbitrary host D-Bus calls, paths,
+shell commands or process operations are exposed. EIS cookies belong to the
+host service and are disconnected when clients leave. Downgrade, logout,
+session replacement and shutdown terminate the service before removing its
+socket mount, invalidating existing guest-held input descriptors. Reconciliation
+restarts a failed service without disrupting ordinary desktop integration. It
+also retires services whose installed executable was replaced, because KWin
+authorization follows the running executable identity.
+
+`status({})` captures the full desktop and returns one inline PNG together with:
 
 ```json
-{"steps":[{"hotkey":{"keys":["ctrl","n"]}},{"hotkey":{"keys":["ctrl","l"]}},{"type_text":{"text":"https://example.com"}},{"press_key":{"key":"Enter"}}]}
+{
+  "canvas": {
+    "width": 1600,
+    "height": 900,
+    "id": 1
+  },
+  "apps": [{
+    "pid": 123,
+    "app_name": "firefox",
+    "windows": [{
+      "window_id": 1,
+      "title": "Example Domain",
+      "bounds": {"x": 100, "y": 100, "width": 900, "height": 600},
+      "shown": true,
+      "active": true
+    }]
+  }]
+}
 ```
 
-`observe:false` disables the final image. `observe:{"kind":"desktop", ...}`
-selects a final monitor and optional `max_image_dimension`;
-`observe:{"kind":"window","pid":123,"window_id":1}` requests a tree instead.
-Legacy tree objects without `kind` remain accepted, and can inherit the last
-explicitly targeted window. Pure semantic batches have no implicit screenshot
-or visual consent request. All structure, defaults and observation options are
-validated before effects. Runtime errors stop the remaining steps without
-retries; `failed` identifies the zero-based index, tool, code and hint. A separate
-`observation_error` preserves the completed/skipped counts when readback fails.
-Clipboard fallback reports `clipboard_paste` and warns that clipboard text was
-replaced. Batch warnings retain the relevant step index.
+Window enumeration and placement come from KWin, including applications without
+AT-SPI support. Window IDs are stable within the MCP process. Status must return
+an error if any required library, the accessibility registry, KWin input or
+capture is unavailable. It returns no health text, partial metadata or image on
+failure. `computer` checks the same prerequisites before starting a batch.
+MCP initialization and schema discovery remain usable without those prerequisites.
+Status does not report success with a null canvas. Its
+entire operation is bounded to 30 seconds. Explicit cancellation and clean EOF
+release input and close the host connection.
 
-The first granted monitor is selected initially (`primary` is its alias).
-Explicit monitor observations or desktop targets change the selected monitor
-for subsequent implicit operations, including keyboard-only final observation.
-This does not move keyboard focus. Each image uses its own local coordinates,
-scaling transform and capture ID; monitors are never stitched. Desktop metadata
-lists available IDs and dimensions. Batch `target` and `capture_id` can supply
-pixel defaults, while explicit step targets override them and semantic tokens
-keep their own targeting. A capture default is not inherited across displays.
-Every new image supersedes the previous capture token for that monitor.
+`computer` accepts only `steps`, `observe`, and optional `id`.
+The capture `id` is a positive integer, starting at 1 for each MCP process.
+The same numeric ID appears in canvas, desktop/zoom and tree observations.
+An explicit pixel-step `id` overrides the batch ID; omission uses the latest
+valid overview. Strings and the old `capture_id` spelling are rejected.
+Steps are ordered `{tool,args}` objects, at most 64. The supported actions are
+`click`, `double_click`,
+`right_click`, `move_cursor`, `drag`, `scroll`, `type_text`, `set_value`,
+`press_key`, `hotkey`, and `delay_ms`. Whole-batch validation precedes effects; execution
+stops at the first runtime failure without replay. Responses report
+`status:"ok"` or `status:"failed"`, the `completed` step count, one failure and
+any material warnings.
+Observation failure is separate from completed actions and also sets status to
+`failed`; actions already completed remain counted.
 
-Automatic images have a 1600-pixel long-edge cap; explicit observations retain
-their requested size (omitted/zero means full resolution). After input, capture
-attempts an EIS round trip, drains queued frames, allows a 100 ms render interval
-and waits at most one second for a subsequent frame. `frame_status` is `new`,
-`cached`, or `unknown` when input synchronization is unavailable. Frame receipt
-is tracked separately from display geometry, so ordinary new frames do not
-invalidate coordinate mappings. New pixels are not proof of application
-completion: action batches remain `effect:"unverifiable"`. Inspect the inline
-image; if navigation is still loading, observe again without replaying actions.
+```json
+{"status":"ok","completed":2,"observation":{"id":2,"width":1600,"height":900}}
+```
 
-Build and run the isolated tests from a Fedora development Space:
+Step failures identify the zero-based index and stop the remaining sequence:
+
+```json
+{"status":"failed","completed":1,"failed":{"index":1,"tool":"click","code":"invalid_coordinates","hint":"Coordinates lie outside the full desktop overview."}}
+```
+
+`delay_ms` is an explicit step with a required integer `ms` from 0 to 30000;
+the old top-level `delay_ms` argument is rejected. Place delays between actions
+or at the end. The final observation occurs after all steps, including trailing
+delays, complete. Delays count toward the 64-step limit and the existing
+60-second request deadline, remain cancellable, and stop on permission loss.
+They are fixed timers and do not check whether an application has finished.
+
+```json
+{
+  "steps": [
+    {"tool":"press_key","args":{"key":"Enter"}},
+    {"tool":"delay_ms","args":{"ms":1500}}
+  ]
+}
+```
+
+This submits Enter, waits 1.5 seconds, then returns one screenshot. A delay-only
+sequence waits before observing; `observe:false` suppresses that observation.
+Adding delays to semantic-only sequences does not start a visual session.
+
+An empty call captures a full overview. Foreground batches return one final
+full overview automatically; `observe:false` suppresses it and an explicit
+observation replaces it. Semantic-only batches do not capture automatically.
+Desktop observation metadata contains `id`, `width`, `height`, and
+`zoom` when requested. Width and height describe the returned image, including
+zoom crops; the global input coordinate frame remains the full overview.
+An explicit window observation requests an accessibility tree:
+
+```json
+{"observe":{"kind":"window","pid":123,"window_id":1,"tree_format":"elements"}}
+```
+
+Tree limits remain 250 elements / 12 levels by default, at most 2000 / 32.
+Formats are `markdown`, `elements`, or `both`. Password values are omitted.
+Element tokens identify semantic action targets; replacing that window's tree
+invalidates its old tokens. A window without a unique PID/title/client-geometry
+association to an AT-SPI window returns an explicit accessibility-window error.
+Unsupported individual element rectangles are null; they never expose another
+coordinate system. Semantic token actions do not need pixel coordinates.
+
+### One coordinate system
+
+The current full overview establishes the only public pixel coordinate frame.
+**KWin window bounds, accessibility element frames, pixel input and zoom all
+use that frame.** Tree observations include its capture ID. AT-SPI rectangles
+are requested relative to their window and anchored to verified KWin client
+geometry before conversion; raw screen/window coordinates never reach MCP.
+
+Outputs retain KWin's logical arrangement, with negative origins normalized to
+the overview top-left and gaps painted black. Public monitor selectors and
+`target` defaults are removed. Input in gaps is rejected. Cross-monitor drags
+preflight every route and capability, retain the button across devices on one
+EIS seat, and release it on interruption. Motion/buttons/scrolling use the same
+pointer device where possible; another device is used only for a split capability.
+
+The default image cap is 1600 pixels on the long edge; explicit
+`max_image_dimension:0` requests native detail within image/memory limits.
+`canvas` contains only overview `width`, `height`, and `id`.
+Zoom reads fresh native-detail ScreenShot2 pixels, not enlarged overview pixels:
+
+```json
+{"id":1,"observe":{"kind":"desktop","zoom":[100,200,500,450]}}
+```
+
+`zoom` is `[left,top,right,bottom]` in full-overview coordinates. It requires a
+valid overview, preserves that overview's capture ID and coordinate frame, and
+is not sticky. New full observations rotate the ID. KWin/output/input-mapping
+replacement invalidates it. Removed selectors and invalid/stale zoom options
+are rejected before effects.
+
+After foreground input, observation attempts a bounded EIS round trip and
+allows the existing 100 ms render interval before requesting fresh compositor
+pixels. Capture responses carry no `frame_status` field: each image is captured
+on demand. Responses also omit `effect`; application completion must be checked
+independently through images or readback.
+
+Unicode text prefers libei text, then the compositor keymap. Clipboard-paste
+fallback uses Klipper and reports that both clipboard and PRIMARY text are
+replaced. For a focused accessible text control, scu attempts to restore an
+existing selection after Klipper takes PRIMARY ownership, checking that focus,
+text and the restored selection remain stable before pasting. Failed restoration
+returns `clipboard_selection_changed` without sending paste. On the tested GTK /
+Klipper combination, the restored selection does not remain stable: selected
+Unicode replacement fails safely, and callers should use semantic `set_value`.
+Unicode insertion without a selection works. Controls without usable
+accessibility selection metadata cannot have their selection preserved through
+this fallback. If the requested text has no supported delivery route, the tool
+fails explicitly.
+
+### Reproducible checks and live testing
+
+Guest runtime requirements are GLib/GIO, libei, libxkbcommon, GdkPixbuf and
+libatspi. All are required for computer use; screenshot-only fallback is not
+supported. scu no longer depends on PipeWire. Build/test
+requirements additionally include the corresponding development headers,
+libeis, a C compiler, private D-Bus support, PyGObject and Pillow.
 
 ```sh
-sudo dnf install gcc pkgconf-pkg-config glib2-devel at-spi2-core-devel \
-  libei-devel pipewire-devel libxkbcommon-devel gdk-pixbuf2-devel \
-  dbus-daemon python3-gobject
-make -C native check-guest-abi
-PYTHONPATH=src venv/bin/python -m unittest tests.test_scu -v
+make -C native scu check-guest-abi
+PYTHONPATH=src venv/bin/python -m unittest tests.test_scu tests.test_computer_integration tests.test_native_abi -v
+PYTHONPATH=src:/usr/lib64/python3.14/site-packages venv/bin/python -m unittest tests.test_session tests.test_accessibility tests.test_packaging tests.test_broker_registration tests.test_launch tests.test_tui -v
+git diff --check
 ```
 
-`test_scu.py` compiles the actual executable and uses private D-Bus endpoints.
-`scu_atspi_fixture.py` exposes a registry and an application on separate
-connections. State is written independently by the fixture, so successful tool
-submission alone cannot pass the action checks. Coverage includes semantic
-insertion versus replacement, Unicode, password suppression, token expiry,
-whole-batch validation before effects, first-failure stopping, recovery after
-bus replacement, and revocation with a running MCP process.
-`scu_portal_fixture.py` checks permission rejection before any portal call,
-consent refusal, and closing an outstanding request on cancellation. Portal
-fixtures run with graphical/session variables absent, and with deliberately
-stale bus/runtime variables, to verify direct guest runtime discovery. Invalid,
-oversized and Unicode JSON, both MCP eras, missing optional libraries and clean
-EOF shutdown are also covered.
-The same short workflow instructions are advertised by legacy initialization
-and modern discovery. Nested batch schemas cover named and shorthand actions,
-explicit observation and opt-out. Tests also verify compact success/failure
-responses, semantic-only batches, preflight rejection of invalid final
-observations/background input, and observation failures after successful effects.
+Private tests execute the actual guest and host-service binaries against fake
+KWin/ScreenShot2/Klipper services and a real libeis oracle. They validate raw
+image FD transfer, malformed/truncated formats, immutable capture descriptors,
+geometry, native zoom, independently delivered input, Unicode clipboard
+fallback, AT-SPI action/readback, cancellation, revocation and recovery. The
+30-second status deadline is exercised against a deliberately held response.
+Lifecycle tests cover the permission boundary and closing the service before
+unmount, including failure paths. Synthetic triple-monitor tests cover negative
+origins, mixed scaling, gaps and cross-device dragging.
 
-`scu_backend_fixture.c` includes the production translation unit and drives a
-real libei client against a private libeis peer. It checks delivered pointer,
-scroll, drag and keyboard events and release of held input during cancellation.
-Separate cases feed CPU video buffers through the real frame conversion and PNG
-encoding code, validate truncation rejection, monitor pairing, negative origins,
-mixed scaling, resized-image coordinates, stale captures, ambiguous mappings,
-and private rotating restore-token files. These buffer/geometry cases are
-isolated fixtures, not an end-to-end multi-monitor PipeWire compositor test.
-The EIS case additionally verifies final PNG MCP content, persistent monitor
-selection, shared pixel defaults, partial batch completion, delayed/new versus
-queued/cached frames, missing round-trip support, resize invalidation,
-cancellation and accessibility revocation during observation. Refused visual
-grants must not trigger another prompt for automatic batch observation.
-
-For live testing on `win5`, deploy without modifying SELinux policy:
+Use only win5 and its Fedora Space for live GUI testing:
 
 ```sh
 ./sync.sh win5
-ssh win5f sudo dnf install at-spi2-core libei pipewire-libs libxkbcommon gdk-pixbuf2
+ssh win5 sudo systemctl restart spaces@fedora.service
+ssh win5f sudo dnf install at-spi2-core libei libxkbcommon gdk-pixbuf2
+scp tests/manual_atspi_fixture.py win5:/tmp/scu-kwin-atspi-fixture.py
+scp tests/manual_scu_probe.py win5f:/tmp/manual_scu_probe.py
 ```
 
-Enable accessibility on the host with `sudo spaces configure fedora`, then
-restart the Space. A configuration error must leave the setting user-controlled.
-Direct machinectl/systemd-run commands must always use sudo. Keep SELinux
-enforcing; inspect AVCs with `ssh win5 sudo ausearch -m AVC,USER_AVC -ts recent -i`.
-Never use `sync.sh --selinux`; deployment of policy is user-operated.
-
-From the host graphical session, start one fixture at a time:
+Launch one host fixture at a time with the host's actual graphical environment:
 
 ```sh
-python3 tests/manual_atspi_fixture.py gtk scu-live-gtk /tmp/scu-gtk-state.json --computer-use
-python3 tests/manual_atspi_fixture.py qt scu-live-qt /tmp/scu-qt-state.json --computer-use
+ssh win5 'env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1 nohup python3 /tmp/scu-kwin-atspi-fixture.py qt scu-kwin-qt /tmp/scu-kwin-qt-state.json --computer-use >/tmp/scu-kwin-qt.log 2>&1 </dev/null &'
+ssh win5f python3 /tmp/manual_scu_probe.py scu-kwin-qt --artifacts /tmp/scu-kwin-qt --capture
+ssh win5 cat /tmp/scu-kwin-qt-state.json
 ```
 
-GTK needs PyGObject/GTK 3 and Qt needs PySide6. For a Qt fixture that otherwise
-omits its accessibility tree, launch that fixture with
-`QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1`. The test does not change host accessibility
-settings. Copy `tests/manual_scu_probe.py` into the guest if the checkout is not
-shared, then run it there:
+Repeat with `gtk` and a unique token/state path. Verify button/checkbox actions,
+exact Unicode text, scrolling and dragging independently through fixture JSON.
+Measure input directly from returned element frames or the current full image,
+then inspect a native-detail crop and verify those same global points still
+work. Automatic images replace capture IDs; never replay an interrupted batch.
+Stop only the owned fixture process afterward. Test revocation with a held MCP
+connection and a fresh process, restore the original tier, and verify recovery.
+
+Keep SELinux enforcing and inspect AVCs. Never run `sync.sh --selinux`; policy
+deployment is user-operated. No GUI testing may be substituted onto the user's
+active development host.
+
+### KWin live results, 2026-11-01
+
+Ordinary `./sync.sh win5` RPM deployment passed with SELinux **Enforcing**; no
+policy was installed and no matching AVC denials were observed. The host ran
+KWin 6.7.5-1.fc45.ludos with one 1920×1080 output at scale 1.65, logical size
+1164×655. Prompt-free `status` captured the 1920×1080 source into a 1600×900
+overview. This exercised the installed fixed-path host executable and its
+authorization metadata, rather than an unrestricted test executable. Later RPM
+upgrades automatically replaced the old helper through normal reconciliation.
+
+Both Qt and GTK host fixtures were driven from `ssh win5f`. Independent fixture
+state verified semantic button/checkbox actions, exact Unicode text, pixel
+clicks derived from converted element frames, scrolling and dragging. A Qt crop
+`[580,290,1020,410]` returned 527×143 native-detail pixels while preserving the
+overview capture ID; clicking the same global button point afterward incremented
+the host counter. The final GTK probe used:
 
 ```sh
-python3 tests/manual_scu_probe.py scu-live-gtk --artifacts /tmp/scu-gtk --capture
+ssh win5f python3 /tmp/manual_scu_probe.py scu-kwin-gtk --artifacts /tmp/scu-kwin-gtk-final --capture --visual-actions --entry-point 639 291 --surface-point 639 419 --zoom 460 220 810 490
+ssh win5 cat /tmp/scu-kwin-gtk-state.json
 ```
 
-Inspect the returned PNG, then repeat with the entry and scroll/drag surface
-centers measured in that image:
+Its final independently read state was:
 
-```sh
-python3 tests/manual_scu_probe.py scu-live-gtk --artifacts /tmp/scu-gtk-actions \
-  --capture --visual-actions --entry-point 639 290 --surface-point 639 420
+```json
+{"clicks":3,"text":"Visual Unicode 世界 scu-kwin-gtk!","checked":false,"scrolls":2,"drags":2}
 ```
 
-Coordinates above are the recorded GTK fixture positions on win5, not portable
-constants. The Qt fixture used entry `639 288`, surface `639 406`. Update these
-from a fresh image if the window moves. Wayland AT-SPI frames can be local to a
-window; never use them as global screenshot coordinates. If capture is black,
-check whether the desktop is locked. A reported `unverifiable` action is not
-proof of delivery.
+That probe combines semantic replacement, ASCII shortcut replacement and Unicode
+insertion, avoiding the selected-text Klipper limitation described above. A
+separate live selected-Unicode test returned `clipboard_selection_changed` and
+left the entry text unchanged instead of appending or sending paste.
 
-Read the **host** state file independently after each run. Expect a button count
-increment, checkbox toggle, text exactly `Visual Unicode 世界 scu-live-gtk!`
-(or `scu-live-qt!`), and positive `scrolls`/`drags`. Semantic-only runs write
-`Héllo 世界 <token>`. Foreground batches also return a final image; use its new
-capture token for subsequent pixel actions. Clipboard fallback replaces regular clipboard text and
-uses Ctrl+V; Shift+Insert can address PRIMARY on Linux.
+Terminating the host service disconnected an already open MCP client's input;
+its next operation reported disconnection, and a later status reconnected and
+captured without replaying actions. A second ordinary host UID was denied access
+to the socket. A temporary downgrade to basic followed by the normal Space
+restart removed access: new clients rejected both status and keyboard input
+with the configuration hint, and the held client was terminated. The original
+accessibility setting was restored and capture retested. Automated lifecycle
+tests separately cover direct reconciliation revocation without a Space restart.
 
-For recovery, hold one MCP process open, capture, restart the host's
-`plasma-xdg-desktop-portal-kde.service`, and make another observation. It should
-report `visual_session_closed`. A subsequent request may restore a fresh
-session and capture; no interrupted action may replay. For revocation, downgrade
-the Space, apply the existing restart flow, and launch a fresh client. It must
-return the configuration instruction without a consent prompt. Restore the
-original tier after the test. The isolated socket-replacement tests additionally
-exercise revocation while the MCP transport remains open.
+The scu/host-service/ABI suite passed **33 tests**. Affected session,
+accessibility, packaging, broker, launch and TUI checks passed **210 tests, with
+2 unrelated skips**. Native builds and GLIBC ≤ 2.17 / architecture checks passed.
+Live cross-monitor dragging remains unverified because win5 has only one output;
+synthetic triple-output capture/zoom and real libeis cross-device routing tests
+cover the implementation. KWin process replacement was exercised with private
+fixtures, rather than restarting the live compositor. No GUI interaction was
+performed on the user's active development host.
 
-Live results on 2026-10-31: Fedora 44 guest on win5's KDE/Wayland host, SELinux
-enforcing. Both GTK and Qt fixtures confirmed semantic button/checkbox actions,
-Unicode insertion/replacement, Ctrl+A, Unicode clipboard paste plus mapped-key
-insertion, PNG monitor observation, scrolling and dragging through independent
-JSON state. The monitor was 1920x1080 at 1.65 scale, captured at 1280x720; EIS
-coordinate conversion delivered to the correct widgets. Restarting the portal
-invalidated the session and a fresh request restored capture. AVC inspection
-reported no matches. Only one monitor was granted on this host, so live
-multi-monitor/hotplug acceptance remains unverified. Automated geometry tests
-cover mixed scaling and negative origins; they do not replace that live test.
+Delay-step contract update, 2026-11-01: the **38-test** scu/lifecycle/ABI suite
+passed after removing batch-level `delay_ms` and adding explicit delay steps.
+Private compositor capture timestamps confirm that both inter-action and
+trailing delays finish before the single final screenshot. Coverage also checks
+delay-only observation, `observe:false`, semantic-only batches, whole-batch
+validation, cancellation and permission revocation during a 30-second delay.
+Native GLIBC ≤ 2.17 and architecture checks passed.
+After ordinary `./sync.sh win5`, a fresh `ssh win5f` MCP client advertised only
+`steps`, `observe`, and `id` at the top level. A single
+`{"tool":"delay_ms","args":{"ms":500}}` step returned one 1600×900 PNG after
+0.694 seconds. This live check observed the remote desktop without sending
+input or opening applications.
 
-The affected configuration/TUI, authentication, launch, session, accessibility,
-native-ABI and packaging regression run completed with 256 tests, 7 explicit
-skips. The scu suite completed with 12 tests, including a real EIS peer. Native
-build/GLIBC <= 2.17 checks and the ordinary RPM sync/install passed. A freshly
-started client after a live downgrade to `basic` returned the correct
-`spaces configure fedora` instruction; accessibility was restored afterward.
-Configuration hints use `spaces configure <space>`; scu does not discover or
-publish the Space name. Consent tokens are scoped by guest machine ID and UID.
+The subsequent response simplification removes `frame_status` from status
+canvas metadata and both overview/zoom observations. Exact-field assertions
+cover these responses; all 38 scu/lifecycle/ABI tests pass. The EIS oracle also
+neutralizes a disconnected client's held-input counters, matching compositor
+teardown when disconnect overtakes queued release events.
+After ordinary sync and restarting the Fedora Space stopped by that sync
+workflow, a fresh `ssh win5f` client verified that both `status({})` and
+`computer({})` return one inline PNG and coordinate metadata without
+`frame_status`.
 
-Response/observation update, 2026-11-01: the 12-test scu suite passes with the
-expanded batch, monitor-selection, real EIS, PNG and freshness checks above.
-The affected launch/session/packaging/native-ABI regression run passed 165 tests
-with two skips; `make -C native check-guest-abi` passed the GLIBC <= 2.17 and
-architecture checks. `tests/manual_scu_probe.py` now consumes each foreground
-batch's final observation token before sending subsequent pixel actions.
+Strict readiness update: `health_check` is removed. Status returns canvas,
+applications and a PNG only when both adapters work; prerequisite failures return
+an error without images or partial metadata. Computer batches check all required
+guest libraries and the live accessibility registry before executing steps.
+All **40 scu/lifecycle/ABI tests** pass, including missing libraries, absent and
+broken accessibility bridges, no-input/no-capture failures and recovery. Native
+build and GLIBC ≤ 2.17 / architecture checks passed. This update was built and
+tested locally before deployment.
 
-Current-host acceptance, 2026-11-01: the initial attempts initialized and reported
-`forwarded:true`, `ready:true` with all optional libraries present, but timed out
-waiting for the host portal response. After the user requested another attempt,
-a fresh `native/scu mcp` process captured successfully. Two monitors were granted:
-2560x1600 with logical bounds 1707x1067 at (3840,1093), and 3840x2160 with logical
-bounds 3840x2160 at (0,0). The first image was returned inline at 1600x1000.
+Current deployed contract verification, 2026-11-01: ordinary `./sync.sh win5`
+installed the current executable and restarted Fedora. A fresh `ssh win5f` MCP
+client verified `status` returns only canvas/apps plus its PNG, with numeric
+canvas ID. An empty `computer` call returned:
 
-From that image, one `run_steps` batch used desktop target `display-1`, its
-capture ID, and `delay_ms:150`: click the visible Chrome address bar at (420,58),
-Ctrl+N, Ctrl+L, type `https://example.com`, Enter. The batch took 1120 ms and
-returned `completed:5`, `skipped:0`, `ok:true`, `effect:"unverifiable"`, and one
-automatic 1600x1000 PNG with `frame_status:"new"`. Visual inspection of that
-same response confirmed a new Chrome window with one Example Domain tab,
-`example.com` in its address bar, and the loaded page. No additional observation
-or action replay was needed. Live pointer actions were exercised on display-1;
-this run does not establish cross-monitor input/hotplug behavior. The temporary
-MCP process was closed cleanly afterward. No SELinux policy was deployed.
+```json
+{"completed":0,"observation":{"id":2,"width":1600,"height":900},"status":"ok"}
+```
+
+A click outside the canvas was rejected before input delivery, returning
+`completed:0`, `status:"failed"`, an indexed `invalid_coordinates` error, and MCP
+`isError:true`. Both responses omit the removed fields. Old contract examples
+were removed from this document. The latest 40-test suite and native ABI checks
+passed before deployment; live verification sent no keyboard or pointer input.

@@ -833,6 +833,17 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("/usr/lib/spaces/guest/spaces-portal", spec)
         self.assertIn("/usr/lib/spaces/guest/spaces-open", spec)
         self.assertIn("/usr/lib/spaces/spaces-broker", spec)
+        for filename in ("spaces.spec", "spaces-git.spec"):
+            computer_spec = (ROOT / filename).read_text(encoding="utf-8")
+            self.assertIn("/usr/lib/spaces/guest/scu", computer_spec)
+            self.assertIn("/usr/lib/spaces/scu-host", computer_spec)
+            self.assertIn("%{_datadir}/applications/org.anatase.spaces.scu.desktop", computer_spec)
+            self.assertNotIn("pkgconfig(libpipewire-0.3)", computer_spec)
+        identity = configparser.ConfigParser(interpolation=None)
+        identity.read(ROOT / "data/applications/org.anatase.spaces.scu.desktop")
+        self.assertEqual(identity["Desktop Entry"]["Exec"], "/usr/lib/spaces/scu-host")
+        self.assertEqual(identity["Desktop Entry"]["X-KDE-DBUS-Restricted-Interfaces"], "org.kde.KWin.ScreenShot2")
+        self.assertTrue(identity["Desktop Entry"].getboolean("NoDisplay"))
         self.assertIn(
             "/usr/lib/spaces/guest/spaces-secret-helper", spec
         )

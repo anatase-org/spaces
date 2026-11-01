@@ -22,7 +22,6 @@ BuildRequires:  container-selinux
 BuildRequires:  glib2-devel
 BuildRequires:  pkgconfig(gio-unix-2.0)
 BuildRequires:  pkgconfig(atspi-2)
-BuildRequires:  pkgconfig(libpipewire-0.3)
 BuildRequires:  pkgconfig(libei-1.0) >= 1.6
 BuildRequires:  pkgconfig(xkbcommon)
 BuildRequires:  pkgconfig(gdk-pixbuf-2.0)
@@ -172,6 +171,8 @@ fi
 /usr/lib/spaces/guest/spaces-secret-helper
 /usr/lib/spaces/guest/spaces
 /usr/lib/spaces/guest/scu
+/usr/lib/spaces/scu-host
+%{_datadir}/applications/org.anatase.spaces.scu.desktop
 %license %{_datadir}/licenses/spaces/yyjson.LICENSE
 %{_datadir}/spaces/system-bridge
 %dir %{_datadir}/spaces/portal

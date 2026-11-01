@@ -3,8 +3,8 @@
  * scu: Spaces computer use over MCP stdio.
  *
  * This file owns the MCP transport, ordered action execution and desktop
- * adapters. It uses the existing guest-visible portal and accessibility buses;
- * it does not publish host permissions or change Spaces configuration.
+ * adapters. A private host-user service supplies KWin capture, geometry and
+ * EIS connections. The Spaces controller owns its permission and lifetime.
  *
  * JSON input documents belong to the reader/request queue. Each response gets
  * one mutable document, which owns all result objects until it is written.
@@ -24,14 +24,14 @@
 #include <libei.h>
 #include <linux/input-event-codes.h>
 #include <math.h>
-#include <pipewire/pipewire.h>
 #include <signal.h>
-#include <spa/param/video/format-utils.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
+#include <poll.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
@@ -113,13 +113,16 @@ static inline void result_append(JsonResult *a, JsonResult *v)
 
 static JsonResult *scu_fail(const char *code, const char *hint);
 static JsonResult *scu_action(
-    const char *route, const char *mode, gboolean confirmed, const char *summary);
+    const char *route, gboolean confirmed, const char *summary);
 static gboolean scu_gate(void);
 static gboolean scu_tick(void);
 static gboolean scu_pause(unsigned ms);
 static void *scu_library(const char *soname);
-static JsonResult *scu_health(void);
-static gboolean probe_accessibility(void);
+static JsonResult *scu_status(void);
+static JsonResult *canvas_status(void);
+static JsonResult *kwin_status(void);
+static JsonResult *kwin_window_state(JsonValue *args);
+static gboolean require_computer_access(void);
 static void stop_atspi_worker(void);
 static int run_atspi_worker(guint base);
 static JsonResult *atspi_worker_call(const char *tool, JsonValue *args);
@@ -127,9 +130,9 @@ static gboolean inside_atspi_worker, retire_atspi_worker;
 static void scu_invalidate(void);
 static JsonResult *scu_atspi(const char *tool, JsonValue *args);
 static void scu_atspi_close(void);
+static void clear_clipboard_selection(void);
 static JsonResult *scu_visual(const char *tool, JsonValue *args);
 static void scu_visual_close(void);
-static const char *scu_visual_state(void);
 static void poll_visual_events(void);
 
 /* Guest ABI compatibility and request lifecycle. */
@@ -184,7 +187,7 @@ static GMutex active_lock;
 static char *active_id;
 static gboolean modern, initialized;
 static GHashTable *cancelled_ids;
-static const char *libs[] = {"libatspi.so.0", "libpipewire-0.3.so.0", "libei.so.1",
+static const char *libs[] = {"libatspi.so.0", "libei.so.1",
     "libxkbcommon.so.0", "libgdk_pixbuf-2.0.so.0", NULL};
 
 static JsonResult *scu_fail(const char *code, const char *hint)
@@ -218,9 +221,8 @@ static void scu_invalidate(void)
     scu_atspi_close();
 }
 
-/* The forwarded socket is the existing grant signal. Its absence cannot tell
- * disabled accessibility from forwarding that is still starting, so the hint
- * covers both. No host-side status file or new permission API is involved. */
+/* The controller owns both endpoints. Public operations require the complete
+ * backend; losing accessibility also stops ongoing visual operations. */
 static gboolean scu_gate(void)
 {
     char path[256];
@@ -236,17 +238,36 @@ static gboolean scu_gate(void)
             "Host accessibility is not forwarded. On the host, run `spaces configure "
             "<space>` and enable Plus Accessibility and Agent computer use. If already "
             "enabled, check the host graphical login and Spaces service log.");
-        scu_invalidate();
+        scu_atspi_close();
+        g_clear_pointer(&scu.generation, g_free);
         return FALSE;
     }
     char *generation =
         g_strdup_printf("%lu:%lu", (unsigned long)st.st_dev, (unsigned long)st.st_ino);
     if (scu.generation && strcmp(scu.generation, generation)) {
-        scu_invalidate();
+        scu_atspi_close();
     }
     g_free(scu.generation);
     scu.generation = generation;
     return TRUE;
+}
+
+/* Idle revocation has no request to report to. Active operations check the
+ * gate directly and return its error instead of continuing in a reduced mode. */
+static void refresh_accessibility(void)
+{
+    if (scu.generation == NULL) {
+        return;
+    }
+    char *code = scu.code, *hint = scu.hint;
+    scu.code = scu.hint = NULL;
+    if (!scu_gate()) {
+        scu_visual_close();
+    }
+    g_clear_pointer(&scu.code, g_free);
+    g_clear_pointer(&scu.hint, g_free);
+    scu.code = code;
+    scu.hint = hint;
 }
 
 /* Long operations call this at safe boundaries. Cancellation flags are shared
@@ -266,7 +287,10 @@ static gboolean scu_tick(void)
             "Operation exceeded its time limit; inspect state before retrying.");
         return FALSE;
     }
-    return scu_gate();
+    if (inside_atspi_worker) {
+        return scu_gate();
+    }
+    return scu.generation == NULL || scu_gate();
 }
 
 static gboolean scu_pause(unsigned ms)
@@ -282,13 +306,10 @@ static gboolean scu_pause(unsigned ms)
 }
 
 static JsonResult *scu_action(
-    const char *route, const char *mode, gboolean confirmed, const char *summary)
+    const char *route, gboolean confirmed, const char *summary)
 {
-    JsonResult *r = result_object(), *delivery = result_object();
-    result_string(r, "effect", confirmed ? "confirmed" : "unverifiable");
+    JsonResult *r = result_object();
     result_string(r, "route", route);
-    result_string(delivery, "mode", mode);
-    result_member(r, "delivery", delivery);
     /* Keep routine submissions terse; only readback evidence needs prose. */
     if (confirmed) {
         JsonResult *e = result_array(), *v = result_object();
@@ -300,27 +321,12 @@ static JsonResult *scu_action(
     return r;
 }
 
-static JsonResult *scu_health(void)
+/* Status is an observation: it must establish a real canvas, not merely
+ * report cached dimensions. Discovery remains available through MCP itself. */
+static JsonResult *scu_status(void)
 {
-    JsonResult *r = result_object(), *deps = result_object();
-    gboolean forwarded = scu_gate();
-    gboolean ready = forwarded && probe_accessibility();
-    result_boolean(r, "forwarded", forwarded);
-    result_boolean(r, "ready", ready);
-    if (!ready) {
-        result_string(r, "code", scu.code);
-        result_string(r, "hint", scu.hint);
-    }
-    result_string(r, "visual_session", scu_visual_state());
-    for (unsigned i = 0; libs[i]; i++) {
-        void *h = scu_library(libs[i]);
-        result_boolean(deps, libs[i], h != NULL); /* Keep optional libraries loaded:
-                                              GTypes retain class pointers. */
-    }
-    result_member(r, "libraries", deps);
-    g_clear_pointer(&scu.code, g_free);
-    g_clear_pointer(&scu.hint, g_free);
-    return r;
+    scu.deadline = MIN(scu.deadline, g_get_monotonic_time() + 30 * G_USEC_PER_SEC);
+    return kwin_status();
 }
 
 /* Host accessibility: discovery, snapshots and semantic actions. */
@@ -344,6 +350,9 @@ typedef struct {
     __typeof__(&atspi_text_get_caret_offset) text_get_caret_offset;
     __typeof__(&atspi_text_get_character_count) text_get_character_count;
     __typeof__(&atspi_text_get_n_selections) text_get_n_selections;
+    __typeof__(&atspi_text_get_selection) text_get_selection;
+    __typeof__(&atspi_text_set_selection) text_set_selection;
+    __typeof__(&atspi_text_add_selection) text_add_selection;
     __typeof__(&atspi_accessible_get_editable_text_iface)
         accessible_get_editable_text_iface;
     __typeof__(&atspi_editable_text_set_text_contents) editable_text_set_text_contents;
@@ -398,7 +407,7 @@ static void free_element(gpointer p)
     g_free(e);
 }
 
-/* Load through a function table so MCP discovery and diagnostics can start
+/* Load through a function table so MCP discovery can start
  * even on guests without libatspi. Never unload it: GLib retains its GTypes. */
 static gboolean load_atspi(void)
 {
@@ -437,6 +446,9 @@ static gboolean load_atspi(void)
     LOAD_ATSPI(text_get_caret_offset);
     LOAD_ATSPI(text_get_character_count);
     LOAD_ATSPI(text_get_n_selections);
+    LOAD_ATSPI(text_get_selection);
+    LOAD_ATSPI(text_set_selection);
+    LOAD_ATSPI(text_add_selection);
     LOAD_ATSPI(accessible_get_editable_text_iface);
     LOAD_ATSPI(editable_text_set_text_contents);
     LOAD_ATSPI(editable_text_insert_text);
@@ -460,6 +472,7 @@ static void scu_atspi_close(void)
         return;
     }
     retire_atspi_worker = TRUE;
+    clear_clipboard_selection();
     if (elements) {
         g_hash_table_remove_all(elements);
     }
@@ -516,34 +529,6 @@ static gboolean ensure_atspi(void)
     return TRUE;
 }
 
-/* Diagnostics do not open a portal or change host accessibility settings. A
- * socket path alone is not sufficient evidence that the registry is usable. */
-static gboolean probe_accessibility(void)
-{
-    if (!inside_atspi_worker) {
-        return scu_atspi("_probe", NULL) != NULL;
-    }
-    if (!ensure_atspi()) {
-        return FALSE;
-    }
-    AtspiAccessible *desktop = atspi.get_desktop(0);
-    GError *error = NULL;
-    gint count =
-        desktop != NULL ? atspi.accessible_get_child_count(desktop, &error) : -1;
-    if (desktop != NULL) {
-        g_object_unref(desktop);
-    }
-    if (error != NULL || count < 0) {
-        scu_fail("accessibility_unavailable",
-            error != NULL ? error->message
-                          : "Host accessibility registry is unavailable.");
-        g_clear_error(&error);
-        scu_atspi_close();
-        return FALSE;
-    }
-    return TRUE;
-}
-
 static char *object_key(AtspiAccessible *o)
 {
     AtspiObject *base = (AtspiObject *)o;
@@ -567,7 +552,7 @@ static JsonResult *accessible_frame(AtspiAccessible *o)
     if (!c) {
         return yyjson_mut_null(scu.doc);
     }
-    AtspiRect *r = atspi.component_get_extents(c, ATSPI_COORD_TYPE_SCREEN, NULL);
+    AtspiRect *r = atspi.component_get_extents(c, ATSPI_COORD_TYPE_WINDOW, NULL);
     g_object_unref(c);
     if (!r) {
         return yyjson_mut_null(scu.doc);
@@ -678,39 +663,65 @@ static gboolean discover_windows(void)
     return scu.code == NULL;
 }
 
-static JsonResult *list_windows(JsonValue *arguments)
+/* Check the registry without walking every application. A socket on its own
+ * does not establish that the forwarded accessibility service is usable. */
+static JsonResult *check_accessibility_ready(void)
+{
+    AtspiAccessible *desktop = atspi.get_desktop(0);
+    GError *error = NULL;
+    gint count = desktop ? atspi.accessible_get_child_count(desktop, &error) : -1;
+    if (desktop) {
+        g_object_unref(desktop);
+    }
+    if (error || count < 0) {
+        scu_fail("accessibility_unavailable",
+            error ? error->message : "Host accessibility registry is unavailable.");
+        g_clear_error(&error);
+        scu_atspi_close();
+        return NULL;
+    }
+    return result_object();
+}
+
+static JsonResult *list_apps(void)
 {
     if (!discover_windows()) {
         return NULL;
     }
     JsonResult *result = result_object();
-    JsonResult *window_list = result_array();
+    JsonResult *apps = result_array();
+    GHashTable *by_application =
+        g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     for (guint index = 0; index < windows->len; index++) {
         Window *window = g_ptr_array_index(windows, index);
-        if (json_member(arguments, "pid") != NULL &&
-            json_number(arguments, "pid", 0) != window->pid) {
-            continue;
+        /* Keep distinct processes separate even when application names match.
+         * Preserve discovery order while grouping multiple windows per app. */
+        char *key = g_strdup_printf("%u:%s", window->pid, window->app);
+        JsonResult *application = g_hash_table_lookup(by_application, key);
+        if (application == NULL) {
+            application = result_object();
+            result_integer(application, "pid", window->pid);
+            result_string(application, "app_name", window->app);
+            result_member(application, "windows", result_array());
+            result_append(apps, application);
+            g_hash_table_insert(by_application, key, application);
+        } else {
+            g_free(key);
         }
         JsonResult *item = result_object();
         char *title = atspi.accessible_get_name(window->accessible, NULL);
-        result_integer(item, "pid", window->pid);
         result_integer(item, "window_id", window->id);
-        result_string(item, "app_name", window->app);
         result_string(item, "title", title);
         result_member(item, "bounds", accessible_frame(window->accessible));
-        result_boolean(item, "is_on_screen",
+        result_boolean(item, "shown",
             accessible_has_state(window->accessible, ATSPI_STATE_SHOWING));
         result_boolean(item, "active",
             accessible_has_state(window->accessible, ATSPI_STATE_ACTIVE));
-        result_member(item, "z_index", yyjson_mut_null(scu.doc));
-        result_append(window_list, item);
+        result_append(yyjson_mut_obj_get(application, "windows"), item);
         g_free(title);
     }
-    result_member(result, "windows", window_list);
-    result_boolean(result, "incomplete", TRUE);
-    result_string(result, "coverage",
-        "Only applications exposed through AT-SPI are included; "
-        "compositor stacking order is unavailable.");
+    g_hash_table_unref(by_application);
+    result_member(result, "apps", apps);
     return result;
 }
 
@@ -834,7 +845,7 @@ static JsonResult *read_window_state(JsonValue *args)
     }
     if (!w) {
         return scu_fail("window_unavailable",
-            "Window is absent or belongs to a different process. Call list_windows "
+            "Window is absent or belongs to a different process. Call status "
             "again.");
     }
     GHashTableIter it;
@@ -918,7 +929,7 @@ static JsonResult *invoke_accessible_action(
         g_clear_error(&error);
         return NULL;
     }
-    return scu_action("accessibility", "background", FALSE,
+    return scu_action("accessibility", FALSE,
         "Accessible action submitted; inspect the resulting state.");
 }
 
@@ -945,7 +956,7 @@ static JsonResult *set_accessible_number(AtspiAccessible *node, const char *text
         g_clear_error(&error);
         return NULL;
     }
-    return scu_action("accessibility", "background", confirmed,
+    return scu_action("accessibility", confirmed,
         confirmed ? "Accessible numeric value read back as requested."
                   : "Accessible numeric value submitted; readback was unavailable.");
 }
@@ -1037,7 +1048,7 @@ static JsonResult *edit_accessible_text(
         g_clear_error(&error);
         return NULL;
     }
-    return scu_action("accessibility", "background", confirmed,
+    return scu_action("accessibility", confirmed,
         confirmed
             ? "Accessible text value read back with the expected contents."
             : "Accessible text edit submitted; complete readback was unavailable.");
@@ -1050,22 +1061,9 @@ static JsonResult *operate_on_element(const char *tool, JsonValue *arguments)
     const char *token = json_string(arguments, "element_token");
     Element *element = token != NULL ? g_hash_table_lookup(elements, token) : NULL;
     if (element == NULL) {
-        return scu_fail("stale_element", "Element token is absent or stale. Read "
-                                         "get_window_state and use its new token.");
-    }
-
-    JsonValue *target = json_member(arguments, "target");
-    gboolean wrong_process = json_member(arguments, "pid") != NULL &&
-                             json_number(arguments, "pid", -1) != element->pid;
-    gboolean wrong_window = json_member(arguments, "window_id") != NULL &&
-                            json_number(arguments, "window_id", -1) != element->window;
-    gboolean wrong_target =
-        target != NULL && (g_strcmp0(json_string(target, "kind"), "window") != 0 ||
-                              json_number(target, "pid", -1) != element->pid ||
-                              json_number(target, "window_id", -1) != element->window);
-    if (wrong_process || wrong_window || wrong_target) {
-        return scu_fail("target_mismatch",
-            "The element token does not belong to the requested window.");
+        return scu_fail("stale_element",
+            "Element token is absent or stale. Read a window tree with computer "
+            "observe:{kind:window,pid,window_id} and use its new token.");
     }
 
     AtspiAccessible *node = g_object_ref(element->accessible);
@@ -1086,19 +1084,150 @@ static JsonResult *operate_on_element(const char *tool, JsonValue *arguments)
     return result;
 }
 
+/* Klipper writes PRIMARY as well as CLIPBOARD. Preserve a focused text
+ * selection through that ownership change, without modifying its contents. */
+static AtspiAccessible *clipboard_selection_node;
+static AtspiText *clipboard_selection_text;
+static char *clipboard_selection_value;
+static gint clipboard_selection_start, clipboard_selection_end;
+
+static void clear_clipboard_selection(void)
+{
+    g_clear_object(&clipboard_selection_node);
+    g_clear_object(&clipboard_selection_text);
+    g_clear_pointer(&clipboard_selection_value, g_free);
+}
+
+static AtspiAccessible *find_focused_node(AtspiAccessible *node, guint depth, guint *remaining)
+{
+    if (*remaining == 0 || depth > 12 || !scu_tick()) {
+        return NULL;
+    }
+    (*remaining)--;
+    if (accessible_has_state(node, ATSPI_STATE_FOCUSED)) {
+        return g_object_ref(node);
+    }
+    gint children = MIN(atspi.accessible_get_child_count(node, NULL), 250);
+    for (gint i = 0; i < children && *remaining; i++) {
+        AtspiAccessible *child = atspi.accessible_get_child_at_index(node, i, NULL);
+        if (!child) {
+            continue;
+        }
+        AtspiAccessible *focused = find_focused_node(child, depth + 1, remaining);
+        g_object_unref(child);
+        if (focused) {
+            return focused;
+        }
+    }
+    return NULL;
+}
+
+static JsonResult *clipboard_selection(const char *tool, JsonValue *args)
+{
+    JsonResult *result = result_object();
+    if (!strcmp(tool, "save_selection")) {
+        clear_clipboard_selection();
+        if (!discover_windows()) {
+            return NULL;
+        }
+        Window *selected = NULL;
+        guint matches = 0;
+        for (guint i = 0; i < windows->len; i++) {
+            Window *window = g_ptr_array_index(windows, i);
+            char *title = atspi.accessible_get_name(window->accessible, NULL);
+            if (window->pid == json_number(args, "pid", -1) &&
+                !g_strcmp0(title, json_string(args, "title"))) {
+                selected = window;
+                matches++;
+            }
+            g_free(title);
+        }
+        if (matches == 1) {
+            guint remaining = 250;
+            clipboard_selection_node = find_focused_node(selected->accessible, 0, &remaining);
+        }
+        if (clipboard_selection_node &&
+            atspi.accessible_get_role(clipboard_selection_node, NULL) != ATSPI_ROLE_PASSWORD_TEXT) {
+            clipboard_selection_text = atspi.accessible_get_text_iface(clipboard_selection_node);
+        }
+        gboolean saved = FALSE;
+        if (clipboard_selection_text && atspi.text_get_n_selections(clipboard_selection_text, NULL) == 1) {
+            gint length = atspi.text_get_character_count(clipboard_selection_text, NULL);
+            AtspiRange *range = atspi.text_get_selection(clipboard_selection_text, 0, NULL);
+            if (range && length >= 0 && length <= 65536 && range->start_offset >= 0 &&
+                range->end_offset > range->start_offset && range->end_offset <= length) {
+                clipboard_selection_start = range->start_offset;
+                clipboard_selection_end = range->end_offset;
+                clipboard_selection_value = atspi.text_get_text(clipboard_selection_text, 0, length, NULL);
+                saved = clipboard_selection_value != NULL;
+            }
+            g_free(range);
+        }
+        if (!saved) {
+            clear_clipboard_selection();
+        }
+        result_boolean(result, "saved", saved);
+        return scu.code ? NULL : result;
+    }
+    if (!clipboard_selection_node || !clipboard_selection_text ||
+        !accessible_has_state(clipboard_selection_node, ATSPI_STATE_FOCUSED)) {
+        clear_clipboard_selection();
+        return scu_fail("clipboard_selection_changed", "Clipboard/PRIMARY changed, but text focus changed before paste. No paste was sent.");
+    }
+    gint length = atspi.text_get_character_count(clipboard_selection_text, NULL);
+    char *value = length >= 0 && length <= 65536
+        ? atspi.text_get_text(clipboard_selection_text, 0, length, NULL) : NULL;
+    gboolean same = value && !strcmp(value, clipboard_selection_value);
+    g_free(value);
+    gboolean restored = FALSE;
+    gboolean verify = !strcmp(tool, "verify_selection");
+    if (same && verify) {
+        AtspiRange *range = atspi.text_get_n_selections(clipboard_selection_text, NULL) == 1
+            ? atspi.text_get_selection(clipboard_selection_text, 0, NULL) : NULL;
+        restored = range && range->start_offset == clipboard_selection_start &&
+            range->end_offset == clipboard_selection_end;
+        g_free(range);
+    } else if (same) {
+        restored = atspi.text_get_n_selections(clipboard_selection_text, NULL) > 0
+            ? atspi.text_set_selection(clipboard_selection_text, 0,
+                clipboard_selection_start, clipboard_selection_end, NULL)
+            : atspi.text_add_selection(clipboard_selection_text,
+                clipboard_selection_start, clipboard_selection_end, NULL);
+    }
+    if (verify || !restored) {
+        clear_clipboard_selection();
+    }
+    if (!restored) {
+        return scu_fail("clipboard_selection_changed", "Clipboard/PRIMARY changed, but the text selection could not be restored safely. No paste was sent. Use set_value for accessible text replacement.");
+    }
+    result_boolean(result, "restored", TRUE);
+    return result;
+}
+
 static JsonResult *scu_atspi(const char *tool, JsonValue *args)
 {
-    if (!inside_atspi_worker) {
-        return atspi_worker_call(tool, args);
+    if (!scu_gate()) {
+        return NULL;
     }
-    if (!strcmp(tool, "_probe")) {
-        return probe_accessibility() ? result_object() : NULL;
+    if (!inside_atspi_worker) {
+        if (!require_computer_access()) {
+            return NULL;
+        }
+        return !strcmp(tool, "get_window_state")
+            ? kwin_window_state(args) : atspi_worker_call(tool, args);
     }
     if (!ensure_atspi()) {
         return NULL;
     }
-    if (!strcmp(tool, "list_windows") || !strcmp(tool, "get_accessibility_tree")) {
-        return list_windows(args);
+    if (!strcmp(tool, "check_ready")) {
+        return check_accessibility_ready();
+    }
+    if (!strcmp(tool, "list_apps")) {
+        return list_apps();
+    }
+    if (!strcmp(tool, "save_selection") || !strcmp(tool, "restore_selection") ||
+        !strcmp(tool, "verify_selection")) {
+        return clipboard_selection(tool, args);
     }
     if (!strcmp(tool, "get_window_state")) {
         return read_window_state(args);
@@ -1112,7 +1241,7 @@ static JsonResult *scu_atspi(const char *tool, JsonValue *args)
  * caches without restarting the MCP transport or the visual session.
  *
  * The parent owns cancellation, deadlines and permission checks. The child has
- * no additional authority and inherits no portal/input descriptors. Its private
+ * no additional authority and inherits no host-service/input descriptors. Its private
  * pipe protocol carries semantic requests/results only, never host shell work. */
 static GPid atspi_worker_pid;
 static int atspi_worker_input = -1, atspi_worker_output = -1;
@@ -1181,7 +1310,7 @@ static JsonResult *atspi_worker_call(const char *tool, JsonValue *args)
     GString *response = g_string_new(NULL);
     gboolean complete = FALSE;
     while (!complete) {
-        if (!scu_tick()) {
+        if (!scu_tick() || !scu_gate() || !require_computer_access()) {
             break;
         }
         if (offset < length) {
@@ -1281,34 +1410,15 @@ static int run_atspi_worker(guint base)
     return 0;
 }
 
-/* Tool descriptions, validation and ordered batching. */
-/* Visual sessions: one portal grant supplies PipeWire streams and EIS input.
- * All callbacks run on the main thread; poll_visual_events never blocks. */
-#define PORTAL_NAME "org.freedesktop.portal.Desktop"
-#define PORTAL_PATH "/org/freedesktop/portal/desktop"
-#define PORTAL_REMOTE "org.freedesktop.portal.RemoteDesktop"
-#define PORTAL_CAST "org.freedesktop.portal.ScreenCast"
-#define PORTAL_CLIPBOARD "org.freedesktop.portal.Clipboard"
+/* KWin visual access. The private host service is the authority boundary;
+ * the guest never receives a general connection to the host session bus. */
+#define COMPUTER_PATH "/org/anatase/Spaces/Computer"
+#define COMPUTER_INTERFACE "org.anatase.Spaces.Computer1"
+#define KWIN_NAME "org.kde.KWin"
+#define KWIN_EIS_PATH "/org/kde/KWin/EIS/RemoteDesktop"
+#define KWIN_EIS_INTERFACE "org.kde.KWin.EIS.RemoteDesktop"
 #define MAX_DISPLAYS 8
 #define MAX_FRAME_BYTES (256u * 1024u * 1024u)
-
-typedef struct {
-    __typeof__(&pw_init) init;
-    __typeof__(&pw_main_loop_new) main_loop_new;
-    __typeof__(&pw_main_loop_get_loop) main_loop_get_loop;
-    __typeof__(&pw_main_loop_destroy) main_loop_destroy;
-    __typeof__(&pw_context_new) context_new;
-    __typeof__(&pw_context_destroy) context_destroy;
-    __typeof__(&pw_context_connect_fd) context_connect_fd;
-    __typeof__(&pw_core_disconnect) core_disconnect;
-    __typeof__(&pw_stream_new) stream_new;
-    __typeof__(&pw_stream_destroy) stream_destroy;
-    __typeof__(&pw_stream_add_listener) stream_add_listener;
-    __typeof__(&pw_stream_connect) stream_connect;
-    __typeof__(&pw_stream_dequeue_buffer) stream_dequeue_buffer;
-    __typeof__(&pw_stream_queue_buffer) stream_queue_buffer;
-    __typeof__(&pw_properties_new) properties_new;
-} PipeWireLibrary;
 
 typedef struct {
     __typeof__(&ei_new_sender) new_sender;
@@ -1333,6 +1443,7 @@ typedef struct {
     __typeof__(&ei_device_unref) device_unref;
     __typeof__(&ei_device_has_capability) device_has_capability;
     __typeof__(&ei_device_get_region) device_get_region;
+    __typeof__(&ei_device_get_seat) device_get_seat;
     __typeof__(&ei_region_get_mapping_id) region_get_mapping_id;
     __typeof__(&ei_region_get_x) region_get_x;
     __typeof__(&ei_region_get_y) region_get_y;
@@ -1379,11 +1490,9 @@ typedef struct {
 
 typedef struct {
     __typeof__(&gdk_pixbuf_new_from_bytes) new_from_bytes;
-    __typeof__(&gdk_pixbuf_scale_simple) scale_simple;
     __typeof__(&gdk_pixbuf_save_to_buffer) save_to_buffer;
 } PixbufLibrary;
 
-static PipeWireLibrary pipewire;
 static EiLibrary ei_api;
 static XkbLibrary xkb;
 static PixbufLibrary pixbuf;
@@ -1396,38 +1505,46 @@ typedef struct {
 } InputDevice;
 
 typedef struct {
-    guint node_id;
     char *mapping_id;
-    char *serial;
-    char id[32];
-    struct pw_stream *stream;
-    struct spa_hook listener;
-    struct spa_video_info_raw format;
-    GBytes *pixels;
     guint width, height;
     gint logical_x, logical_y, logical_width, logical_height;
     gboolean has_geometry;
-    guint capture_width, capture_height;
-    guint64 revision, capture_revision;
-    guint64 frame_sequence, capture_frame_sequence, observed_input_sequence;
-    gint64 frame_received;
-    char *capture_id;
+    guint64 revision;
     gboolean failed;
 } Display;
 
+/* Output rectangles remain private. The agent sees only the overview's pixel
+ * grid; a zoom is an observation of that grid, never a new coordinate system. */
+typedef struct {
+    double x, y, width, height;
+} CanvasRect;
+
+typedef struct {
+    CanvasRect tiles[MAX_DISPLAYS];
+    guint native_widths[MAX_DISPLAYS], native_heights[MAX_DISPLAYS];
+    guint count;
+    double x, y, width, height;
+} CanvasLayout;
+
+typedef struct {
+    guint64 id; /* Positive JSON-safe integer; zero means no overview. */
+    char *key;
+    guint width, height;
+    CanvasLayout layout;
+} CanvasSnapshot;
+
 typedef struct {
     GDBusConnection *bus;
-    char *session;
-    guint closed_subscription, clipboard_subscription;
-    gboolean clipboard_enabled, broken, opening;
-    char *clipboard_text;
-    struct pw_main_loop *main_loop;
-    struct pw_context *context;
-    struct pw_core *core;
+    gboolean broken;
+    yyjson_doc *geometry;
+    char *owner;
+    guint64 endpoint_device, endpoint_inode;
     struct ei *input;
     GPtrArray *devices;
     Display displays[MAX_DISPLAYS];
-    guint display_count, emulation_sequence, selected_display;
+    guint display_count, emulation_sequence;
+    guint64 mapping_revision, observed_input_sequence;
+    CanvasSnapshot canvas;
     guint64 input_sequence;
     gint64 last_input_time;
     struct ei_ping *pending_ping; /* Borrowed from the observation wait. */
@@ -1439,6 +1556,7 @@ typedef struct {
 } VisualSession;
 
 static VisualSession visual;
+#define MAX_CAPTURE_ID G_GUINT64_CONSTANT(9007199254740991)
 static guint64 next_capture;
 
 static gboolean load_visual_libraries(void)
@@ -1446,11 +1564,10 @@ static gboolean load_visual_libraries(void)
     if (visual_libraries_loaded) {
         return TRUE;
     }
-    void *pw_library = scu_library("libpipewire-0.3.so.0");
     void *ei_library = scu_library("libei.so.1");
     void *xkb_library = scu_library("libxkbcommon.so.0");
     void *pixbuf_library = scu_library("libgdk_pixbuf-2.0.so.0");
-    if (pw_library == NULL || ei_library == NULL || xkb_library == NULL ||
+    if (ei_library == NULL || xkb_library == NULL ||
         pixbuf_library == NULL) {
         return FALSE;
     }
@@ -1461,23 +1578,6 @@ static gboolean load_visual_libraries(void)
             return FALSE;                                                              \
         }                                                                              \
     } while (0)
-#define LOAD_PW(name) LOAD_SYMBOL(pw_library, pipewire, "pw_", name)
-    LOAD_PW(init);
-    LOAD_PW(main_loop_new);
-    LOAD_PW(main_loop_get_loop);
-    LOAD_PW(main_loop_destroy);
-    LOAD_PW(context_new);
-    LOAD_PW(context_destroy);
-    LOAD_PW(context_connect_fd);
-    LOAD_PW(core_disconnect);
-    LOAD_PW(stream_new);
-    LOAD_PW(stream_destroy);
-    LOAD_PW(stream_add_listener);
-    LOAD_PW(stream_connect);
-    LOAD_PW(stream_dequeue_buffer);
-    LOAD_PW(stream_queue_buffer);
-    LOAD_PW(properties_new);
-#undef LOAD_PW
 #define LOAD_EI(name) LOAD_SYMBOL(ei_library, ei_api, "ei_", name)
     LOAD_EI(new_sender);
     LOAD_EI(configure_name);
@@ -1498,6 +1598,7 @@ static gboolean load_visual_libraries(void)
     LOAD_EI(device_unref);
     LOAD_EI(device_has_capability);
     LOAD_EI(device_get_region);
+    LOAD_EI(device_get_seat);
     LOAD_EI(region_get_mapping_id);
     LOAD_EI(region_get_x);
     LOAD_EI(region_get_y);
@@ -1541,11 +1642,9 @@ static gboolean load_visual_libraries(void)
 #undef LOAD_XKB
 #define LOAD_PIXBUF(name) LOAD_SYMBOL(pixbuf_library, pixbuf, "gdk_pixbuf_", name)
     LOAD_PIXBUF(new_from_bytes);
-    LOAD_PIXBUF(scale_simple);
     LOAD_PIXBUF(save_to_buffer);
 #undef LOAD_PIXBUF
 #undef LOAD_SYMBOL
-    pipewire.init(NULL, NULL);
     visual_libraries_loaded = TRUE;
     return TRUE;
 }
@@ -1586,187 +1685,27 @@ static void free_input_device(gpointer pointer)
 static void scu_visual_close(void)
 {
     release_input();
-    if (visual.devices != NULL) {
-        g_ptr_array_unref(visual.devices);
-    }
-    if (visual.input != NULL) {
+    g_clear_pointer(&visual.devices, g_ptr_array_unref);
+    if (visual.input) {
         ei_api.unref(visual.input);
     }
-    for (guint index = 0; index < visual.display_count; index++) {
-        Display *display = &visual.displays[index];
-        if (display->stream != NULL) {
-            pipewire.stream_destroy(display->stream);
-        }
-        g_clear_pointer(&display->pixels, g_bytes_unref);
-        g_free(display->mapping_id);
-        g_free(display->serial);
-        g_free(display->capture_id);
+    for (guint i = 0; i < visual.display_count; i++) {
+        g_free(visual.displays[i].mapping_id);
     }
-    if (visual.core != NULL) {
-        pipewire.core_disconnect(visual.core);
-    }
-    if (visual.context != NULL) {
-        pipewire.context_destroy(visual.context);
-    }
-    if (visual.main_loop != NULL) {
-        pipewire.main_loop_destroy(visual.main_loop);
-    }
-    if (visual.bus != NULL) {
-        if (visual.closed_subscription != 0) {
-            g_dbus_connection_signal_unsubscribe(
-                visual.bus, visual.closed_subscription);
-        }
-        if (visual.clipboard_subscription != 0) {
-            g_dbus_connection_signal_unsubscribe(
-                visual.bus, visual.clipboard_subscription);
-        }
-        if (visual.session != NULL && !g_dbus_connection_is_closed(visual.bus)) {
-            GVariant *reply = g_dbus_connection_call_sync(visual.bus, PORTAL_NAME,
-                visual.session, "org.freedesktop.portal.Session", "Close", NULL, NULL,
-                G_DBUS_CALL_FLAGS_NONE, 700, NULL, NULL);
-            g_clear_pointer(&reply, g_variant_unref);
-        }
+    if (visual.bus) {
+        g_dbus_connection_close_sync(visual.bus, NULL, NULL);
         g_object_unref(visual.bus);
     }
-    g_free(visual.session);
-    g_free(visual.clipboard_text);
+    yyjson_doc_free(visual.geometry);
+    g_free(visual.owner);
+    g_free(visual.canvas.key);
     memset(&visual, 0, sizeof(visual));
-}
-
-static const char *scu_visual_state(void)
-{
-    if (visual.broken) {
-        return "disconnected";
-    }
-    return visual.session != NULL ? "active" : "inactive";
-}
-
-static void stream_format_changed(
-    void *data, uint32_t id, const struct spa_pod *parameter)
-{
-    Display *display = data;
-    if (id != SPA_PARAM_Format || parameter == NULL) {
-        return;
-    }
-    struct spa_video_info_raw format = {0};
-    if (spa_format_video_raw_parse(parameter, &format) < 0) {
-        display->failed = TRUE;
-        return;
-    }
-    if (format.size.width != display->width || format.size.height != display->height) {
-        display->revision++;
-        display->capture_revision = 0;
-        g_clear_pointer(&display->pixels, g_bytes_unref);
-    }
-    display->format = format;
-    display->width = format.size.width;
-    display->height = format.size.height;
-}
-
-static void stream_state_changed(void *data, enum pw_stream_state old_state,
-    enum pw_stream_state state, const char *error)
-{
-    (void)old_state;
-    (void)error;
-    Display *display = data;
-    if (state == PW_STREAM_STATE_ERROR || state == PW_STREAM_STATE_UNCONNECTED) {
-        display->failed = TRUE;
-        visual.broken = TRUE;
-    }
-}
-
-/* Copy mapped raw frames while the buffer is ours; never retain a PipeWire
- * buffer after queueing it back. PNG conversion happens only on observation. */
-static void stream_process(void *data)
-{
-    Display *display = data;
-    struct pw_buffer *buffer;
-    while ((buffer = pipewire.stream_dequeue_buffer(display->stream)) != NULL) {
-        struct spa_buffer *raw = buffer->buffer;
-        guint width = display->width, height = display->height;
-        if (width == 0 || height == 0 ||
-            (uint64_t)width * height * 4 > MAX_FRAME_BYTES || raw->n_datas < 1 ||
-            raw->datas[0].data == NULL || raw->datas[0].chunk == NULL) {
-            pipewire.stream_queue_buffer(display->stream, buffer);
-            continue;
-        }
-        struct spa_data *plane = &raw->datas[0];
-        gint stride = plane->chunk->stride;
-        guint offset = plane->chunk->offset;
-        gboolean bgr = display->format.format == SPA_VIDEO_FORMAT_BGRx ||
-                       display->format.format == SPA_VIDEO_FORMAT_BGRA;
-        gboolean rgb = display->format.format == SPA_VIDEO_FORMAT_RGBx ||
-                       display->format.format == SPA_VIDEO_FORMAT_RGBA;
-        uint64_t needed =
-            (uint64_t)(height - 1) * (stride > 0 ? stride : 0) + width * 4u;
-        if ((!bgr && !rgb) || stride < (gint)(width * 4u) || offset > plane->maxsize ||
-            needed > plane->maxsize - offset || needed > plane->chunk->size) {
-            pipewire.stream_queue_buffer(display->stream, buffer);
-            continue;
-        }
-        guchar *pixels = g_malloc((gsize)width * height * 3);
-        const guchar *source = (const guchar *)plane->data + offset;
-        for (guint y = 0; y < height; y++) {
-            for (guint x = 0; x < width; x++) {
-                const guchar *in = source + (gsize)y * stride + x * 4;
-                guchar *out = pixels + ((gsize)y * width + x) * 3;
-                out[0] = in[bgr ? 2 : 0];
-                out[1] = in[1];
-                out[2] = in[bgr ? 0 : 2];
-            }
-        }
-        g_clear_pointer(&display->pixels, g_bytes_unref);
-        display->pixels = g_bytes_new_take(pixels, (gsize)width * height * 3);
-        display->frame_sequence++;
-        display->frame_received = g_get_monotonic_time();
-        pipewire.stream_queue_buffer(display->stream, buffer);
-    }
-}
-
-static const struct pw_stream_events capture_events = {
-    PW_VERSION_STREAM_EVENTS,
-    .state_changed = stream_state_changed,
-    .param_changed = stream_format_changed,
-    .process = stream_process,
-};
-
-static gboolean connect_display(Display *display)
-{
-    guint8 storage[1024];
-    struct spa_pod_builder builder = SPA_POD_BUILDER_INIT(storage, sizeof(storage));
-    const struct spa_pod *format = spa_pod_builder_add_object(&builder,
-        SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_mediaType,
-        SPA_POD_Id(SPA_MEDIA_TYPE_video), SPA_FORMAT_mediaSubtype,
-        SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_VIDEO_format,
-        SPA_POD_CHOICE_ENUM_Id(4, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_RGBx,
-            SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_RGBA));
-    struct pw_properties *properties =
-        display->serial != NULL
-            ? pipewire.properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY,
-                  "Capture", PW_KEY_MEDIA_ROLE, "Screen", PW_KEY_TARGET_OBJECT,
-                  display->serial, NULL)
-            : pipewire.properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY,
-                  "Capture", PW_KEY_MEDIA_ROLE, "Screen", NULL);
-    display->stream =
-        pipewire.stream_new(visual.core, "Spaces computer use", properties);
-    if (display->stream == NULL) {
-        return FALSE;
-    }
-    pipewire.stream_add_listener(
-        display->stream, &display->listener, &capture_events, display);
-    return pipewire.stream_connect(display->stream, PW_DIRECTION_INPUT,
-               display->serial != NULL ? PW_ID_ANY : display->node_id,
-               PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS, &format,
-               1) >= 0;
 }
 
 static void poll_visual_events(void)
 {
-    if (visual.main_loop != NULL) {
-        struct pw_loop *loop = pipewire.main_loop_get_loop(visual.main_loop);
-        pw_loop_enter(loop);
-        pw_loop_iterate(loop, 0);
-        pw_loop_leave(loop);
+    if (visual.bus && g_dbus_connection_is_closed(visual.bus)) {
+        visual.broken = TRUE;
     }
     if (visual.input == NULL || visual.devices == NULL) {
         return;
@@ -1786,6 +1725,7 @@ static void poll_visual_events(void)
                 EI_DEVICE_CAP_SCROLL, EI_DEVICE_CAP_KEYBOARD,
                 ei_api.device_text_utf8 != NULL ? EI_DEVICE_CAP_TEXT : 0, NULL);
         } else if (type == EI_EVENT_DEVICE_ADDED) {
+            visual.mapping_revision++;
             InputDevice *device = g_new0(InputDevice, 1);
             device->device = ei_api.device_ref(raw_device);
             g_ptr_array_add(visual.devices, device);
@@ -1804,11 +1744,13 @@ static void poll_visual_events(void)
                     device->locked = ei_api.event_keyboard_get_xkb_mods_locked(event);
                     device->group = ei_api.event_keyboard_get_xkb_group(event);
                 } else if (type == EI_EVENT_DEVICE_RESUMED) {
+                    visual.mapping_revision++;
                     device->resumed = TRUE;
                     ei_api.device_start_emulating(
                         raw_device, ++visual.emulation_sequence);
                 } else if (type == EI_EVENT_DEVICE_PAUSED ||
                            type == EI_EVENT_DEVICE_REMOVED) {
+                    visual.mapping_revision++;
                     device->resumed = FALSE;
                     if (visual.held_device == raw_device) {
                         visual.held_device = NULL;
@@ -1828,734 +1770,792 @@ static void poll_visual_events(void)
     }
 }
 
+/* Calls stay asynchronous even though desktop operations are serialized. The
+ * main context must continue dispatching cancellation and peer disconnects. */
 typedef struct {
-    char *path;
-    gboolean received;
-    guint response;
-    GVariant *results;
-} PortalResponse;
+    gboolean done;
+    GVariant *reply;
+    GUnixFDList *fds;
+    GError *error;
+} BusReply;
+static gboolean host_service_mode;
+static GDBusConnection *host_active_peer; /* Borrowed during one host request. */
 
-static void portal_response(GDBusConnection *connection, const char *sender,
-    const char *path, const char *interface, const char *signal, GVariant *parameters,
-    gpointer data)
+static void bus_reply_done(GObject *source, GAsyncResult *result, gpointer data)
 {
-    (void)connection;
-    (void)sender;
-    (void)interface;
-    (void)signal;
-    PortalResponse *response = data;
-    if (response->path != NULL && strcmp(path, response->path) == 0 &&
-        !response->received) {
-        g_variant_get(parameters, "(u@a{sv})", &response->response, &response->results);
-        response->received = TRUE;
+    BusReply *reply = data;
+    reply->reply = g_dbus_connection_call_with_unix_fd_list_finish(
+        G_DBUS_CONNECTION(source), &reply->fds, result, &reply->error);
+    reply->done = TRUE;
+}
+
+static GVariant *bounded_call(GDBusConnection *connection, const char *destination,
+    const char *path, const char *interface, const char *method, GVariant *arguments,
+    GUnixFDList *input_fds, GUnixFDList **output_fds, GError **error)
+{
+    BusReply reply = {0};
+    GCancellable *cancel = g_cancellable_new();
+    gint64 deadline = g_get_monotonic_time() + 30 * G_USEC_PER_SEC;
+    if (scu.deadline) {
+        deadline = MIN(deadline, scu.deadline);
     }
-}
-
-static GVariant *portal_call(
-    const char *interface, const char *method, GVariant *parameters, GError **error)
-{
-    return g_dbus_connection_call_sync(visual.bus, PORTAL_NAME, PORTAL_PATH, interface,
-        method, parameters, NULL, G_DBUS_CALL_FLAGS_NONE, 5000, NULL, error);
-}
-
-/* Subscribe before calling: a portal may respond before its method reply.
- * The subscription's local connection reference survives cancellation teardown. */
-static GVariant *portal_request(
-    const char *interface, const char *method, GVariant *parameters, const char *token)
-{
-    GDBusConnection *connection = g_object_ref(visual.bus);
-    const char *unique = g_dbus_connection_get_unique_name(connection);
-    char *sender_path = g_strdup(unique + 1);
-    for (char *cursor = sender_path; *cursor != '\0'; cursor++) {
-        if (*cursor == '.') {
-            *cursor = '_';
+    gint milliseconds = MAX(1, (deadline - g_get_monotonic_time()) / 1000);
+    g_dbus_connection_call_with_unix_fd_list(connection, destination, path, interface,
+        method, arguments, NULL, G_DBUS_CALL_FLAGS_NO_AUTO_START, milliseconds,
+        input_fds, cancel, bus_reply_done, &reply);
+    while (!reply.done) {
+        if (g_atomic_int_get(&scu.stopping) ||
+            g_get_monotonic_time() >= deadline ||
+            (host_service_mode && host_active_peer &&
+                g_dbus_connection_is_closed(host_active_peer)) ||
+            (!host_service_mode && !scu_tick())) {
+            g_cancellable_cancel(cancel);
         }
-    }
-    PortalResponse response = {
-        .path = g_strdup_printf(PORTAL_PATH "/request/%s/%s", sender_path, token)};
-    g_free(sender_path);
-    guint subscription = g_dbus_connection_signal_subscribe(connection, PORTAL_NAME,
-        "org.freedesktop.portal.Request", "Response", NULL, NULL,
-        G_DBUS_SIGNAL_FLAGS_NONE, portal_response, &response, NULL);
-    GError *error = NULL;
-    GVariant *reply = portal_call(interface, method, parameters, &error);
-    if (reply != NULL) {
-        const char *path;
-        g_variant_get(reply, "(&o)", &path);
-        if (strcmp(path, response.path) != 0) {
-            g_free(response.path);
-            response.path = g_strdup(path);
+        while (g_main_context_iteration(NULL, FALSE)) {
         }
-        while (!response.received && scu_pause(5)) {
-        }
-        if (!response.received) {
-            /* Complete Close before dropping the last connection reference.
-             * A fire-and-forget call can disappear during cancellation cleanup. */
-            GVariant *closed = g_dbus_connection_call_sync(connection, PORTAL_NAME,
-                response.path, "org.freedesktop.portal.Request", "Close", NULL, NULL,
-                G_DBUS_CALL_FLAGS_NONE, 700, NULL, NULL);
-            g_clear_pointer(&closed, g_variant_unref);
-        }
-        g_variant_unref(reply);
-    } else {
-        scu_fail("portal_unavailable",
-            error != NULL ? error->message : "Portal call failed.");
-    }
-    g_clear_error(&error);
-    g_dbus_connection_signal_unsubscribe(connection, subscription);
-    g_object_unref(connection);
-    g_free(response.path);
-    if (response.received && response.response != 0) {
-        scu_fail(response.response == 1 ? "consent_cancelled" : "portal_failed",
-            "Host desktop consent was cancelled or the portal request failed.");
-        g_clear_pointer(&response.results, g_variant_unref);
-    }
-    return response.results;
-}
-
-static GVariantBuilder request_options(char **token)
-{
-    GVariantBuilder options;
-    *token = g_strdup_printf("scu_%08x_%08x", g_random_int(), g_random_int());
-    g_variant_builder_init(&options, G_VARIANT_TYPE_VARDICT);
-    g_variant_builder_add(
-        &options, "{sv}", "handle_token", g_variant_new_string(*token));
-    return options;
-}
-
-static int portal_fd(const char *interface, const char *method, GVariant *parameters)
-{
-    GUnixFDList *descriptors = NULL;
-    GError *error = NULL;
-    GVariant *reply = g_dbus_connection_call_with_unix_fd_list_sync(visual.bus,
-        PORTAL_NAME, PORTAL_PATH, interface, method, parameters, G_VARIANT_TYPE("(h)"),
-        G_DBUS_CALL_FLAGS_NONE, 5000, NULL, &descriptors, NULL, &error);
-    int fd = -1;
-    if (reply != NULL) {
-        gint handle;
-        g_variant_get(reply, "(h)", &handle);
-        fd = g_unix_fd_list_get(descriptors, handle, &error);
-        g_variant_unref(reply);
-    }
-    if (fd < 0) {
-        scu_fail("portal_unavailable",
-            error != NULL ? error->message : "Portal returned no usable descriptor.");
-    }
-    g_clear_error(&error);
-    g_clear_object(&descriptors);
-    return fd;
-}
-
-static char *restore_token_path(void)
-{
-    /* XDG_STATE_HOME predates GLib's accessor (2.72). Avoid requiring a newer
-     * GLib just to start the injected helper on an older guest. */
-    const char *configured = g_getenv("XDG_STATE_HOME");
-    char *state_home =
-        configured != NULL && g_path_is_absolute(configured)
-            ? g_strdup(configured)
-            : g_build_filename(g_get_home_dir(), ".local", "state", NULL);
-    char *directory = g_build_filename(state_home, "spaces", "scu", NULL);
-    g_free(state_home);
-    if (g_mkdir_with_parents(directory, 0700) != 0) {
-        g_free(directory);
-        return NULL;
-    }
-    struct stat metadata;
-    if (scu_lstat(directory, &metadata) != 0 || !S_ISDIR(metadata.st_mode) ||
-        metadata.st_uid != getuid() || (metadata.st_mode & 0077) != 0) {
-        g_free(directory);
-        return NULL;
-    }
-    /* The guest machine ID scopes consent state even when users share their
-     * home directory across Spaces. No Space name or manager lookup is needed.
-     * Without a valid machine ID, leave restoration to a fresh host prompt. */
-    char *machine_id = NULL;
-    if (!g_file_get_contents("/etc/machine-id", &machine_id, NULL, NULL)) {
-        g_free(directory);
-        return NULL;
-    }
-    g_strstrip(machine_id);
-    if (strlen(machine_id) != 32 || strspn(machine_id, "0123456789abcdef") != 32) {
-        g_free(machine_id);
-        g_free(directory);
-        return NULL;
-    }
-    char *name = g_strdup_printf("%s-%lu.token", machine_id, (unsigned long)getuid());
-    g_free(machine_id);
-    char *path = g_build_filename(directory, name, NULL);
-    g_free(directory);
-    g_free(name);
-    return path;
-}
-
-static char *read_restore_token(void)
-{
-    char *path = restore_token_path();
-    if (path == NULL) {
-        return NULL;
-    }
-    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    g_free(path);
-    if (fd < 0) {
-        return NULL;
-    }
-    struct stat metadata;
-    char buffer[4097];
-    ssize_t length = -1;
-    if (scu_fstat(fd, &metadata) == 0 && S_ISREG(metadata.st_mode) &&
-        metadata.st_uid == getuid() && (metadata.st_mode & 0077) == 0 &&
-        metadata.st_size > 0 && metadata.st_size <= 4096) {
-        length = read(fd, buffer, 4096);
-    }
-    close(fd);
-    if (length <= 0) {
-        return NULL;
-    }
-    buffer[length] = '\0';
-    return g_utf8_validate(buffer, length, NULL) ? g_strdup(buffer) : NULL;
-}
-
-static void save_restore_token(const char *token)
-{
-    char *path = restore_token_path();
-    if (path == NULL) {
-        return;
-    }
-    if (token == NULL || *token == '\0') {
-        unlink(path); /* Tokens are consumed even when no replacement is granted. */
-    } else {
-        char *temporary = g_strconcat(path, ".XXXXXX", NULL);
-        int fd = g_mkstemp_full(temporary, O_WRONLY | O_CLOEXEC, 0600);
-        if (fd >= 0) {
-            gsize length = strlen(token);
-            ssize_t written = write(fd, token, length);
-            if (written == (ssize_t)length && fsync(fd) == 0) {
-                rename(temporary, path);
-            }
-            close(fd);
-            unlink(temporary);
-        }
-        g_free(temporary);
-    }
-    g_free(path);
-}
-
-static void session_closed(GDBusConnection *connection, const char *sender,
-    const char *path, const char *interface, const char *signal, GVariant *parameters,
-    gpointer data)
-{
-    (void)connection;
-    (void)sender;
-    (void)path;
-    (void)interface;
-    (void)signal;
-    (void)parameters;
-    (void)data;
-    visual.broken = TRUE;
-}
-
-/* Clipboard writes can exceed a pipe's capacity. Transfer on a worker using an
- * immutable copy so the main loop continues to serve cancellation and revocation. */
-typedef struct {
-    GDBusConnection *bus;
-    char *session, *text;
-    guint serial;
-    int fd;
-} ClipboardTransfer;
-
-static gpointer write_clipboard(gpointer pointer)
-{
-    ClipboardTransfer *transfer = pointer;
-    gsize offset = 0, length = strlen(transfer->text);
-    gint64 deadline = g_get_monotonic_time() + 5 * G_USEC_PER_SEC;
-    fcntl(transfer->fd, F_SETFL, O_NONBLOCK);
-    while (offset < length && g_get_monotonic_time() < deadline &&
-           !g_atomic_int_get(&scu.stopping)) {
-        ssize_t written = write(transfer->fd, transfer->text + offset, length - offset);
-        if (written > 0) {
-            offset += written;
-        } else if (errno == EAGAIN || errno == EINTR) {
+        if (!reply.done) {
             g_usleep(1000);
-        } else {
-            break;
         }
     }
-    close(transfer->fd);
-    g_dbus_connection_call(transfer->bus, PORTAL_NAME, PORTAL_PATH, PORTAL_CLIPBOARD,
-        "SelectionWriteDone",
-        g_variant_new("(oub)", transfer->session, transfer->serial, offset == length),
-        NULL, G_DBUS_CALL_FLAGS_NONE, 2000, NULL, NULL, NULL);
-    g_object_unref(transfer->bus);
-    g_free(transfer->session);
-    g_free(transfer->text);
-    g_free(transfer);
-    return NULL;
+    g_object_unref(cancel);
+    if (output_fds) {
+        *output_fds = reply.fds;
+    } else {
+        g_clear_object(&reply.fds);
+    }
+    if (reply.error) {
+        g_propagate_error(error, reply.error);
+    }
+    return reply.reply;
 }
 
-static void clipboard_requested(GDBusConnection *connection, const char *sender,
-    const char *path, const char *interface, const char *signal, GVariant *parameters,
-    gpointer data)
+static char *computer_socket_path(void)
 {
-    (void)connection;
-    (void)sender;
-    (void)path;
-    (void)interface;
-    (void)signal;
-    (void)data;
-    const char *session, *mime;
-    guint serial;
-    g_variant_get(parameters, "(&o&su)", &session, &mime, &serial);
-    if (g_strcmp0(session, visual.session) != 0 || visual.clipboard_text == NULL ||
-        (!g_str_has_prefix(mime, "text/plain") && strcmp(mime, "UTF8_STRING") != 0)) {
-        return;
-    }
-    GUnixFDList *descriptors = NULL;
-    GError *error = NULL;
-    GVariant *reply = g_dbus_connection_call_with_unix_fd_list_sync(connection,
-        PORTAL_NAME, PORTAL_PATH, PORTAL_CLIPBOARD, "SelectionWrite",
-        g_variant_new("(ou)", session, serial), G_VARIANT_TYPE("(h)"),
-        G_DBUS_CALL_FLAGS_NONE, 2000, NULL, &descriptors, NULL, &error);
-    int fd = -1;
-    if (reply != NULL) {
-        gint handle;
-        g_variant_get(reply, "(h)", &handle);
-        if (descriptors != NULL) {
-            fd = g_unix_fd_list_get(descriptors, handle, &error);
-        }
-        g_variant_unref(reply);
-    }
-    g_clear_object(&descriptors);
-    if (fd < 0) {
-        g_printerr("scu: clipboard transfer unavailable: %s\n",
-            error != NULL ? error->message : "missing descriptor");
-        g_clear_error(&error);
-        return;
-    }
-    ClipboardTransfer *transfer = g_new0(ClipboardTransfer, 1);
-    transfer->bus = g_object_ref(visual.bus);
-    transfer->session = g_strdup(session);
-    transfer->text = g_strdup(visual.clipboard_text);
-    transfer->serial = serial;
-    transfer->fd = fd;
-    g_thread_unref(g_thread_new("scu-clipboard", write_clipboard, transfer));
-}
-
-/* Spaces' portal relay is on the guest user bus. Resolve its existing runtime
- * socket directly: MCP launchers commonly omit or filter the graphical
- * environment. Never autolaunch another bus or inherit a host session address. */
-static GDBusConnection *guest_session_bus(GError **error)
-{
-#ifndef SCU_SESSION_BUS_SOCKET
-    char *path = g_strdup_printf("/run/user/%lu/bus", (unsigned long)getuid());
+#ifdef SCU_COMPUTER_SOCKET
+    return g_strdup(SCU_COMPUTER_SOCKET);
 #else
-    char *path = g_strdup(SCU_SESSION_BUS_SOCKET);
+    return g_strdup_printf("/run/spaces/desktop/%lu/computer/bus", (unsigned long)getuid());
 #endif
-    char *directory = g_path_get_dirname(path);
-    struct stat metadata;
-    gboolean safe = scu_lstat(directory, &metadata) == 0 && S_ISDIR(metadata.st_mode) &&
-                    metadata.st_uid == getuid() && (metadata.st_mode & 0077) == 0;
-    if (!safe || scu_lstat(path, &metadata) != 0 || !S_ISSOCK(metadata.st_mode) ||
-        metadata.st_uid != getuid()) {
-        g_set_error(error, G_IO_ERROR, G_IO_ERROR_NOT_CONNECTED,
-            "The guest user bus is unavailable or unsafe at %s. Check the guest user "
-            "manager and Spaces desktop integration.",
-            path);
-        g_free(directory);
+}
+
+typedef struct {
+    gboolean done;
+    GDBusConnection *connection;
+    GError *error;
+} PeerConnection;
+
+static void peer_connected(GObject *source, GAsyncResult *result, gpointer data)
+{
+    (void)source;
+    PeerConnection *peer = data;
+    peer->connection = g_dbus_connection_new_for_address_finish(result, &peer->error);
+    peer->done = TRUE;
+}
+
+/* Authentication is part of the status deadline too. A stale socket listener
+ * must not hang the MCP process before its first method call can be timed out. */
+static GDBusConnection *connect_computer_peer(const char *address, GError **error)
+{
+    PeerConnection peer = {0};
+    GCancellable *cancel = g_cancellable_new();
+    gint64 deadline = g_get_monotonic_time() + 30 * G_USEC_PER_SEC;
+    if (scu.deadline) {
+        deadline = MIN(deadline, scu.deadline);
+    }
+    g_dbus_connection_new_for_address(address, G_DBUS_CONNECTION_FLAGS_AUTHENTICATION_CLIENT,
+        NULL, cancel, peer_connected, &peer);
+    while (!peer.done) {
+        if (!scu_tick() || g_get_monotonic_time() >= deadline) {
+            g_cancellable_cancel(cancel);
+        }
+        while (g_main_context_iteration(NULL, FALSE)) {
+        }
+        if (!peer.done) {
+            g_usleep(1000);
+        }
+    }
+    g_object_unref(cancel);
+    if (peer.error) {
+        g_propagate_error(error, peer.error);
+    }
+    return peer.connection;
+}
+
+static gboolean require_computer_access(void)
+{
+    if (visual.broken) {
+        scu_visual_close();
+        scu_atspi_close();
+        scu_fail("computer_use_disconnected", "KWin computer use disconnected. Inspect status before continuing; no action was replayed.");
+        return FALSE;
+    }
+    char *path = computer_socket_path();
+    struct stat st;
+    gboolean safe = scu_lstat(path, &st) == 0 && S_ISSOCK(st.st_mode) &&
+        st.st_uid == getuid() && (st.st_mode & 077) == 0;
+    if (!safe) {
         g_free(path);
+        scu_visual_close();
+        scu_atspi_close();
+        scu_fail("accessibility_permission_required", "Computer use is not forwarded. On the host, run `spaces configure <space>` and enable Plus Accessibility and Agent computer use. If enabled, check the graphical login and Spaces service log.");
+        return FALSE;
+    }
+    if (visual.bus && (visual.endpoint_device != (guint64)st.st_dev ||
+                       visual.endpoint_inode != (guint64)st.st_ino)) {
+        g_free(path);
+        scu_visual_close();
+        scu_atspi_close();
+        scu_fail("computer_use_disconnected", "The host computer-use service was replaced. Call status again.");
+        return FALSE;
+    }
+    if (!visual.bus) {
+        char *escaped = g_dbus_address_escape_value(path);
+        char *address = g_strconcat("unix:path=", escaped, NULL);
+        GError *error = NULL;
+        visual.bus = connect_computer_peer(address, &error);
+        g_free(address);
+        g_free(escaped);
+        if (!visual.bus) {
+            scu_fail("computer_use_unavailable", error ? error->message : "Host computer-use service unavailable.");
+            g_clear_error(&error);
+        } else {
+            g_dbus_connection_set_exit_on_close(visual.bus, FALSE);
+            visual.endpoint_device = st.st_dev;
+            visual.endpoint_inode = st.st_ino;
+        }
+    }
+    g_free(path);
+    return visual.bus != NULL;
+}
+
+static GVariant *computer_call(const char *method, GVariant *arguments, GUnixFDList **fds)
+{
+    if (!require_computer_access()) {
         return NULL;
     }
-    g_free(directory);
-    char *escaped = g_dbus_address_escape_value(path);
-    char *address = g_strconcat("unix:path=", escaped, NULL);
-    g_free(escaped);
-    g_free(path);
-    GDBusConnection *connection = g_dbus_connection_new_for_address_sync(address,
-        G_DBUS_CONNECTION_FLAGS_AUTHENTICATION_CLIENT |
-            G_DBUS_CONNECTION_FLAGS_MESSAGE_BUS_CONNECTION,
-        NULL, NULL, error);
-    g_free(address);
-    return connection;
-}
-
-static gboolean start_portal_session(void)
-{
     GError *error = NULL;
-    visual.bus = guest_session_bus(&error);
-    if (visual.bus == NULL) {
-        scu_fail("portal_unavailable",
-            error != NULL ? error->message : "Guest session bus unavailable.");
-        g_clear_error(&error);
-        return FALSE;
-    }
-    char *token;
-    GVariantBuilder options = request_options(&token);
-    g_variant_builder_add(
-        &options, "{sv}", "session_handle_token", g_variant_new_string(token));
-    GVariant *results = portal_request(
-        PORTAL_REMOTE, "CreateSession", g_variant_new("(a{sv})", &options), token);
-    g_free(token);
-    if (results == NULL) {
-        return FALSE;
-    }
-    const char *session;
-    if (!g_variant_lookup(results, "session_handle", "&s", &session) ||
-        !g_variant_is_object_path(session)) {
-        g_variant_unref(results);
-        scu_fail("portal_failed", "Portal returned an invalid session handle.");
-        return FALSE;
-    }
-    visual.session = g_strdup(session);
-    g_variant_unref(results);
-    visual.closed_subscription = g_dbus_connection_signal_subscribe(visual.bus,
-        PORTAL_NAME, "org.freedesktop.portal.Session", "Closed", visual.session, NULL,
-        G_DBUS_SIGNAL_FLAGS_NONE, session_closed, NULL, NULL);
-
-    options = request_options(&token);
-    g_variant_builder_add(&options, "{sv}", "types", g_variant_new_uint32(3));
-    g_variant_builder_add(&options, "{sv}", "persist_mode", g_variant_new_uint32(2));
-    char *restore = read_restore_token();
-    if (restore != NULL) {
-        g_variant_builder_add(
-            &options, "{sv}", "restore_token", g_variant_new_string(restore));
-        g_free(restore);
-    }
-    save_restore_token(NULL);
-    results = portal_request(PORTAL_REMOTE, "SelectDevices",
-        g_variant_new("(oa{sv})", visual.session, &options), token);
-    g_free(token);
-    if (results == NULL) {
-        return FALSE;
-    }
-    g_variant_unref(results);
-
-    options = request_options(&token);
-    g_variant_builder_add(&options, "{sv}", "types", g_variant_new_uint32(1));
-    g_variant_builder_add(&options, "{sv}", "multiple", g_variant_new_boolean(TRUE));
-    g_variant_builder_add(&options, "{sv}", "cursor_mode", g_variant_new_uint32(1));
-    results = portal_request(PORTAL_CAST, "SelectSources",
-        g_variant_new("(oa{sv})", visual.session, &options), token);
-    g_free(token);
-    if (results == NULL) {
-        return FALSE;
-    }
-    g_variant_unref(results);
-
-    /* Clipboard is optional; an unsupported backend does not prevent capture. */
-    GVariant *reply = portal_call(PORTAL_CLIPBOARD, "RequestClipboard",
-        g_variant_new("(oa{sv})", visual.session, NULL), &error);
-    if (reply != NULL) {
-        g_variant_unref(reply);
+    GVariant *reply = bounded_call(visual.bus, NULL, COMPUTER_PATH, COMPUTER_INTERFACE,
+        method, arguments, NULL, fds, &error);
+    if (!reply) {
+        scu_fail(g_error_matches(error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT) ||
+                g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED)
+                ? "timeout" : "kwin_unavailable",
+            error ? error->message : "KWin operation failed.");
     }
     g_clear_error(&error);
-    options = request_options(&token);
-    results = portal_request(PORTAL_REMOTE, "Start",
-        g_variant_new("(osa{sv})", visual.session, "", &options), token);
-    g_free(token);
-    if (results == NULL) {
+    return reply;
+}
+
+static gboolean read_rect(JsonValue *value, CanvasRect *rect)
+{
+    const char *fields[] = {"x", "y", "width", "height"};
+    double parts[4];
+    for (guint i = 0; i < 4; i++) {
+        JsonValue *part = json_member(value, fields[i]);
+        parts[i] = yyjson_get_num(part);
+        if (!yyjson_is_num(part) || !isfinite(parts[i]) || fabs(parts[i]) > G_MAXINT / 4) {
+            return FALSE;
+        }
+    }
+    *rect = (CanvasRect){parts[0], parts[1], parts[2], parts[3]};
+    return rect->width > 0 && rect->height > 0;
+}
+
+/* Metadata comes only from the fixed host-side script. Windows are deliberately
+ * not part of the canvas identity: moving a window does not move the desktop. */
+static gboolean refresh_geometry(void)
+{
+    GVariant *reply = computer_call("Geometry", NULL, NULL);
+    if (!reply) {
         return FALSE;
     }
-    const char *new_restore;
-    save_restore_token(g_variant_lookup(results, "restore_token", "&s", &new_restore)
-                           ? new_restore
-                           : NULL);
-    g_variant_lookup(results, "clipboard_enabled", "b", &visual.clipboard_enabled);
-    GVariant *streams =
-        g_variant_lookup_value(results, "streams", G_VARIANT_TYPE("a(ua{sv})"));
-    if (streams == NULL || g_variant_n_children(streams) == 0 ||
-        g_variant_n_children(streams) > MAX_DISPLAYS) {
-        g_clear_pointer(&streams, g_variant_unref);
-        g_variant_unref(results);
-        scu_fail("capture_unavailable",
-            "Grant between one and eight monitors for computer use.");
+    const char *json;
+    if (!g_variant_is_of_type(reply, G_VARIANT_TYPE("(s)"))) {
+        g_variant_unref(reply);
+        scu_fail("kwin_geometry_unavailable", "The host returned an invalid geometry reply.");
         return FALSE;
     }
-    visual.display_count = g_variant_n_children(streams);
-    for (guint index = 0; index < visual.display_count; index++) {
-        Display *display = &visual.displays[index];
-        GVariant *properties;
-        g_variant_get_child(
-            streams, index, "(u@a{sv})", &display->node_id, &properties);
-        display->has_geometry = g_variant_lookup(properties, "position", "(ii)",
-                                    &display->logical_x, &display->logical_y) &&
-                                g_variant_lookup(properties, "size", "(ii)",
-                                    &display->logical_width, &display->logical_height);
-        const char *mapping;
-        if (g_variant_lookup(properties, "mapping_id", "&s", &mapping)) {
-            display->mapping_id = g_strdup(mapping);
-        }
-        guint64 serial;
-        if (g_variant_lookup(properties, "pipewire-serial", "t", &serial)) {
-            display->serial = g_strdup_printf("%" G_GUINT64_FORMAT, serial);
-        }
-        g_snprintf(display->id, sizeof(display->id), "display-%u", index + 1);
-        g_variant_unref(properties);
+    g_variant_get(reply, "(&s)", &json);
+    yyjson_doc *document = strlen(json) <= 1024 * 1024 ? yyjson_read(json, strlen(json), 0) : NULL;
+    g_variant_unref(reply);
+    JsonValue *root = document ? yyjson_doc_get_root(document) : NULL;
+    JsonValue *outputs = json_member(root, "outputs");
+    const char *owner = json_string(root, "owner");
+    guint count = yyjson_arr_size(outputs);
+    if (!owner || !yyjson_is_arr(outputs) || count == 0 || count > MAX_DISPLAYS ||
+        !yyjson_is_arr(json_member(root, "windows"))) {
+        yyjson_doc_free(document);
+        scu_fail("kwin_geometry_unavailable", "KWin returned invalid desktop geometry.");
+        return FALSE;
     }
-    g_variant_unref(streams);
-    g_variant_unref(results);
-    visual.clipboard_subscription = g_dbus_connection_signal_subscribe(visual.bus,
-        PORTAL_NAME, PORTAL_CLIPBOARD, "SelectionTransfer", NULL, NULL,
-        G_DBUS_SIGNAL_FLAGS_NONE, clipboard_requested, NULL, NULL);
+    if (visual.owner && strcmp(visual.owner, owner)) {
+        yyjson_doc_free(document);
+        visual.broken = TRUE;
+        scu_atspi_close();
+        scu_fail("computer_use_disconnected", "KWin restarted. Call status again; no action was replayed.");
+        return FALSE;
+    }
+    Display next[MAX_DISPLAYS] = {0};
+    for (guint i = 0; i < count; i++) {
+        JsonValue *output = yyjson_arr_get(outputs, i);
+        CanvasRect rect;
+        const char *name = json_string(output, "name");
+        double scale = json_number(output, "scale", 0);
+        if (!name || !*name || !read_rect(json_member(output, "geometry"), &rect) ||
+            !isfinite(scale) || scale <= 0 || scale > 16 ||
+            rect.width * scale > G_MAXINT / 3 || rect.height * scale > G_MAXINT) {
+            for (guint j = 0; j < i; j++) {
+                g_free(next[j].mapping_id);
+            }
+            yyjson_doc_free(document);
+            scu_fail("kwin_geometry_unavailable", "KWin output geometry or scale is invalid.");
+            return FALSE;
+        }
+        next[i] = (Display){.mapping_id = g_strdup(name), .has_geometry = TRUE,
+            .logical_x = (gint)rect.x, .logical_y = (gint)rect.y,
+            .logical_width = (gint)rect.width, .logical_height = (gint)rect.height,
+            .width = MAX(1, (guint)(rect.width * scale)),
+            .height = MAX(1, (guint)(rect.height * scale))};
+    }
+    for (guint i = 0; i < visual.display_count; i++) {
+        g_free(visual.displays[i].mapping_id);
+    }
+    memcpy(visual.displays, next, sizeof(next));
+    visual.display_count = count;
+    g_free(visual.owner);
+    visual.owner = g_strdup(owner);
+    yyjson_doc_free(visual.geometry);
+    visual.geometry = document;
     return TRUE;
 }
 
 static gboolean ensure_visual_session(void)
 {
-    if (visual.broken) {
-        scu_visual_close();
-        scu_fail("visual_session_closed",
-            "Desktop session disconnected. Inspect state before requesting a new "
-            "session; no action was replayed.");
+    if (!require_computer_access() || !refresh_geometry()) {
         return FALSE;
     }
-    if (visual.session != NULL) {
+    if (visual.input) {
         return TRUE;
     }
-    if (!load_visual_libraries()) {
-        scu_fail("missing_dependency",
-            "Install guest PipeWire, libei, libxkbcommon and "
-            "GdkPixbuf libraries. See scu guest requirements.");
-        return FALSE;
-    }
-    visual.opening = TRUE;
-    if (!start_portal_session()) {
-        goto failed;
-    }
-    int fd = portal_fd(PORTAL_CAST, "OpenPipeWireRemote",
-        g_variant_new("(oa{sv})", visual.session, NULL));
-    if (fd < 0) {
-        goto failed;
-    }
-    visual.main_loop = pipewire.main_loop_new(NULL);
-    if (visual.main_loop == NULL) {
-        close(fd);
-        goto failed;
-    }
-    visual.context =
-        pipewire.context_new(pipewire.main_loop_get_loop(visual.main_loop), NULL, 0);
-    if (visual.context == NULL) {
-        close(fd);
-        goto failed;
-    }
-    visual.core = pipewire.context_connect_fd(visual.context, fd, NULL, 0);
-    if (visual.core == NULL) {
-        goto failed;
-    }
-    for (guint index = 0; index < visual.display_count; index++) {
-        if (!connect_display(&visual.displays[index])) {
-            goto failed;
+    for (guint i = 1; libs[i]; i++) {
+        if (!scu_library(libs[i])) {
+            char *hint = g_strdup_printf("Missing library %s. Install the package for it.", libs[i]);
+            scu_fail("missing_dependency", hint);
+            g_free(hint);
+            return FALSE;
         }
     }
-    fd = portal_fd(
-        PORTAL_REMOTE, "ConnectToEIS", g_variant_new("(oa{sv})", visual.session, NULL));
+    if (!load_visual_libraries()) {
+        scu_fail("missing_dependency", "Install guest libei, libxkbcommon and GdkPixbuf libraries.");
+        return FALSE;
+    }
+    GUnixFDList *fds = NULL;
+    GVariant *reply = computer_call("ConnectInput", NULL, &fds);
+    gint handle = -1;
+    if (reply && g_variant_is_of_type(reply, G_VARIANT_TYPE("(h)"))) {
+        g_variant_get(reply, "(h)", &handle);
+    }
+    int fd = fds && handle >= 0 ? g_unix_fd_list_get(fds, handle, NULL) : -1;
+    g_clear_pointer(&reply, g_variant_unref);
+    g_clear_object(&fds);
     if (fd < 0) {
-        goto failed;
+        scu_fail("input_unavailable", "KWin did not provide an EIS connection.");
+        return FALSE;
     }
     visual.input = ei_api.new_sender(NULL);
-    if (visual.input == NULL) {
-        close(fd);
-        goto failed;
-    }
     visual.devices = g_ptr_array_new_with_free_func(free_input_device);
     ei_api.configure_name(visual.input, "Spaces computer use");
     if (ei_api.setup_backend_fd(visual.input, fd) < 0) {
-        goto failed;
+        close(fd);
+        scu_fail("input_unavailable", "Could not connect to KWin EIS.");
+        return FALSE;
     }
-    visual.opening = FALSE;
-    return TRUE;
-failed:
-    scu_visual_close();
-    scu_fail("visual_session_failed",
-        "Could not establish the portal capture/input session.");
+    gint64 deadline = g_get_monotonic_time() + 3 * G_USEC_PER_SEC;
+    while (g_get_monotonic_time() < deadline) {
+        if (!scu_pause(5)) {
+            return FALSE;
+        }
+        gboolean resumed = FALSE;
+        for (guint i = 0; i < visual.devices->len; i++) {
+            InputDevice *device = g_ptr_array_index(visual.devices, i);
+            resumed |= device->resumed && ei_api.device_has_capability(
+                device->device, EI_DEVICE_CAP_POINTER_ABSOLUTE);
+        }
+        if (resumed) {
+            /* Consume announcements for the rest of this compositor seat. */
+            return scu_pause(20);
+        }
+    }
+    scu_fail("input_unavailable", "KWin EIS did not resume a pointer device.");
     return FALSE;
 }
 
 static gboolean visual_step(void)
 {
-    if (!scu_tick()) {
+    if (!scu_tick() || !require_computer_access()) {
         return FALSE;
     }
-    if (visual.session == NULL || visual.broken ||
-        (visual.bus != NULL && g_dbus_connection_is_closed(visual.bus))) {
-        scu_fail("visual_session_closed",
-            "Desktop session disconnected. No remaining action was sent.");
-        return FALSE;
-    }
-    return TRUE;
+    return !visual.broken;
 }
 
-static Display *selected_display(const char *id)
-{
-    if (id == NULL) {
-        return &visual.displays[visual.selected_display];
-    }
-    if (strcmp(id, "primary") == 0) {
-        visual.selected_display = 0;
-        return &visual.displays[0];
-    }
-    for (guint index = 0; index < visual.display_count; index++) {
-        if (strcmp(id, visual.displays[index].id) == 0) {
-            visual.selected_display = index;
-            return &visual.displays[index];
-        }
-    }
-    scu_fail("unknown_display",
-        "Select a granted display_id from get_desktop_state or get_screen_size.");
-    return NULL;
-}
 
-static gboolean wait_for_frame(Display *display)
-{
-    gint64 deadline = g_get_monotonic_time() + 8 * G_USEC_PER_SEC;
-    while (display->pixels == NULL && g_get_monotonic_time() < deadline) {
-        if (!visual_step() || !scu_pause(5)) {
-            return FALSE;
-        }
-        if (display->failed) {
-            break;
-        }
-    }
-    if (display->pixels == NULL || display->failed) {
-        scu_fail("capture_unavailable",
-            "No CPU-readable PipeWire frame arrived for the selected display.");
-        return FALSE;
-    }
-    return TRUE;
-}
+typedef struct {
+    struct ei_device *device;
+    struct ei_region *region;
+} RegionBinding;
 
-/* A PipeWire buffer already in memory says nothing about an input just sent.
- * Synchronize delivery when libei supports it, consume queued frames, and give
- * the application a short render interval. This is observation, not an action
- * retry or an assertion that the application has finished its work. */
-static const char *observation_frame(Display *display)
+static gboolean bind_stream_region(Display *display, RegionBinding *binding)
 {
-    if (!wait_for_frame(display)) {
-        return NULL;
-    }
-    if (visual.input_sequence == display->observed_input_sequence) {
-        return display->frame_sequence > display->capture_frame_sequence
-                   ? "new" : "cached";
-    }
-
-    gint64 deadline = g_get_monotonic_time() + G_USEC_PER_SEC;
-    gboolean synchronized = FALSE;
-    struct ei_ping *ping = NULL;
-    if (visual.input != NULL && ei_api.new_ping != NULL && ei_api.ping != NULL &&
-        ei_api.ping_unref != NULL && ei_api.event_pong_get_ping != NULL) {
-        ping = ei_api.new_ping(visual.input);
-    }
-    if (ping != NULL) {
-        visual.pending_ping = ping;
-        visual.ping_done = FALSE;
-        ei_api.ping(ping);
-        gint64 sync_deadline = g_get_monotonic_time() + 250000;
-        while (!visual.ping_done && g_get_monotonic_time() < sync_deadline) {
-            if (!visual_step() || !scu_pause(2)) {
-                visual.pending_ping = NULL;
-                ei_api.ping_unref(ping);
-                return NULL;
+    guint matches = 0, total = 0;
+    RegionBinding only = {0};
+    memset(binding, 0, sizeof(*binding));
+    for (guint index = 0; visual.devices && index < visual.devices->len; index++) {
+        InputDevice *device = g_ptr_array_index(visual.devices, index);
+        if (!device->resumed || !ei_api.device_has_capability(
+                device->device, EI_DEVICE_CAP_POINTER_ABSOLUTE)) {
+            continue;
+        }
+        for (guint n = 0;; n++) {
+            struct ei_region *region = ei_api.device_get_region(device->device, n);
+            if (region == NULL) {
+                break;
+            }
+            only = (RegionBinding){device->device, region};
+            total++;
+            const char *mapping = ei_api.region_get_mapping_id(region);
+            if (display->mapping_id && mapping && !strcmp(display->mapping_id, mapping)) {
+                *binding = only;
+                matches++;
             }
         }
-        synchronized = visual.ping_done;
-        visual.pending_ping = NULL;
-        ei_api.ping_unref(ping);
     }
-    if (!visual_step()) {
-        return NULL;
+    if (!matches && !display->mapping_id && visual.display_count == 1 && total == 1) {
+        *binding = only;
+        matches = 1;
     }
-    guint64 baseline = display->frame_sequence;
-    gint64 render_after = visual.last_input_time + 100000;
-    while (g_get_monotonic_time() < deadline) {
-        if (!visual_step()) {
-            return NULL;
-        }
-        if (g_get_monotonic_time() >= render_after &&
-            display->frame_sequence > baseline &&
-            display->frame_received >= visual.last_input_time) {
-            break;
-        }
-        if (!scu_pause(5)) {
-            return NULL;
-        }
-    }
-    if (display->pixels == NULL || display->failed) {
-        scu_fail("capture_unavailable", "The display has no readable frame after input.");
-        return NULL;
-    }
-    display->observed_input_sequence = visual.input_sequence;
-    if (!synchronized) {
-        return "unknown";
-    }
-    return display->frame_sequence > baseline ? "new" : "cached";
+    return matches == 1 && ei_api.region_get_width(binding->region) > 0 &&
+           ei_api.region_get_height(binding->region) > 0;
 }
 
-static JsonResult *display_metadata(Display *selected)
+static gboolean rect_contains(const CanvasRect *rect, double x, double y)
 {
-    JsonResult *result = result_object(), *displays = result_array();
-    result_string(result, "platform", "linux");
-    result_string(result, "display", selected->id);
-    result_integer(result, "screen_width", selected->width);
-    result_integer(result, "screen_height", selected->height);
-    result_number(result, "scale_factor", 1.0);
-    for (guint index = 0; index < visual.display_count; index++) {
-        Display *display = &visual.displays[index];
-        JsonResult *item = result_object();
-        result_string(item, "display_id", display->id);
-        result_integer(item, "width", display->width);
-        result_integer(item, "height", display->height);
-        result_boolean(item, "default", index == 0);
-        if (display->has_geometry) {
-            JsonResult *logical = result_object();
-            result_integer(logical, "x", display->logical_x);
-            result_integer(logical, "y", display->logical_y);
-            result_integer(logical, "width", display->logical_width);
-            result_integer(logical, "height", display->logical_height);
-            result_member(item, "logical_bounds", logical);
-        }
-        result_append(displays, item);
+    return x >= rect->x && y >= rect->y && x < rect->x + rect->width &&
+           y < rect->y + rect->height;
+}
+
+/* KWin output geometry is authoritative. EIS regions route input within it;
+ * they never invent a second desktop layout. Capture IDs cover both mappings. */
+static gboolean canvas_layout(CanvasLayout *layout, char **key)
+{
+    memset(layout, 0, sizeof(*layout));
+    if (visual.display_count == 0) {
+        scu_fail("capture_unavailable", "KWin has no active desktop outputs.");
+        return FALSE;
     }
-    result_member(result, "displays", displays);
+    for (guint i = 0; i < visual.display_count; i++) {
+        Display *display = &visual.displays[i];
+        if (!display->has_geometry || display->logical_width <= 0 || display->logical_height <= 0) {
+            scu_fail("canvas_layout_unavailable", "KWin did not provide complete output geometry.");
+            return FALSE;
+        }
+    }
+    layout->count = visual.display_count;
+    GString *identity = g_string_new(NULL);
+    g_string_append_printf(identity, "%u:%" G_GUINT64_FORMAT ";",
+        visual.display_count, visual.mapping_revision);
+    double right = 0, bottom = 0;
+    for (guint i = 0; i < layout->count; i++) {
+        Display *display = &visual.displays[i];
+        CanvasRect *rect = &layout->tiles[i];
+        layout->native_widths[i] = display->width;
+        layout->native_heights[i] = display->height;
+        if (display->failed || visual.broken) {
+            g_string_free(identity, TRUE);
+            scu_fail("capture_unavailable", "KWin desktop access disconnected.");
+            return FALSE;
+        }
+        *rect = (CanvasRect){display->logical_x, display->logical_y,
+            display->logical_width, display->logical_height};
+        if (display->width == 0 || display->height == 0 || rect->width <= 0 ||
+            rect->height <= 0) {
+            g_string_free(identity, TRUE);
+            scu_fail("capture_unavailable", "A KWin output has no valid dimensions.");
+            return FALSE;
+        }
+        for (guint j = 0; j < i; j++) {
+            CanvasRect *other = &layout->tiles[j];
+            if (rect->x < other->x + other->width && other->x < rect->x + rect->width &&
+                rect->y < other->y + other->height && other->y < rect->y + rect->height) {
+                g_string_free(identity, TRUE);
+                scu_fail("ambiguous_canvas_layout",
+                    "Granted capture regions overlap; a unique canvas cannot be established.");
+                return FALSE;
+            }
+        }
+        if (i == 0) {
+            layout->x = rect->x;
+            layout->y = rect->y;
+            right = rect->x + rect->width;
+            bottom = rect->y + rect->height;
+        } else {
+            layout->x = MIN(layout->x, rect->x);
+            layout->y = MIN(layout->y, rect->y);
+            right = MAX(right, rect->x + rect->width);
+            bottom = MAX(bottom, rect->y + rect->height);
+        }
+        g_string_append_printf(identity,
+            "%u:%s:%s:%u:%u:%" G_GUINT64_FORMAT ":%.17g,%.17g,%.17g,%.17g;",
+            i, visual.owner ? visual.owner : "",
+            display->mapping_id ? display->mapping_id : "", display->width,
+            display->height, display->revision, rect->x, rect->y, rect->width, rect->height);
+    }
+    /* Include all pointer regions, including duplicate mapping IDs during a
+     * replacement. Observation may still work, but old input routes are stale. */
+    for (guint i = 0; visual.devices && i < visual.devices->len; i++) {
+        InputDevice *device = g_ptr_array_index(visual.devices, i);
+        if (!ei_api.device_has_capability(device->device, EI_DEVICE_CAP_POINTER_ABSOLUTE)) {
+            continue;
+        }
+        g_string_append_printf(identity, "%p:%d;", (void *)device->device, device->resumed);
+        for (guint n = 0;; n++) {
+            struct ei_region *region = ei_api.device_get_region(device->device, n);
+            if (!region) {
+                break;
+            }
+            const char *mapping = ei_api.region_get_mapping_id(region);
+            g_string_append_printf(identity, "%s:%u:%u:%u:%u;", mapping ? mapping : "",
+                ei_api.region_get_x(region), ei_api.region_get_y(region),
+                ei_api.region_get_width(region), ei_api.region_get_height(region));
+        }
+    }
+    layout->width = right - layout->x;
+    layout->height = bottom - layout->y;
+    *key = g_string_free(identity, FALSE);
+    return TRUE;
+}
+
+static gboolean validate_canvas(guint64 id)
+{
+    CanvasSnapshot *canvas = &visual.canvas;
+    if (canvas->id == 0 || (id && id != canvas->id)) {
+        scu_fail("stale_capture", "Take a full desktop overview before zooming or sending pixel input.");
+        return FALSE;
+    }
+    CanvasLayout current;
+    char *key = NULL;
+    if (!canvas_layout(&current, &key)) {
+        return FALSE;
+    }
+    gboolean valid = strcmp(key, canvas->key) == 0;
+    g_free(key);
+    if (!valid) {
+        scu_fail("stale_capture", "Desktop geometry or input mapping changed. Take a new full overview.");
+    }
+    return valid;
+}
+
+/* Describe the full overview's coordinate frame and capture guard. */
+static JsonResult *canvas_status(void)
+{
+    if (visual.canvas.id == 0) {
+        return yyjson_mut_null(scu.doc);
+    }
+    char *code = scu.code, *hint = scu.hint;
+    scu.code = scu.hint = NULL;
+    gboolean valid = validate_canvas(0);
+    g_free(scu.code);
+    g_free(scu.hint);
+    scu.code = code;
+    scu.hint = hint;
+    if (!valid) {
+        return yyjson_mut_null(scu.doc);
+    }
+    CanvasSnapshot *canvas = &visual.canvas;
+    JsonResult *result = result_object();
+    result_integer(result, "width", canvas->width);
+    result_integer(result, "height", canvas->height);
+    result_integer(result, "id", canvas->id);
     return result;
 }
 
-static JsonResult *capture_desktop(Display *display, JsonValue *arguments)
+static gboolean validate_zoom(JsonValue *arguments, guint64 id)
 {
-    const char *frame_status = observation_frame(display);
-    if (frame_status == NULL) {
+    JsonValue *zoom = json_member(arguments, "zoom");
+    if (!zoom) {
+        return TRUE;
+    }
+    if (!yyjson_is_arr(zoom) || yyjson_arr_size(zoom) != 4) {
+        scu_fail("invalid_arguments", "zoom must be [left,top,right,bottom] in overview coordinates.");
+        return FALSE;
+    }
+    double corners[4];
+    for (guint i = 0; i < 4; i++) {
+        JsonValue *value = yyjson_arr_get(zoom, i);
+        corners[i] = yyjson_get_num(value);
+        if (!yyjson_is_num(value) || !isfinite(corners[i])) {
+            scu_fail("invalid_arguments", "Zoom coordinates must be finite numbers.");
+            return FALSE;
+        }
+    }
+    if (corners[0] < 0 || corners[1] < 0 || corners[2] <= corners[0] ||
+        corners[3] <= corners[1]) {
+        scu_fail("invalid_arguments", "Zoom must describe a positive rectangle inside the overview.");
+        return FALSE;
+    }
+    if (!validate_canvas(id)) {
+        return FALSE;
+    }
+    if (corners[2] > visual.canvas.width || corners[3] > visual.canvas.height) {
+        scu_fail("invalid_arguments", "Zoom rectangle lies outside the full desktop overview.");
+        return FALSE;
+    }
+    return TRUE;
+}
+
+/* A compositor capture is fresh by construction. Synchronize submitted input
+ * before requesting pixels, but never claim that the application has finished. */
+static gboolean prepare_capture(void)
+{
+    if (!visual_step()) {
+        return FALSE;
+    }
+    if (!visual.input_sequence || visual.observed_input_sequence == visual.input_sequence) {
+        return TRUE;
+    }
+    if (ei_api.new_ping && ei_api.ping && ei_api.ping_unref && ei_api.event_pong_get_ping) {
+        struct ei_ping *ping = ei_api.new_ping(visual.input);
+        visual.pending_ping = ping;
+        visual.ping_done = FALSE;
+        ei_api.ping(ping);
+        gint64 until = g_get_monotonic_time() + 250000;
+        while (!visual.ping_done && g_get_monotonic_time() < until) {
+            if (!scu_pause(2)) {
+                visual.pending_ping = NULL;
+                ei_api.ping_unref(ping);
+                return FALSE;
+            }
+        }
+        visual.pending_ping = NULL;
+        ei_api.ping_unref(ping);
+    }
+    gint64 remaining = visual.last_input_time + 100000 - g_get_monotonic_time();
+    if (remaining > 0 && !scu_pause((remaining + 999) / 1000)) {
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static GBytes *render_canvas(const CanvasLayout *layout, const CanvasRect *view,
+    guint width, guint height, GBytes **frames)
+{
+    guchar *output = g_try_malloc0((gsize)width * height * 3);
+    if (!output) {
+        scu_fail("capture_failed", "Could not allocate the desktop image.");
         return NULL;
     }
-    GdkPixbuf *image = pixbuf.new_from_bytes(display->pixels, GDK_COLORSPACE_RGB, FALSE,
-        8, display->width, display->height, display->width * 3);
-    if (image == NULL) {
-        return scu_fail("capture_failed", "Could not create an RGB image.");
+    const guchar *sources[MAX_DISPLAYS];
+    for (guint i = 0; i < layout->count; i++) {
+        sources[i] = g_bytes_get_data(frames[i], NULL);
     }
-    guint width = display->width, height = display->height;
-    guint maximum = (guint)json_number(arguments, "max_image_dimension", 0);
-    if (maximum != 0 && MAX(width, height) > maximum) {
-        double ratio = (double)maximum / MAX(width, height);
-        width = MAX(1, (guint)(width * ratio));
-        height = MAX(1, (guint)(height * ratio));
-        GdkPixbuf *scaled =
-            pixbuf.scale_simple(image, width, height, GDK_INTERP_BILINEAR);
-        g_object_unref(image);
-        image = scaled;
+    for (guint y = 0; y < height; y++) {
+        if ((y % 32) == 0 && !scu_tick()) {
+            g_free(output);
+            return NULL;
+        }
+        double logical_y = view->y + (y + 0.5) * view->height / height;
+        for (guint x = 0; x < width; x++) {
+            double logical_x = view->x + (x + 0.5) * view->width / width;
+            for (guint i = 0; i < layout->count; i++) {
+                const CanvasRect *tile = &layout->tiles[i];
+                if (!rect_contains(tile, logical_x, logical_y)) {
+                    continue;
+                }
+                guint native_width = layout->native_widths[i];
+                guint native_height = layout->native_heights[i];
+                double px = CLAMP((logical_x - tile->x) * native_width / tile->width - 0.5,
+                    0.0, native_width - 1.0);
+                double py = CLAMP((logical_y - tile->y) * native_height / tile->height - 0.5,
+                    0.0, native_height - 1.0);
+                guint x0 = (guint)px, y0 = (guint)py;
+                guint x1 = MIN(x0 + 1, native_width - 1);
+                guint y1 = MIN(y0 + 1, native_height - 1);
+                double fx = px - x0, fy = py - y0;
+                guchar *pixel = output + ((gsize)y * width + x) * 3;
+                for (guint channel = 0; channel < 3; channel++) {
+                    const guchar *data = sources[i];
+                    double upper = data[((gsize)y0 * native_width + x0) * 3 + channel] * (1 - fx) +
+                                   data[((gsize)y0 * native_width + x1) * 3 + channel] * fx;
+                    double lower = data[((gsize)y1 * native_width + x0) * 3 + channel] * (1 - fx) +
+                                   data[((gsize)y1 * native_width + x1) * 3 + channel] * fx;
+                    pixel[channel] = (guchar)(upper * (1 - fy) + lower * fy + 0.5);
+                }
+                break;
+            }
+        }
     }
-    GError *error = NULL;
+    return g_bytes_new_take(output, (gsize)width * height * 3);
+}
+
+
+
+static int lower_integer(double value)
+{
+    int integer = (int)value;
+    return value < integer ? integer - 1 : integer;
+}
+
+static GBytes *capture_area(const CanvasRect *view, gboolean native,
+    guint *width, guint *height, CanvasRect *captured)
+{
+    gint left = lower_integer(view->x), top = lower_integer(view->y);
+    gint right = -lower_integer(-(view->x + view->width));
+    gint bottom = -lower_integer(-(view->y + view->height));
+    GUnixFDList *fds = NULL;
+    GVariant *reply = computer_call("Capture",
+        g_variant_new("(iiiib)", left, top, right - left, bottom - top, native), &fds);
+    gint handle = -1;
+    if (reply && g_variant_is_of_type(reply, G_VARIANT_TYPE("(huu)"))) {
+        g_variant_get(reply, "(huu)", &handle, width, height);
+    }
+    int fd = fds && handle >= 0 ? g_unix_fd_list_get(fds, handle, NULL) : -1;
+    g_clear_pointer(&reply, g_variant_unref);
+    g_clear_object(&fds);
+    if (fd < 0) {
+        scu_fail("capture_failed", "The host did not return a capture descriptor.");
+        return NULL;
+    }
+    guint64 length = (guint64)*width * *height * 3;
+    struct stat st;
+    int seals = fcntl(fd, F_GET_SEALS);
+    if (*width == 0 || *height == 0 || length > MAX_FRAME_BYTES ||
+        scu_fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_size != (off_t)length ||
+        seals < 0 || (seals & (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK)) !=
+            (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK)) {
+        close(fd);
+        scu_fail("capture_failed", "Invalid, unsealed or oversized host capture.");
+        return NULL;
+    }
+    guchar *data = g_try_malloc(length);
+    if (!data) {
+        close(fd);
+        scu_fail("capture_failed", "Could not allocate capture pixels.");
+        return NULL;
+    }
+    gsize offset = 0;
+    while (offset < length) {
+        if (!visual_step()) {
+            break;
+        }
+        ssize_t n = read(fd, data + offset, MIN(length - offset, 1024u * 1024u));
+        if (n > 0) {
+            offset += n;
+        } else if (n == 0 || errno != EINTR) {
+            break;
+        }
+    }
+    close(fd);
+    if (offset != length) {
+        g_free(data);
+        scu_fail("capture_failed", "Host capture was truncated or interrupted.");
+        return NULL;
+    }
+    *captured = (CanvasRect){left, top, right - left, bottom - top};
+    return g_bytes_new_take(data, length);
+}
+
+static JsonResult *capture_desktop(JsonValue *arguments)
+{
+    gboolean zoomed = json_member(arguments, "zoom") != NULL;
+    if (zoomed && !validate_zoom(arguments, 0)) {
+        return NULL;
+    }
+    if (!zoomed && next_capture == MAX_CAPTURE_ID) {
+        return scu_fail("capture_limit", "Capture IDs exhausted. Reconnect the MCP client.");
+    }
+    CanvasLayout layout;
+    char *key = NULL;
+    if (!prepare_capture() || !canvas_layout(&layout, &key)) {
+        return NULL;
+    }
+    CanvasRect view = {layout.x, layout.y, layout.width, layout.height};
+    if (zoomed) {
+        JsonValue *zoom = json_member(arguments, "zoom");
+        double left = yyjson_get_num(yyjson_arr_get(zoom, 0));
+        double top = yyjson_get_num(yyjson_arr_get(zoom, 1));
+        double right = yyjson_get_num(yyjson_arr_get(zoom, 2));
+        double bottom = yyjson_get_num(yyjson_arr_get(zoom, 3));
+        view = (CanvasRect){layout.x + left * layout.width / visual.canvas.width,
+            layout.y + top * layout.height / visual.canvas.height,
+            (right - left) * layout.width / visual.canvas.width,
+            (bottom - top) * layout.height / visual.canvas.height};
+    }
+    guint maximum = (guint)json_number(arguments, "max_image_dimension", 1600);
+    /* Overviews need orientation pixels, while zoom always requests native
+     * detail. Avoid a huge native workspace allocation for ordinary overviews. */
+    gboolean native = zoomed || maximum == 0 || maximum > MAX(view.width, view.height);
+    guint source_width = 0, source_height = 0;
+    CanvasRect captured;
+    GBytes *source = capture_area(&view, native, &source_width, &source_height, &captured);
+    if (!source) {
+        g_free(key);
+        return NULL;
+    }
+    double width = view.width * source_width / captured.width;
+    double height = view.height * source_height / captured.height;
+    if (maximum && MAX(width, height) > maximum) {
+        double scale = maximum / MAX(width, height);
+        width *= scale;
+        height *= scale;
+    }
+    guint output_width = MAX(1, (guint)width), output_height = MAX(1, (guint)height);
+    if (width > G_MAXINT / 3 || height > G_MAXINT ||
+        (guint64)output_width * output_height * 4 > MAX_FRAME_BYTES) {
+        g_bytes_unref(source);
+        g_free(key);
+        return scu_fail("capture_failed", "Canvas exceeds the image memory limits; reduce max_image_dimension.");
+    }
+    CanvasLayout sampling = {.count = 1};
+    sampling.tiles[0] = captured;
+    sampling.native_widths[0] = source_width;
+    sampling.native_heights[0] = source_height;
+    GBytes *pixels = render_canvas(&sampling, &view, output_width, output_height, &source);
+    g_bytes_unref(source);
+    if (!pixels) {
+        g_free(key);
+        return NULL;
+    }
+    CanvasLayout current;
+    char *current_key = NULL;
+    gboolean unchanged = refresh_geometry() && canvas_layout(&current, &current_key) &&
+        !strcmp(key, current_key);
+    g_free(current_key);
+    if (!unchanged) {
+        g_bytes_unref(pixels);
+        g_free(key);
+        return scu_fail("stale_capture", "KWin geometry changed during capture. Request a new overview.");
+    }
+    GdkPixbuf *image = pixbuf.new_from_bytes(pixels, GDK_COLORSPACE_RGB, FALSE,
+        8, output_width, output_height, output_width * 3);
+    g_bytes_unref(pixels);
     char *png = NULL;
     gsize length = 0;
-    gboolean saved = image != NULL &&
-                     pixbuf.save_to_buffer(image, &png, &length, "png", &error, NULL);
-    if (image != NULL) {
-        g_object_unref(image);
-    }
+    GError *error = NULL;
+    gboolean saved = image && pixbuf.save_to_buffer(image, &png, &length, "png", &error, NULL);
+    g_clear_object(&image);
     if (!saved || length > 32u * 1024u * 1024u) {
-        scu_fail("capture_failed",
-            error != NULL
-                ? error->message
-                : "PNG exceeds the 32 MiB image limit; reduce max_image_dimension.");
+        scu_fail("capture_failed", error ? error->message : "PNG exceeds the 32 MiB image limit.");
         g_clear_error(&error);
         g_free(png);
+        g_free(key);
         return NULL;
+    }
+    if (!zoomed) {
+        g_free(visual.canvas.key);
+        visual.canvas = (CanvasSnapshot){.id = ++next_capture,
+            .key = key, .width = output_width, .height = output_height,
+            .layout = layout};
+    } else {
+        g_free(key);
     }
     char *base64 = g_base64_encode((guchar *)png, length);
     g_free(png);
@@ -2565,20 +2565,250 @@ static JsonResult *capture_desktop(Display *display, JsonValue *arguments)
     result_string(block, "data", base64);
     result_append(scu.images, block);
     g_free(base64);
-    g_free(display->capture_id);
-    display->capture_id = g_strdup_printf("c%" G_GUINT64_FORMAT, ++next_capture);
-    display->capture_width = width;
-    display->capture_height = height;
-    display->capture_revision = display->revision;
-    display->capture_frame_sequence = display->frame_sequence;
-    JsonResult *result = display_metadata(display);
-    result_string(result, "capture_id", display->capture_id);
-    result_string(result, "screenshot_mime_type", "image/png");
-    result_integer(result, "screenshot_width", width);
-    result_integer(result, "screenshot_height", height);
-    result_string(result, "frame_status", frame_status);
+    JsonResult *result = result_object();
+    result_integer(result, "id", visual.canvas.id);
+    result_integer(result, "width", output_width);
+    result_integer(result, "height", output_height);
+    if (zoomed) {
+        result_member(result, "zoom", yyjson_val_mut_copy(scu.doc, json_member(arguments, "zoom")));
+    }
+    visual.observed_input_sequence = visual.input_sequence;
     return result;
 }
+
+/* Public window IDs name KWin windows, including windows with no AT-SPI tree. */
+static GHashTable *kwin_window_ids;
+static guint next_kwin_window = 1;
+static guint kwin_window_id(const char *key)
+{
+    if (!kwin_window_ids) {
+        kwin_window_ids = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    }
+    guint id = GPOINTER_TO_UINT(g_hash_table_lookup(kwin_window_ids, key));
+    if (!id) {
+        id = next_kwin_window++;
+        g_hash_table_insert(kwin_window_ids, g_strdup(key), GUINT_TO_POINTER(id));
+    }
+    return id;
+}
+
+static JsonResult *overview_rect(const CanvasRect *rect)
+{
+    CanvasSnapshot *canvas = &visual.canvas;
+    JsonResult *result = result_object();
+    result_number(result, "x", (rect->x - canvas->layout.x) * canvas->width / canvas->layout.width);
+    result_number(result, "y", (rect->y - canvas->layout.y) * canvas->height / canvas->layout.height);
+    result_number(result, "width", rect->width * canvas->width / canvas->layout.width);
+    result_number(result, "height", rect->height * canvas->height / canvas->layout.height);
+    return result;
+}
+
+static JsonResult *kwin_apps(void)
+{
+    JsonResult *apps = result_array();
+    GHashTable *grouped = g_hash_table_new(g_direct_hash, g_direct_equal);
+    JsonValue *windows_json = json_member(yyjson_doc_get_root(visual.geometry), "windows");
+    size_t i, n;
+    JsonValue *window;
+    yyjson_arr_foreach(windows_json, i, n, window) {
+        const char *key = json_string(window, "key");
+        guint pid = json_number(window, "pid", 0);
+        CanvasRect frame;
+        if (!key || !read_rect(json_member(window, "frame"), &frame)) {
+            continue;
+        }
+        JsonResult *app = g_hash_table_lookup(grouped, GUINT_TO_POINTER(pid));
+        if (!app) {
+            app = result_object();
+            result_integer(app, "pid", pid);
+            result_string(app, "app_name", json_string(window, "app_name"));
+            result_member(app, "windows", result_array());
+            result_append(apps, app);
+            g_hash_table_insert(grouped, GUINT_TO_POINTER(pid), app);
+        }
+        JsonResult *item = result_object();
+        result_integer(item, "window_id", kwin_window_id(key));
+        result_string(item, "title", json_string(window, "title"));
+        result_member(item, "bounds", overview_rect(&frame));
+        result_boolean(item, "shown", json_boolean(window, "shown"));
+        result_boolean(item, "active", json_boolean(window, "active"));
+        result_append(yyjson_mut_obj_get(app, "windows"), item);
+    }
+    g_hash_table_unref(grouped);
+    return apps;
+}
+
+/* Validate both adapters before capturing or starting a batch. Discovery of
+ * MCP schemas remains available, but there is no reduced-functionality mode. */
+static gboolean require_computer_ready(void)
+{
+    if (!require_computer_access()) {
+        return FALSE;
+    }
+    for (guint i = 0; libs[i]; i++) {
+        if (!scu_library(libs[i])) {
+            char *hint = g_strdup_printf("Missing library %s. Install the package for it.", libs[i]);
+            scu_fail("missing_dependency", hint);
+            g_free(hint);
+            return FALSE;
+        }
+    }
+    if (!load_atspi() || !load_visual_libraries()) {
+        scu_fail("missing_dependency", "The installed computer-use libraries are missing required functions. Update the guest libraries.");
+        return FALSE;
+    }
+    return scu_gate() && atspi_worker_call("check_ready", NULL) != NULL;
+}
+
+static JsonResult *kwin_status(void)
+{
+    if (!require_computer_ready() || !ensure_visual_session()) {
+        return NULL;
+    }
+    if (!capture_desktop(NULL)) {
+        return NULL;
+    }
+    JsonResult *result = result_object();
+    JsonResult *canvas = canvas_status();
+    if (yyjson_mut_is_null(canvas)) {
+        return scu_fail("stale_capture", "Desktop geometry changed during status. Take a new full overview.");
+    }
+    result_member(result, "canvas", canvas);
+    result_member(result, "apps", kwin_apps());
+    return result;
+}
+
+/* Semantic rectangles are private window-relative coordinates until a unique
+ * KWin association anchors them. Raw rectangles never cross the MCP boundary. */
+static JsonResult *kwin_window_state(JsonValue *args)
+{
+    if (!ensure_visual_session()) {
+        return NULL;
+    }
+    if (!visual.canvas.id || !validate_canvas(0)) {
+        g_clear_pointer(&scu.code, g_free);
+        g_clear_pointer(&scu.hint, g_free);
+        guint images = yyjson_mut_arr_size(scu.images);
+        if (!capture_desktop(NULL)) {
+            return NULL;
+        }
+        yyjson_mut_arr_remove_range(scu.images, images, yyjson_mut_arr_size(scu.images) - images);
+    }
+    JsonValue *window = NULL, *candidate;
+    size_t i, n;
+    yyjson_arr_foreach(json_member(yyjson_doc_get_root(visual.geometry), "windows"), i, n, candidate) {
+        if (json_string(candidate, "key") && kwin_window_id(json_string(candidate, "key")) ==
+                json_number(args, "window_id", -1) && json_number(candidate, "pid", -1) ==
+                json_number(args, "pid", -2)) {
+            window = candidate;
+            break;
+        }
+    }
+    CanvasRect client;
+    if (!window || !read_rect(json_member(window, "client"), &client)) {
+        return scu_fail("window_unavailable", "KWin window is unavailable. Call status again.");
+    }
+    char *window_key = g_strdup(json_string(window, "key"));
+    char *window_signature = yyjson_val_write(window, 0, NULL);
+    JsonResult *discovery = atspi_worker_call("list_apps", NULL);
+    if (!discovery) {
+        g_free(window_key);
+        free(window_signature);
+        return NULL;
+    }
+    yyjson_doc *listing = yyjson_mut_val_imut_copy(discovery, NULL);
+    JsonValue *match = NULL;
+    CanvasRect anchor = {0};
+    guint matches = 0;
+    double ratio = 1;
+    JsonValue *app;
+    yyjson_arr_foreach(json_member(yyjson_doc_get_root(listing), "apps"), i, n, app) {
+        if (json_number(app, "pid", -1) != json_number(args, "pid", -2)) {
+            continue;
+        }
+        size_t j, m;
+        yyjson_arr_foreach(json_member(app, "windows"), j, m, candidate) {
+            CanvasRect root;
+            if (g_strcmp0(json_string(candidate, "title"), json_string(window, "title")) ||
+                !read_rect(json_member(candidate, "bounds"), &root)) {
+                continue;
+            }
+            /* Some accessibility bridges use physical pixels. Accept only a
+             * scale present on this desktop, never stretch an arbitrary root. */
+            for (guint k = 0; k <= visual.display_count; k++) {
+                double scale = k == 0 ? 1 : (double)visual.displays[k - 1].width /
+                    visual.displays[k - 1].logical_width;
+                if (fabs(root.width - client.width * scale) <= 2 &&
+                    fabs(root.height - client.height * scale) <= 2) {
+                    match = candidate;
+                    anchor = root;
+                    ratio = 1 / scale;
+                    matches++;
+                    break;
+                }
+            }
+        }
+    }
+    if (matches != 1) {
+        yyjson_doc_free(listing);
+        g_free(window_key);
+        free(window_signature);
+        return scu_fail("accessibility_window_unavailable", "No unique accessibility window matches this KWin window and client geometry. Use screenshot-based input.");
+    }
+    yyjson_mut_doc *request = yyjson_mut_doc_new(NULL);
+    JsonResult *copy = yyjson_val_mut_copy(request, args);
+    yyjson_mut_obj_put(copy, yyjson_mut_str(request, "window_id"),
+        yyjson_mut_uint(request, json_number(match, "window_id", 0)));
+    yyjson_mut_obj_put(copy, yyjson_mut_str(request, "tree_format"), yyjson_mut_str(request, "both"));
+    yyjson_doc *parameters = yyjson_mut_val_imut_copy(copy, NULL);
+    yyjson_mut_doc_free(request);
+    yyjson_doc_free(listing);
+    JsonResult *tree = atspi_worker_call("get_window_state", yyjson_doc_get_root(parameters));
+    yyjson_doc_free(parameters);
+    if (!tree || !refresh_geometry() || !validate_canvas(0)) {
+        g_free(window_key);
+        free(window_signature);
+        return NULL;
+    }
+    gboolean same = FALSE;
+    yyjson_arr_foreach(json_member(yyjson_doc_get_root(visual.geometry), "windows"), i, n, candidate) {
+        if (!g_strcmp0(json_string(candidate, "key"), window_key)) {
+            char *signature = yyjson_val_write(candidate, 0, NULL);
+            same = !strcmp(signature, window_signature);
+            free(signature);
+        }
+    }
+    g_free(window_key);
+    free(window_signature);
+    if (!same) {
+        return scu_fail("stale_window_geometry", "Window geometry changed during the tree read. Observe again.");
+    }
+    result_integer(tree, "window_id", json_number(args, "window_id", 0));
+    result_integer(tree, "id", visual.canvas.id);
+    JsonResult *rows = yyjson_mut_obj_get(tree, "elements"), *row;
+    yyjson_mut_arr_foreach(rows, i, n, row) {
+        yyjson_doc *raw = yyjson_mut_val_imut_copy(yyjson_mut_obj_get(row, "frame"), NULL);
+        CanvasRect rect;
+        if (raw && read_rect(yyjson_doc_get_root(raw), &rect)) {
+            rect.x = client.x + (rect.x - anchor.x) * ratio;
+            rect.y = client.y + (rect.y - anchor.y) * ratio;
+            rect.width *= ratio;
+            rect.height *= ratio;
+            result_member(row, "frame", overview_rect(&rect));
+        } else {
+            result_member(row, "frame", yyjson_mut_null(scu.doc));
+        }
+        yyjson_doc_free(raw);
+    }
+    const char *format = json_string(args, "tree_format");
+    if (!format || !strcmp(format, "markdown")) {
+        yyjson_mut_obj_remove_str(tree, "elements");
+    } else if (!strcmp(format, "elements")) {
+        yyjson_mut_obj_remove_str(tree, "tree_markdown");
+    }
+    return tree;
+}
+
 
 static InputDevice *capable_device(enum ei_device_capability capability)
 {
@@ -2612,74 +2842,46 @@ static InputDevice *wait_for_device(enum ei_device_capability capability)
     return device;
 }
 
-/* Pixel targets are display-local. Mapping IDs pair PipeWire images with EIS
- * regions without assuming that native pixels equal compositor logical units. */
-static gboolean pointer_target(Display *display, JsonValue *arguments, double x,
-    double y, struct ei_device **device_out, double *screen_x, double *screen_y)
+/* Resolve overview coordinates without ever interpreting them as zoom-local.
+ * A gap is allowed only for intermediate samples of a held-button drag. */
+static gboolean pointer_target(JsonValue *arguments, double x, double y,
+    gboolean allow_gap, struct ei_device **device_out, double *screen_x, double *screen_y)
 {
-    if (display->capture_id == NULL || display->capture_revision != display->revision ||
-        (json_string(arguments, "capture_id") != NULL &&
-            strcmp(json_string(arguments, "capture_id"), display->capture_id) != 0)) {
-        scu_fail("stale_capture", "Take a new get_desktop_state screenshot for this "
-                                  "display before sending pixel input.");
+    *device_out = NULL;
+    if (!validate_canvas(yyjson_get_uint(json_member(arguments, "id")))) {
         return FALSE;
     }
-    if (x < 0 || y < 0 || x >= display->capture_width || y >= display->capture_height) {
-        scu_fail("invalid_coordinates",
-            "Coordinates lie outside the selected display's current screenshot.");
+    CanvasSnapshot *canvas = &visual.canvas;
+    if (!isfinite(x) || !isfinite(y) || x < 0 || y < 0 ||
+        x >= canvas->width || y >= canvas->height) {
+        scu_fail("invalid_coordinates", "Coordinates lie outside the full desktop overview.");
         return FALSE;
     }
-    struct ei_region *chosen = NULL;
-    struct ei_device *chosen_device = NULL;
-    guint matches = 0, total_regions = 0;
-    struct ei_region *only_region = NULL;
-    struct ei_device *only_device = NULL;
-    if (wait_for_device(EI_DEVICE_CAP_POINTER_ABSOLUTE) == NULL) {
-        return FALSE;
-    }
-    for (guint index = 0; index < visual.devices->len; index++) {
-        InputDevice *device = g_ptr_array_index(visual.devices, index);
-        if (!device->resumed || !ei_api.device_has_capability(
-                                    device->device, EI_DEVICE_CAP_POINTER_ABSOLUTE)) {
+    double logical_x = canvas->layout.x + x * canvas->layout.width / canvas->width;
+    double logical_y = canvas->layout.y + y * canvas->layout.height / canvas->height;
+    for (guint i = 0; i < canvas->layout.count; i++) {
+        CanvasRect *tile = &canvas->layout.tiles[i];
+        if (!rect_contains(tile, logical_x, logical_y)) {
             continue;
         }
-        for (guint region_index = 0;; region_index++) {
-            struct ei_region *region =
-                ei_api.device_get_region(device->device, region_index);
-            if (region == NULL) {
-                break;
-            }
-            total_regions++;
-            only_region = region;
-            only_device = device->device;
-            const char *mapping = ei_api.region_get_mapping_id(region);
-            if (display->mapping_id != NULL && mapping != NULL &&
-                strcmp(mapping, display->mapping_id) == 0) {
-                chosen = region;
-                chosen_device = device->device;
-                matches++;
-            }
+        RegionBinding binding;
+        if (!bind_stream_region(&visual.displays[i], &binding)) {
+            scu_fail("ambiguous_display_mapping",
+                "The image and input region cannot be paired uniquely. No pointer input was sent.");
+            return FALSE;
         }
+        *device_out = binding.device;
+        *screen_x = (int32_t)ei_api.region_get_x(binding.region) +
+                    (logical_x - tile->x) * ei_api.region_get_width(binding.region) / tile->width;
+        *screen_y = (int32_t)ei_api.region_get_y(binding.region) +
+                    (logical_y - tile->y) * ei_api.region_get_height(binding.region) / tile->height;
+        return TRUE;
     }
-    if (matches == 0 && display->mapping_id == NULL && visual.display_count == 1 &&
-        total_regions == 1) {
-        chosen = only_region;
-        chosen_device = only_device;
-        matches = 1;
+    if (allow_gap) {
+        return TRUE;
     }
-    if (matches != 1 || ei_api.region_get_width(chosen) == 0 ||
-        ei_api.region_get_height(chosen) == 0) {
-        scu_fail("ambiguous_display_mapping",
-            "PipeWire and EIS regions cannot be paired "
-            "uniquely. No pointer input was sent.");
-        return FALSE;
-    }
-    *device_out = chosen_device;
-    *screen_x = (int32_t)ei_api.region_get_x(chosen) +
-                x * ei_api.region_get_width(chosen) / display->capture_width;
-    *screen_y = (int32_t)ei_api.region_get_y(chosen) +
-                y * ei_api.region_get_height(chosen) / display->capture_height;
-    return TRUE;
+    scu_fail("invalid_coordinates", "Coordinates fall in a gap between granted desktop regions.");
+    return FALSE;
 }
 
 static guint button_code(const char *button)
@@ -2695,123 +2897,200 @@ static guint button_code(const char *button)
 
 static gboolean device_resumed(struct ei_device *raw);
 
-static gboolean click_pointer(struct ei_device *pointer, guint button, guint count)
+static InputDevice *seat_device(struct ei_device *pointer, enum ei_device_capability capability)
 {
-    InputDevice *device = wait_for_device(EI_DEVICE_CAP_BUTTON);
-    if (device == NULL) {
-        return FALSE;
+    /* KWin exposes both relative and absolute pointer devices. Keep motion,
+     * buttons and scrolling on the same device whenever it supports them;
+     * use another device on the seat only when a capability is split out. */
+    for (guint i = 0; visual.devices && i < visual.devices->len; i++) {
+        InputDevice *device = g_ptr_array_index(visual.devices, i);
+        if (device->device == pointer && device->resumed &&
+            ei_api.device_has_capability(pointer, capability)) {
+            return device;
+        }
     }
-    (void)pointer;
-    struct ei_device *raw = device->device;
-    for (guint index = 0; index < count; index++) {
-        if (!visual_step() || !device_resumed(raw)) {
+    struct ei_seat *seat = ei_api.device_get_seat(pointer);
+    for (guint i = 0; visual.devices && i < visual.devices->len; i++) {
+        InputDevice *device = g_ptr_array_index(visual.devices, i);
+        if (device->resumed && ei_api.device_get_seat(device->device) == seat &&
+            ei_api.device_has_capability(device->device, capability)) {
+            return device;
+        }
+    }
+    scu_fail("input_unavailable", "The pointer's input seat has no compatible resumed device.");
+    return NULL;
+}
+
+static gboolean click_pointer(struct ei_device *button_device, guint button, guint count)
+{
+    for (guint i = 0; i < count; i++) {
+        if (!visual_step() || !device_resumed(button_device)) {
             return FALSE;
         }
-        ei_api.device_button_button(raw, button, true);
-        input_frame(raw);
-        visual.held_device = raw;
+        ei_api.device_button_button(button_device, button, true);
+        input_frame(button_device);
+        visual.held_device = button_device;
         visual.held_button = button;
         if (!scu_pause(20)) {
             release_input();
             return FALSE;
         }
         release_input();
-        if (index + 1 < count && !scu_pause(60)) {
+        if (i + 1 < count && !scu_pause(60)) {
             return FALSE;
         }
     }
     return TRUE;
 }
 
-static JsonResult *pointer_action(
-    const char *tool, Display *display, JsonValue *arguments)
+/* Slab intersection catches even narrow regions between timed drag samples.
+ * Check every occupied segment's route before any movement or button press. */
+static gboolean drag_crosses_tile(const CanvasRect *tile, double x, double y,
+    double to_x, double to_y)
 {
-    double x = json_number(arguments, strcmp(tool, "drag") == 0 ? "from_x" : "x", -1);
-    double y = json_number(arguments, strcmp(tool, "drag") == 0 ? "from_y" : "y", -1);
-    struct ei_device *pointer;
-    double screen_x, screen_y;
-    if (!pointer_target(display, arguments, x, y, &pointer, &screen_x, &screen_y)) {
-        return NULL;
-    }
-    struct ei_device *end_pointer = NULL;
-    double end_x = 0, end_y = 0;
-    if (strcmp(tool, "drag") == 0 &&
-        !pointer_target(display, arguments, json_number(arguments, "to_x", -1),
-            json_number(arguments, "to_y", -1), &end_pointer, &end_x, &end_y)) {
-        return NULL;
-    }
-    if (end_pointer != NULL && end_pointer != pointer) {
-        return scu_fail(
-            "unsupported_feature", "Cross-display dragging is unsupported.");
-    }
-    InputDevice *button = NULL, *scroll = NULL;
-    if (strcmp(tool, "drag") == 0) {
-        button = wait_for_device(EI_DEVICE_CAP_BUTTON);
-        if (button == NULL) {
-            return NULL;
-        }
-    }
-    if (strcmp(tool, "scroll") == 0) {
-        scroll = wait_for_device(EI_DEVICE_CAP_SCROLL);
-        if (scroll == NULL) {
-            return NULL;
-        }
-    }
-    struct ei_device *button_device = button != NULL ? button->device : NULL;
-    struct ei_device *scroll_device = scroll != NULL ? scroll->device : NULL;
-    if (!device_resumed(pointer) ||
-        (button_device != NULL && !device_resumed(button_device)) ||
-        (scroll_device != NULL && !device_resumed(scroll_device))) {
-        return NULL;
-    }
-    ei_api.device_pointer_motion_absolute(pointer, screen_x, screen_y);
-    input_frame(pointer);
-    if (strcmp(tool, "drag") == 0) {
-        guint code = button_code(json_string(arguments, "button"));
-        ei_api.device_button_button(button_device, code, true);
-        input_frame(button_device);
-        visual.held_device = button_device;
-        visual.held_button = code;
-        guint duration = (guint)json_number(arguments, "duration_ms", 500);
-        guint steps = MAX(1, duration / 16);
-        for (guint index = 1; index <= steps; index++) {
-            if (!scu_pause(duration / steps) || !visual_step() ||
-                !device_resumed(pointer) || !device_resumed(button_device)) {
-                release_input();
-                return NULL;
+    double enter = 0, leave = 1;
+    double origins[] = {x, y}, deltas[] = {to_x - x, to_y - y};
+    double minimum[] = {tile->x, tile->y};
+    double maximum[] = {tile->x + tile->width, tile->y + tile->height};
+    for (guint axis = 0; axis < 2; axis++) {
+        if (deltas[axis] == 0) {
+            if (origins[axis] < minimum[axis] || origins[axis] >= maximum[axis]) {
+                return FALSE;
             }
-            double fraction = (double)index / steps;
-            ei_api.device_pointer_motion_absolute(pointer,
-                screen_x + (end_x - screen_x) * fraction,
-                screen_y + (end_y - screen_y) * fraction);
-            input_frame(pointer);
+            continue;
         }
+        double a = (minimum[axis] - origins[axis]) / deltas[axis];
+        double b = (maximum[axis] - origins[axis]) / deltas[axis];
+        enter = MAX(enter, MIN(a, b));
+        leave = MIN(leave, MAX(a, b));
+    }
+    return enter < leave;
+}
+
+typedef struct {
+    struct ei_device *device; /* Owned until this operation finishes. */
+    double x, y;
+} PointerSample;
+
+static JsonResult *pointer_action(const char *tool, JsonValue *arguments)
+{
+    gboolean drag = strcmp(tool, "drag") == 0;
+    double x = json_number(arguments, drag ? "from_x" : "x", -1);
+    double y = json_number(arguments, drag ? "from_y" : "y", -1);
+    double to_x = drag ? json_number(arguments, "to_x", -1) : x;
+    double to_y = drag ? json_number(arguments, "to_y", -1) : y;
+    guint duration = (guint)json_number(arguments, "duration_ms", 500);
+    guint count = drag ? MAX(1, duration / 16) : 0;
+    PointerSample samples[626] = {0};
+    struct ei_device *buttons = NULL, *scroll = NULL;
+    JsonResult *result = NULL;
+    if (wait_for_device(EI_DEVICE_CAP_POINTER_ABSOLUTE) == NULL) {
+        return NULL;
+    }
+    for (guint i = 0; i <= count; i++) {
+        double fraction = count ? (double)i / count : 0;
+        struct ei_device *raw = NULL;
+        if (!pointer_target(arguments, x + (to_x - x) * fraction,
+                y + (to_y - y) * fraction, drag && i > 0 && i < count,
+                &raw, &samples[i].x, &samples[i].y)) {
+            goto done;
+        }
+        if (raw) {
+            samples[i].device = ei_api.device_ref(raw);
+        }
+    }
+    struct ei_device *pointer = samples[0].device;
+    struct ei_seat *seat = ei_api.device_get_seat(pointer);
+    if (drag) {
+        CanvasSnapshot *canvas = &visual.canvas;
+        double logical_x = canvas->layout.x + x * canvas->layout.width / canvas->width;
+        double logical_y = canvas->layout.y + y * canvas->layout.height / canvas->height;
+        double logical_to_x = canvas->layout.x + to_x * canvas->layout.width / canvas->width;
+        double logical_to_y = canvas->layout.y + to_y * canvas->layout.height / canvas->height;
+        for (guint i = 0; i < canvas->layout.count; i++) {
+            if (!drag_crosses_tile(&canvas->layout.tiles[i], logical_x, logical_y,
+                    logical_to_x, logical_to_y)) {
+                continue;
+            }
+            RegionBinding binding;
+            if (!bind_stream_region(&visual.displays[i], &binding) ||
+                ei_api.device_get_seat(binding.device) != seat) {
+                scu_fail("input_unavailable",
+                    "The drag crosses an ambiguous region or incompatible input seat. No input was sent.");
+                goto done;
+            }
+        }
+    }
+    gboolean click = strcmp(tool, "move_cursor") != 0 && strcmp(tool, "scroll") != 0;
+    if (click) {
+        InputDevice *device = seat_device(pointer, EI_DEVICE_CAP_BUTTON);
+        if (!device) {
+            goto done;
+        }
+        buttons = ei_api.device_ref(device->device);
+    }
+    if (!strcmp(tool, "scroll")) {
+        InputDevice *device = seat_device(pointer, EI_DEVICE_CAP_SCROLL);
+        if (!device) {
+            goto done;
+        }
+        scroll = ei_api.device_ref(device->device);
+    }
+    /* References keep removed devices alive; resumed checks prevent submitting
+     * to them. A mapping change during a drag aborts rather than retargeting. */
+    for (guint i = 0; i <= count; i++) {
+        if ((i && !scu_pause(duration / count)) || !visual_step() ||
+            !validate_canvas(yyjson_get_uint(json_member(arguments, "id"))) ||
+            (buttons && !device_resumed(buttons)) || (scroll && !device_resumed(scroll))) {
+            goto done;
+        }
+        struct ei_device *raw = samples[i].device;
+        if (raw) {
+            if (!device_resumed(raw)) {
+                goto done;
+            }
+            ei_api.device_pointer_motion_absolute(raw, samples[i].x, samples[i].y);
+            input_frame(raw);
+        }
+        if (i == 0 && drag) {
+            guint code = button_code(json_string(arguments, "button"));
+            ei_api.device_button_button(buttons, code, true);
+            input_frame(buttons);
+            visual.held_device = buttons;
+            visual.held_button = code;
+        }
+    }
+    if (drag) {
         release_input();
-    } else if (strcmp(tool, "scroll") == 0) {
+    } else if (scroll) {
         const char *direction = json_string(arguments, "direction");
         gint amount = (gint)json_number(arguments, "amount", 1) * 120;
-        gint dx = strcmp(direction, "left") == 0    ? -amount
-                  : strcmp(direction, "right") == 0 ? amount
-                                                    : 0;
-        gint dy = strcmp(direction, "up") == 0     ? -amount
-                  : strcmp(direction, "down") == 0 ? amount
-                                                   : 0;
-        ei_api.device_scroll_discrete(scroll_device, dx, dy);
-        input_frame(scroll_device);
-    } else if (strcmp(tool, "move_cursor") != 0) {
-        guint count = strcmp(tool, "double_click") == 0
-                          ? 2
-                          : (guint)json_number(arguments, "count", 1);
-        guint code = strcmp(tool, "right_click") == 0
-                         ? BTN_RIGHT
-                         : button_code(json_string(arguments, "button"));
-        if (!click_pointer(pointer, code, count)) {
-            return NULL;
+        gint dx = !strcmp(direction, "left") ? -amount : !strcmp(direction, "right") ? amount : 0;
+        gint dy = !strcmp(direction, "up") ? -amount : !strcmp(direction, "down") ? amount : 0;
+        ei_api.device_scroll_discrete(scroll, dx, dy);
+        input_frame(scroll);
+    } else if (buttons) {
+        guint repeats = !strcmp(tool, "double_click") ? 2 : (guint)json_number(arguments, "count", 1);
+        guint code = !strcmp(tool, "right_click") ? BTN_RIGHT : button_code(json_string(arguments, "button"));
+        if (!click_pointer(buttons, code, repeats)) {
+            goto done;
         }
     }
-    return scu_action("global_input", "foreground", FALSE,
-        "Foreground pointer input submitted; inspect a fresh screenshot to verify its "
-        "effect.");
+    result = scu_action("global_input", FALSE, "Pointer input submitted; inspect the resulting state.");
+done:
+    release_input();
+    for (guint i = 0; i <= count; i++) {
+        if (samples[i].device) {
+            ei_api.device_unref(samples[i].device);
+        }
+    }
+    if (buttons) {
+        ei_api.device_unref(buttons);
+    }
+    if (scroll) {
+        ei_api.device_unref(scroll);
+    }
+    return result;
 }
 
 typedef struct {
@@ -3020,17 +3299,12 @@ static JsonResult *keyboard_action(const char *tool, JsonValue *arguments)
     if (!press_codes(device, codes, code_count)) {
         return NULL;
     }
-    return scu_action("global_input", "foreground", FALSE,
+    return scu_action("global_input", FALSE,
         "Foreground key chord submitted; inspect the resulting state.");
 }
 
 static gboolean paste_text(struct ei_device *device, KeyboardMap *map, const char *text)
 {
-    if (!visual.clipboard_enabled) {
-        scu_fail("text_unrepresentable", "Text is absent from the keyboard map and the "
-                                         "host did not grant clipboard fallback.");
-        return FALSE;
-    }
     KeyStroke control, paste;
     if (!lookup_keysym(map, XKB_KEY_Control_L, &control) ||
         !lookup_keysym(map, XKB_KEY_v, &paste)) {
@@ -3038,33 +3312,50 @@ static gboolean paste_text(struct ei_device *device, KeyboardMap *map, const cha
             "Clipboard paste shortcut is unavailable in the keyboard map.");
         return FALSE;
     }
-    g_free(visual.clipboard_text);
-    visual.clipboard_text = g_strdup(text);
-    const char *types[] = {
-        "text/plain;charset=utf-8", "text/plain", "UTF8_STRING", NULL};
-    GVariantBuilder options;
-    g_variant_builder_init(&options, G_VARIANT_TYPE_VARDICT);
-    g_variant_builder_add(
-        &options, "{sv}", "mime_types", g_variant_new_strv(types, -1));
-    GError *error = NULL;
-    GVariant *reply = portal_call(PORTAL_CLIPBOARD, "SetSelection",
-        g_variant_new("(oa{sv})", visual.session, &options), &error);
-    if (reply == NULL) {
-        scu_fail("clipboard_unavailable",
-            error != NULL ? error->message : "Host clipboard rejected the selection.");
-        g_clear_error(&error);
+    gboolean saved_selection = FALSE;
+    JsonValue *active = NULL, *window;
+    size_t index, count;
+    yyjson_arr_foreach(json_member(yyjson_doc_get_root(visual.geometry), "windows"), index, count, window) {
+        if (json_boolean(window, "active")) {
+            active = window;
+            break;
+        }
+    }
+    if (active && scu_library("libatspi.so.0") && scu_gate()) {
+        JsonResult *target = result_object();
+        result_integer(target, "pid", json_number(active, "pid", 0));
+        result_string(target, "title", json_string(active, "title"));
+        yyjson_doc *parameters = yyjson_mut_val_imut_copy(target, NULL);
+        JsonResult *guard = atspi_worker_call("save_selection", yyjson_doc_get_root(parameters));
+        yyjson_doc_free(parameters);
+        if (!guard) {
+            return FALSE;
+        }
+        saved_selection = yyjson_mut_is_true(yyjson_mut_obj_get(guard, "saved"));
+    } else {
+        /* A missing AT-SPI bridge does not forbid foreground paste. The
+         * clipboard/PRIMARY replacement warning still describes its effects. */
+        g_clear_pointer(&scu.code, g_free);
+        g_clear_pointer(&scu.hint, g_free);
+    }
+    GVariant *reply = computer_call("SetClipboard", g_variant_new("(s)", text), NULL);
+    if (!reply) {
         return FALSE;
     }
     g_variant_unref(reply);
-    /* Ctrl+V addresses the regular clipboard. Shift+Insert can instead paste
-     * PRIMARY on Linux, which this portal deliberately does not replace. */
+    if (saved_selection) {
+        if (!scu_pause(50) || !atspi_worker_call("restore_selection", NULL) ||
+            !scu_pause(50) || !atspi_worker_call("verify_selection", NULL)) {
+            return FALSE;
+        }
+    }
+    /* Ctrl+V addresses the regular clipboard. Klipper's setter also replaces
+     * PRIMARY, which can clear a GTK selection; report that material effect. */
     guint codes[] = {control.code, paste.code};
     if (!press_codes(device, codes, G_N_ELEMENTS(codes))) {
         return FALSE;
     }
-    /* Serve the application's asynchronous SelectionTransfer before the next
-     * ordered action changes its selection or focus. This is delivery time,
-     * not proof that the application accepted the paste. */
+    /* Allow the receiving application to consume the new clipboard selection. */
     return scu_pause(100);
 }
 
@@ -3073,7 +3364,7 @@ static JsonResult *type_foreground_text(JsonValue *arguments)
     const char *text = json_string(arguments, "text");
     if (*text == '\0') {
         return scu_action(
-            "global_input", "foreground", FALSE, "Empty text: no input sent.");
+            "global_input", FALSE, "Empty text: no input sent.");
     }
     InputDevice *text_device = capable_device(EI_DEVICE_CAP_TEXT);
     if (text_device != NULL && ei_api.device_text_utf8 != NULL) {
@@ -3093,7 +3384,7 @@ static JsonResult *type_foreground_text(JsonValue *arguments)
             g_free(chunk);
             cursor = end;
         }
-        return scu_action("global_input", "foreground", FALSE,
+        return scu_action("global_input", FALSE,
             "UTF-8 input submitted through EIS text; verify the visible result.");
     }
     InputDevice *input = wait_for_device(EI_DEVICE_CAP_KEYBOARD);
@@ -3130,9 +3421,9 @@ static JsonResult *type_foreground_text(JsonValue *arguments)
         if (!ok) {
             return NULL;
         }
-        JsonResult *result = scu_action("global_input", "foreground", FALSE, NULL);
+        JsonResult *result = scu_action("global_input", FALSE, NULL);
         result_string(result, "route", "clipboard_paste");
-        result_string(result, "warning", "Clipboard text replaced.");
+        result_string(result, "warning", "Clipboard and primary selection text replaced.");
         return result;
     }
     free_keyboard_map(&map);
@@ -3146,37 +3437,16 @@ static JsonResult *type_foreground_text(JsonValue *arguments)
         }
     }
     g_array_unref(strokes);
-    return scu_action("global_input", "foreground", FALSE,
+    return scu_action("global_input", FALSE,
         "Text submitted using the compositor's keyboard map; verify the visible "
         "result.");
 }
 
 static JsonResult *scu_visual(const char *tool, JsonValue *arguments)
 {
-    const char *mode = json_string(arguments, "delivery_mode");
-    if (mode != NULL && strcmp(mode, "background") == 0) {
-        return scu_fail("background_unavailable",
-            "Raw desktop input requires delivery_mode foreground. No foreground "
-            "fallback was attempted.");
-    }
     if (!ensure_visual_session() || !visual_step()) {
         return NULL;
     }
-    const char *id = json_string(arguments, "display_id");
-    if (json_member(arguments, "target") != NULL) {
-        JsonValue *target = json_member(arguments, "target");
-        if (g_strcmp0(json_string(target, "kind"), "desktop") != 0 ||
-            json_string(target, "display_id") == NULL) {
-            return scu_fail("invalid_arguments",
-                "A desktop target requires kind desktop and a display_id.");
-        }
-        id = json_string(target, "display_id");
-    }
-    Display *display = selected_display(id);
-    if (display == NULL) {
-        return NULL;
-    }
-    /* A keyboard target selects the observation surface, never keyboard focus. */
     if (strcmp(tool, "press_key") == 0 || strcmp(tool, "hotkey") == 0) {
         return keyboard_action(tool, arguments);
     }
@@ -3184,18 +3454,9 @@ static JsonResult *scu_visual(const char *tool, JsonValue *arguments)
         return type_foreground_text(arguments);
     }
     if (strcmp(tool, "get_desktop_state") == 0) {
-        return capture_desktop(display, arguments);
+        return capture_desktop(arguments);
     }
-    if (strcmp(tool, "get_screen_size") == 0) {
-        if (!wait_for_frame(display)) {
-            return NULL;
-        }
-        JsonResult *result = display_metadata(display);
-        result_integer(result, "width", display->width);
-        result_integer(result, "height", display->height);
-        return result;
-    }
-    JsonResult *result = pointer_action(tool, display, arguments);
+    JsonResult *result = pointer_action(tool, arguments);
     if (result == NULL) {
         release_input();
     }
@@ -3215,7 +3476,7 @@ typedef enum {
     ARG_STRING_ARRAY,
     ARG_OBJECT,
     ARG_OBJECT_ARRAY,
-    ARG_TARGET,
+    ARG_NUMBER_ARRAY,
 } ArgumentType;
 
 typedef struct {
@@ -3229,10 +3490,9 @@ typedef struct {
 
 typedef enum {
     ARGS_NONE = 0,
-    ARGS_SESSION = 1 << 0,
-    ARGS_ACTION = 1 << 1,
-    ARGS_POINT = 1 << 2,
-    ARGS_WINDOW = 1 << 3,
+    ARGS_ACTION = 1 << 0,
+    ARGS_POINT = 1 << 1,
+    ARGS_WINDOW = 1 << 2,
 } ArgumentGroups;
 
 typedef struct {
@@ -3244,29 +3504,19 @@ typedef struct {
     gboolean action;
 } Tool;
 
-static const char *const delivery_modes[] = {"foreground", "background", NULL};
 static const char *const pointer_buttons[] = {"left", "right", "middle", NULL};
 static const char *const tree_formats[] = {"markdown", "elements", "both", NULL};
 static const char *const scroll_directions[] = {"up", "down", "left", "right", NULL};
 static const char *const scroll_units[] = {"line", NULL};
-static const char *const target_kinds[] = {"desktop", "window", NULL};
 
-static const Argument session_arguments[] = {
-    {.name = "session", .type = ARG_STRING},
-    {NULL},
-};
 static const Argument action_arguments[] = {
-    {.name = "pid", .type = ARG_INTEGER},
-    {.name = "window_id", .type = ARG_INTEGER},
     {.name = "element_token", .type = ARG_STRING},
-    {.name = "delivery_mode", .type = ARG_STRING, .choices = delivery_modes},
-    {.name = "target", .type = ARG_TARGET},
     {NULL},
 };
 static const Argument point_arguments[] = {
     {.name = "x", .type = ARG_NUMBER},
     {.name = "y", .type = ARG_NUMBER},
-    {.name = "capture_id", .type = ARG_STRING},
+    {.name = "id", .type = ARG_INTEGER, .minimum = 1, .maximum = MAX_CAPTURE_ID},
     {NULL},
 };
 static const Argument window_arguments[] = {
@@ -3278,20 +3528,13 @@ static const Argument window_arguments[] = {
     {.name = "include_screenshot", .type = ARG_BOOLEAN},
     {NULL},
 };
-static const Argument list_arguments[] = {
-    {.name = "pid", .type = ARG_INTEGER},
-    {NULL},
-};
 static const Argument capture_arguments[] = {
-    {.name = "display_id", .type = ARG_STRING},
+    {.name = "zoom", .type = ARG_NUMBER_ARRAY, .minimum = 4, .maximum = 4,
+        .description = "[left,top,right,bottom] in full-overview coordinates. Read native detail without changing the global coordinate frame or capture ID."},
     {.name = "max_image_dimension",
         .type = ARG_INTEGER,
         .minimum = 0,
         .maximum = 16384},
-    {NULL},
-};
-static const Argument display_arguments[] = {
-    {.name = "display_id", .type = ARG_STRING},
     {NULL},
 };
 static const Argument click_arguments[] = {
@@ -3300,7 +3543,7 @@ static const Argument click_arguments[] = {
     {NULL},
 };
 static const Argument drag_arguments[] = {
-    {.name = "capture_id", .type = ARG_STRING},
+    {.name = "id", .type = ARG_INTEGER, .minimum = 1, .maximum = MAX_CAPTURE_ID},
     {.name = "from_x", .type = ARG_NUMBER},
     {.name = "from_y", .type = ARG_NUMBER},
     {.name = "to_x", .type = ARG_NUMBER},
@@ -3332,24 +3575,17 @@ static const Argument hotkey_arguments[] = {
     {.name = "keys", .type = ARG_STRING_ARRAY, .minimum = 2, .maximum = 5},
     {NULL},
 };
-static const Argument batch_arguments[] = {
-    {.name = "steps", .type = ARG_OBJECT_ARRAY, .minimum = 1, .maximum = 64},
-    {.name = "delay_ms", .type = ARG_INTEGER, .minimum = 0, .maximum = 2000},
-    {.name = "observe", .type = ARG_OBJECT},
-    {.name = "pid", .type = ARG_INTEGER},
-    {.name = "window_id", .type = ARG_INTEGER},
-    {.name = "delivery_mode", .type = ARG_STRING, .choices = delivery_modes},
-    {.name = "target", .type = ARG_TARGET,
-        .description = "Default desktop monitor for foreground steps; explicit step targets override it."},
-    {.name = "capture_id", .type = ARG_STRING,
-        .description = "Default pixel capture, inherited only on the same monitor."},
+static const Argument delay_arguments[] = {
+    {.name = "ms", .type = ARG_INTEGER, .minimum = 0, .maximum = 30000,
+        .description = "Milliseconds to wait at this position in the sequence, including before the final screenshot."},
     {NULL},
 };
-static const Argument target_arguments[] = {
-    {.name = "kind", .type = ARG_STRING, .choices = target_kinds},
-    {.name = "display_id", .type = ARG_STRING},
-    {.name = "pid", .type = ARG_INTEGER},
-    {.name = "window_id", .type = ARG_INTEGER},
+static const Argument batch_arguments[] = {
+    {.name = "steps", .type = ARG_OBJECT_ARRAY, .maximum = 64,
+        .description = "Optional ordered {tool,args} actions. Omit or pass [] to observe without acting."},
+    {.name = "observe", .type = ARG_OBJECT},
+    {.name = "id", .type = ARG_INTEGER, .minimum = 1, .maximum = MAX_CAPTURE_ID,
+        .description = "Optional full-overview capture used for pixel steps and zoom. Steps may override it; omission uses the latest valid overview."},
     {NULL},
 };
 
@@ -3361,102 +3597,113 @@ static const char *const require_text[] = {"text", NULL};
 static const char *const require_value[] = {"element_token", "value", NULL};
 static const char *const require_key[] = {"key", NULL};
 static const char *const require_keys[] = {"keys", NULL};
-static const char *const require_steps[] = {"steps", NULL};
+static const char *const require_delay[] = {"ms", NULL};
+
+/* Private adapters: computer is the only public observation entry point. */
+static const Tool desktop_observation = {
+    .name = "get_desktop_state",
+    .groups = ARGS_NONE,
+    .arguments = capture_arguments,
+};
+
+static const Tool window_observation = {
+    .name = "get_window_state",
+    .groups = ARGS_WINDOW,
+    .required = require_window,
+};
 
 static const Tool tools[] = {
-    {.name = "get_accessibility_tree",
-        "Discover accessible host applications and windows; incomplete coverage is "
-        "reported.",
-        ARGS_SESSION},
-    {.name = "list_windows",
-        "List accessible host windows. Window IDs belong to this scu process.",
-        ARGS_SESSION,
-        list_arguments},
-    {.name = "get_window_state",
-        "Read a bounded window tree. include_screenshot defaults false; window "
-        "screenshots are unsupported.",
-        ARGS_SESSION | ARGS_WINDOW,
-        .required = require_window},
-    {.name = "get_desktop_state",
-        "Observe the selected monitor as PNG; coordinates use this image. An explicit "
-        "display_id selects it for later calls; primary means first granted monitor.",
-        ARGS_SESSION,
-        capture_arguments},
-    {.name = "get_screen_size",
-        "Get selected display dimensions and granted displays. May open initial host "
-        "consent.",
-        ARGS_SESSION,
-        display_arguments},
+    {.name = "computer",
+        "Observe the combined desktop canvas with {} or {steps:[]}; no action is sent. "
+        "Otherwise execute up to 64 JSON steps shaped {tool,args}, in order; stop "
+        "on failure. Foreground batches return one final overview image. "
+        "Responses report status:ok/failed and the completed step count. "
+        "Insert {tool:delay_ms,args:{ms:500}} to pause anywhere; the final image waits for all steps, including trailing delays. "
+        "observe:false skips it; a desktop or window-tree object replaces it. "
+        "All pixel coordinates are global to the full overview, including after observe.zoom. "
+        "Use zoom:[left,top,right,bottom] to read native detail on large desktops. "
+        "Inspect the image to verify effects; actions are never retried. "
+        "All use requires the Spaces accessibility tier and a KWin host session. "
+        "Call status first for a screenshot and accessible window discovery.",
+        ARGS_NONE,
+        batch_arguments,
+        .action = TRUE},
+    {.name = "status",
+        "Return canvas metadata, apps/windows and a full desktop screenshot. "
+        "Missing dependencies or an unavailable accessibility bridge return an error; no partial results. "
+        "All window bounds, element frames and pixel actions share the full overview's coordinates. "
+        "Requires the Spaces accessibility tier and KWin; no consent prompts. "
+        "Canvas contains overview width, height and id. "
+        "Capture failures return an error within 30 seconds.",
+        ARGS_NONE},
+};
+
+/* Actions are steps of computer, never standalone MCP tools. */
+static const Tool action_tools[] = {
     {.name = "click",
         "Invoke an accessible element or click desktop image coordinates with "
         "foreground delivery.",
-        ARGS_SESSION | ARGS_ACTION | ARGS_POINT,
+        ARGS_ACTION | ARGS_POINT,
         click_arguments,
         .action = TRUE},
     {.name = "double_click",
         "Double click foreground desktop coordinates.",
-        ARGS_SESSION | ARGS_ACTION | ARGS_POINT,
+        ARGS_ACTION | ARGS_POINT,
         .action = TRUE},
     {.name = "right_click",
         "Right click desktop coordinates or invoke an accessible context-menu action.",
-        ARGS_SESSION | ARGS_ACTION | ARGS_POINT,
+        ARGS_ACTION | ARGS_POINT,
         .action = TRUE},
     {.name = "move_cursor",
         "Move the foreground pointer in desktop image coordinates.",
-        ARGS_SESSION | ARGS_ACTION | ARGS_POINT,
+        ARGS_ACTION | ARGS_POINT,
         .required = require_point,
         .action = TRUE},
     {.name = "drag",
-        "Drag within one display, using image coordinates and foreground delivery.",
-        ARGS_SESSION | ARGS_ACTION,
+        "Drag across the combined canvas using full-overview coordinates.",
+        ARGS_ACTION,
         drag_arguments,
         require_drag,
         TRUE},
     {.name = "scroll",
         "Scroll at desktop coordinates. amount counts lines; page scrolling is "
         "unsupported.",
-        ARGS_SESSION | ARGS_ACTION | ARGS_POINT,
+        ARGS_ACTION | ARGS_POINT,
         scroll_arguments,
         require_scroll,
         TRUE},
     {.name = "type_text",
         "Insert UTF-8 without submitting. Clipboard fallback replaces clipboard text.",
-        ARGS_SESSION | ARGS_ACTION,
+        ARGS_ACTION,
         text_arguments,
         require_text,
         TRUE},
     {.name = "set_value",
         "Replace an accessible text/numeric value and check it through independent "
         "readback.",
-        ARGS_SESSION | ARGS_ACTION,
+        ARGS_ACTION,
         value_arguments,
         require_value,
         TRUE},
     {.name = "press_key",
         "Press/release one key in the foreground application; modifiers are optional.",
-        ARGS_SESSION | ARGS_ACTION,
+        ARGS_ACTION,
         key_arguments,
         require_key,
         TRUE},
     {.name = "hotkey",
         "Press modifiers and one key in the foreground application.",
-        ARGS_SESSION | ARGS_ACTION,
+        ARGS_ACTION,
         hotkey_arguments,
         require_keys,
         TRUE},
-    {.name = "run_steps",
-        "Preferred for known sequences: validate 1–64 actions, execute in order, stop "
-        "on failure. Foreground batches return one final selected-monitor image. "
-        "observe:false skips it; a desktop or window-tree object replaces it. "
-        "Inspect the image to verify effects; actions are never retried.",
-        ARGS_SESSION,
-        batch_arguments,
-        require_steps,
+    {.name = "delay_ms",
+        "Wait 0–30000 milliseconds before continuing. A trailing delay finishes before observation. "
+        "Delay-only calls observe afterward; adding a delay to semantic actions does not open a visual session.",
+        ARGS_NONE,
+        delay_arguments,
+        require_delay,
         TRUE},
-    {.name = "health_report",
-        "Report accessibility forwarding and optional guest libraries without opening "
-        "consent dialogs.",
-        ARGS_NONE},
 };
 
 static const Tool *find_tool(const char *name)
@@ -3464,6 +3711,16 @@ static const Tool *find_tool(const char *name)
     for (unsigned index = 0; index < G_N_ELEMENTS(tools); index++) {
         if (g_strcmp0(name, tools[index].name) == 0) {
             return &tools[index];
+        }
+    }
+    return NULL;
+}
+
+static const Tool *find_action(const char *name)
+{
+    for (unsigned index = 0; index < G_N_ELEMENTS(action_tools); index++) {
+        if (g_strcmp0(name, action_tools[index].name) == 0) {
+            return &action_tools[index];
         }
     }
     return NULL;
@@ -3492,10 +3749,10 @@ static void add_argument_schemas(JsonResult *properties, const Argument *argumen
             break;
         case ARG_STRING_ARRAY:
         case ARG_OBJECT_ARRAY:
+        case ARG_NUMBER_ARRAY:
             type = "array";
             break;
         case ARG_OBJECT:
-        case ARG_TARGET:
             type = "object";
             break;
         default:
@@ -3513,10 +3770,12 @@ static void add_argument_schemas(JsonResult *properties, const Argument *argumen
             }
             result_member(property, "enum", choices);
         }
-        if (argument->type == ARG_STRING_ARRAY || argument->type == ARG_OBJECT_ARRAY) {
+        if (argument->type == ARG_STRING_ARRAY || argument->type == ARG_OBJECT_ARRAY ||
+            argument->type == ARG_NUMBER_ARRAY) {
             JsonResult *items = result_object();
             result_string(items, "type",
-                argument->type == ARG_STRING_ARRAY ? "string" : "object");
+                argument->type == ARG_STRING_ARRAY ? "string" :
+                argument->type == ARG_NUMBER_ARRAY ? "number" : "object");
             result_member(property, "items", items);
             if (argument->minimum != 0) {
                 result_integer(property, "minItems", argument->minimum);
@@ -3528,15 +3787,6 @@ static void add_argument_schemas(JsonResult *properties, const Argument *argumen
             result_number(property, "minimum", argument->minimum);
             result_number(property, "maximum", argument->maximum);
         }
-        if (argument->type == ARG_TARGET) {
-            JsonResult *target_properties = result_object();
-            JsonResult *required = result_array();
-            add_argument_schemas(target_properties, target_arguments);
-            result_append(required, yyjson_mut_str(scu.doc, "kind"));
-            result_member(property, "properties", target_properties);
-            result_member(property, "required", required);
-            result_boolean(property, "additionalProperties", FALSE);
-        }
         result_member(properties, argument->name, property);
     }
 }
@@ -3546,9 +3796,6 @@ static yyjson_doc *build_tool_schema(const Tool *tool)
     JsonResult *schema = result_object();
     JsonResult *properties = result_object();
     JsonResult *required = result_array();
-    if (tool->groups & ARGS_SESSION) {
-        add_argument_schemas(properties, session_arguments);
-    }
     if (tool->groups & ARGS_ACTION) {
         add_argument_schemas(properties, action_arguments);
     }
@@ -3559,19 +3806,17 @@ static yyjson_doc *build_tool_schema(const Tool *tool)
         add_argument_schemas(properties, window_arguments);
     }
     add_argument_schemas(properties, tool->arguments);
-    if (strcmp(tool->name, "run_steps") == 0) {
+    if (strcmp(tool->name, "computer") == 0) {
         /* Advertise the actual nested contract, not an opaque array of objects.
          * Individual steps are validated again after defaults are merged. */
         JsonResult *alternatives = result_array();
-        for (unsigned index = 0; index < G_N_ELEMENTS(tools); index++) {
-            const Tool *action = &tools[index];
-            if (!action->action || action == tool) {
-                continue;
-            }
+        for (unsigned index = 0; index < G_N_ELEMENTS(action_tools); index++) {
+            const Tool *action = &action_tools[index];
             yyjson_doc *input = build_tool_schema(action);
             JsonResult *named = result_object(), *named_properties = result_object();
             JsonResult *name = result_object(), *names = result_array();
             result_string(named, "type", "object");
+            result_string(named, "description", action->description);
             result_string(name, "type", "string");
             result_append(names, yyjson_mut_strcpy(scu.doc, action->name));
             result_member(name, "enum", names);
@@ -3586,16 +3831,6 @@ static yyjson_doc *build_tool_schema(const Tool *tool)
             result_boolean(named, "additionalProperties", FALSE);
             result_append(alternatives, named);
 
-            JsonResult *short_form = result_object(), *short_properties = result_object();
-            result_string(short_form, "type", "object");
-            result_member(short_properties, action->name,
-                yyjson_val_mut_copy(scu.doc, yyjson_doc_get_root(input)));
-            result_member(short_form, "properties", short_properties);
-            JsonResult *short_required = result_array();
-            result_append(short_required, yyjson_mut_strcpy(scu.doc, action->name));
-            result_member(short_form, "required", short_required);
-            result_boolean(short_form, "additionalProperties", FALSE);
-            result_append(alternatives, short_form);
             yyjson_doc_free(input);
         }
         JsonResult *items = result_object();
@@ -3608,10 +3843,11 @@ static yyjson_doc *build_tool_schema(const Tool *tool)
         result_append(off_values, yyjson_mut_false(scu.doc));
         result_member(off, "enum", off_values);
         result_append(choices, off);
-        const char *observation_tools[] = {"get_desktop_state", "get_window_state"};
+        const Tool *observation_tools[] = {
+            &desktop_observation, &window_observation};
         const char *kinds[] = {"desktop", "window"};
         for (unsigned index = 0; index < 2; index++) {
-            yyjson_doc *input = build_tool_schema(find_tool(observation_tools[index]));
+            yyjson_doc *input = build_tool_schema(observation_tools[index]);
             JsonResult *option = yyjson_val_mut_copy(scu.doc, yyjson_doc_get_root(input));
             JsonResult *kind = result_object(), *values = result_array();
             result_string(kind, "type", "string");
@@ -3619,20 +3855,21 @@ static yyjson_doc *build_tool_schema(const Tool *tool)
             result_member(kind, "enum", values);
             result_member(yyjson_mut_obj_get(option, "properties"), "kind", kind);
             JsonResult *observe_required = result_array();
-            if (index == 0) {
-                result_append(observe_required, yyjson_mut_str(scu.doc, "kind"));
+            result_append(observe_required, yyjson_mut_str(scu.doc, "kind"));
+            if (index == 1) {
+                result_append(observe_required, yyjson_mut_str(scu.doc, "pid"));
+                result_append(observe_required, yyjson_mut_str(scu.doc, "window_id"));
             }
-            /* Window identifiers can come from the last targeted step. */
             result_member(option, "required", observe_required);
             result_append(choices, option);
             yyjson_doc_free(input);
         }
         result_member(observe, "anyOf", choices);
         result_string(observe, "description",
-            "Omit for a final image after foreground input; false disables it. "
-            "Use {kind:desktop,display_id,max_image_dimension} for an image, "
-            "or {kind:window,pid,window_id,tree_format} for a tree (kind optional). "
-            "An explicit object replaces automatic observation.");
+            "Omit for a desktop image with no steps or after foreground input; false disables it. "
+            "Use {kind:desktop,max_image_dimension,zoom:[left,top,right,bottom]} for an image or native-detail crop. "
+            "or {kind:window,pid,window_id,tree_format} for a tree. "
+            "An explicit object replaces automatic observation. Zoom coordinates and all actions stay in the full overview's global pixel space; zoom never changes that frame.");
         result_member(properties, "observe", observe);
     }
     if (tool->required != NULL) {
@@ -3762,32 +3999,7 @@ static gboolean validate_arguments(const Tool *t, JsonValue *args)
     if (strcmp(t->name, "get_window_state") == 0 &&
         json_boolean(args, "include_screenshot")) {
         scu_fail("unsupported_feature",
-            "Window screenshots are unsupported; use get_desktop_state.");
-        return FALSE;
-    }
-    if (!semantic && strcmp(t->name, "run_steps") != 0 && t->action &&
-        (json_member(args, "pid") != NULL || json_member(args, "window_id") != NULL)) {
-        scu_fail("unsupported_feature",
-            "Window-targeted raw input is unsupported; use a token or desktop target.");
-        return FALSE;
-    }
-    JsonValue *target = json_member(args, "target");
-    if (target != NULL) {
-        const char *kind = json_string(target, "kind");
-        if ((strcmp(kind, "desktop") == 0 &&
-                (json_string(target, "display_id") == NULL || semantic)) ||
-            (strcmp(kind, "window") == 0 &&
-                (!semantic || json_member(target, "pid") == NULL ||
-                    json_member(target, "window_id") == NULL))) {
-            scu_fail("invalid_arguments",
-                "Use a desktop target with display_id, or a "
-                "semantic window target with pid and window_id.");
-            return FALSE;
-        }
-    }
-    if (t->action && strcmp(t->name, "run_steps") != 0 && !semantic &&
-        g_strcmp0(json_string(args, "delivery_mode"), "background") == 0) {
-        scu_fail("background_unavailable", "Raw desktop input requires foreground delivery.");
+            "Window screenshots are unsupported; use computer with no steps for a desktop image.");
         return FALSE;
     }
     return TRUE;
@@ -3802,50 +4014,21 @@ static JsonResult *error_payload(void)
     return r;
 }
 
-/* Batch defaults must not retarget an element or reuse a capture on another
- * monitor. Each merged request still passes the ordinary tool validator. */
-static yyjson_doc *merge_batch_defaults(
-    JsonValue *args, JsonValue *batch, gboolean observation)
+/* The only shared action default is a pixel capture. Semantic tokens carry
+ * their own identity; window observations always name their window explicitly. */
+static yyjson_doc *prepare_arguments(JsonValue *args, guint64 id,
+    gboolean observation)
 {
     yyjson_mut_doc *document = yyjson_mut_doc_new(NULL);
-    JsonResult *merged = yyjson_val_mut_copy(document, args);
-    yyjson_mut_doc_set_root(document, merged);
-    gboolean semantic = json_string(args, "element_token") != NULL;
-    const char *defaults[] = {"pid", "window_id", "session", "delivery_mode", NULL};
-    for (unsigned index = 0; defaults[index]; index++) {
-        const char *key = defaults[index];
-        if ((!strcmp(key, "pid") || !strcmp(key, "window_id")) && !observation &&
-            (json_member(args, "pid") || json_member(args, "window_id") ||
-                json_member(args, "target"))) {
-            continue;
-        }
-        if (observation && !strcmp(key, "delivery_mode")) {
-            continue;
-        }
-        if (!json_member(args, key) && json_member(batch, key)) {
-            yyjson_mut_obj_add(merged, yyjson_mut_strcpy(document, key),
-                yyjson_val_mut_copy(document, json_member(batch, key)));
-        }
+    JsonResult *copy = yyjson_val_mut_copy(document, args);
+    yyjson_mut_doc_set_root(document, copy);
+    if (observation) {
+        yyjson_mut_obj_remove_str(copy, "kind");
+    } else if (id && !json_string(args, "element_token") &&
+        (json_member(args, "x") || json_member(args, "from_x")) &&
+        !json_member(args, "id")) {
+        yyjson_mut_obj_add_uint(document, copy, "id", id);
     }
-    if (!observation && !semantic) {
-        JsonValue *own_target = json_member(args, "target");
-        JsonValue *batch_target = json_member(batch, "target");
-        if (!own_target && batch_target && !json_member(args, "pid") &&
-            !json_member(args, "window_id")) {
-            yyjson_mut_obj_add(merged, yyjson_mut_str(document, "target"),
-                yyjson_val_mut_copy(document, batch_target));
-        }
-        gboolean same_display = !own_target || (batch_target &&
-            g_strcmp0(json_string(own_target, "display_id"),
-                json_string(batch_target, "display_id")) == 0);
-        gboolean pixel = json_member(args, "x") || json_member(args, "from_x");
-        if (pixel && same_display && !json_member(args, "capture_id") &&
-            json_member(batch, "capture_id")) {
-            yyjson_mut_obj_add(merged, yyjson_mut_str(document, "capture_id"),
-                yyjson_val_mut_copy(document, json_member(batch, "capture_id")));
-        }
-    }
-    yyjson_mut_obj_remove_str(merged, "kind"); /* Observation discriminator only. */
     yyjson_doc *result = yyjson_mut_doc_imut_copy(document, NULL);
     yyjson_mut_doc_free(document);
     return result;
@@ -3868,8 +4051,7 @@ static JsonResult *batch_failure(guint index, const Tool *tool)
 static JsonResult *compact_observation(JsonResult *observation)
 {
     JsonResult *result = result_object();
-    const char *fields[] = {"display", "capture_id", "screenshot_width",
-        "screenshot_height", "frame_status", "displays", NULL};
+    const char *fields[] = {"id", "width", "height", "zoom", NULL};
     for (unsigned index = 0; fields[index]; index++) {
         JsonResult *value = yyjson_mut_obj_get(observation, fields[index]);
         if (value != NULL) {
@@ -3882,86 +4064,74 @@ static JsonResult *compact_observation(JsonResult *observation)
 /* Preflight structure and supported options for the entire batch before effects.
  * Runtime failure keeps completed counts and one error, never a replayable dump
  * of successful steps. Observation is independent of action confirmation. */
-static JsonResult *run_steps(JsonValue *args)
+static JsonResult *computer(JsonValue *args)
 {
     yyjson_doc *steps[64] = {0};
     const Tool *actions[64] = {0};
     JsonValue *array = json_member(args, "steps");
     size_t count = yyjson_arr_size(array), index, length;
-    JsonValue *step, *last_window = NULL;
+    JsonValue *step;
     yyjson_doc *observation = NULL;
     const Tool *observer = NULL;
     JsonValue *observe = json_member(args, "observe");
-    gboolean automatic = observe == NULL, has_foreground = FALSE;
+    gboolean automatic = observe == NULL, has_foreground = FALSE, has_actions = FALSE;
     gboolean valid = FALSE;
     JsonResult *result = result_object(), *warnings = result_array();
 
     yyjson_arr_foreach(array, index, length, step) {
         const char *name = json_string(step, "tool");
         JsonValue *arguments = json_member(step, "args");
-        if (name) {
-            if (yyjson_obj_size(step) != 2) {
-                goto invalid;
-            }
-        } else {
-            if (yyjson_obj_size(step) != 1) {
-                goto invalid;
-            }
-            yyjson_obj_iter iterator = yyjson_obj_iter_with(step);
-            JsonValue *key = yyjson_obj_iter_next(&iterator);
-            name = yyjson_get_str(key);
-            arguments = yyjson_obj_iter_get_val(key);
-        }
-        const Tool *action = actions[index] = find_tool(name);
-        if (!action || !action->action || !strcmp(name, "run_steps") ||
-            !yyjson_is_obj(arguments)) {
+        const Tool *action = actions[index] = find_action(name);
+        if (!action || yyjson_obj_size(step) != 2 || !yyjson_is_obj(arguments)) {
             goto invalid;
         }
-        steps[index] = merge_batch_defaults(arguments, args, FALSE);
+        steps[index] = prepare_arguments(arguments, yyjson_get_uint(json_member(args, "id")), FALSE);
         JsonValue *merged = yyjson_doc_get_root(steps[index]);
         if (!validate_arguments(action, merged)) {
             goto done;
         }
-        has_foreground |= json_string(merged, "element_token") == NULL;
-        if (json_member(merged, "pid") && json_member(merged, "window_id")) {
-            last_window = merged;
-        } else {
-            JsonValue *target = json_member(merged, "target");
-            if (g_strcmp0(json_string(target, "kind"), "window") == 0) {
-                last_window = target;
-            }
+        if (strcmp(action->name, "delay_ms")) {
+            has_actions = TRUE;
+            has_foreground |= json_string(merged, "element_token") == NULL;
         }
     }
-    if (automatic && has_foreground) {
+    /* Delays are neutral: semantic-only sequences stay semantic. With no
+     * input actions, they provide a delayed observation of ongoing loading. */
+    if (automatic && (!has_actions || has_foreground)) {
         const char *defaults = "{\"max_image_dimension\":1600}";
         observation = yyjson_read(defaults, strlen(defaults), 0);
-        observer = find_tool("get_desktop_state");
+        observer = &desktop_observation;
     } else if (yyjson_is_obj(observe)) {
         gboolean desktop = g_strcmp0(json_string(observe, "kind"), "desktop") == 0;
-        if (desktop) {
-            /* Desktop observations do not inherit semantic window identifiers. */
-            yyjson_doc *empty = yyjson_read("{}", 2, 0);
-            observation = merge_batch_defaults(observe, yyjson_doc_get_root(empty), TRUE);
-            yyjson_doc_free(empty);
-        } else {
-            observation = merge_batch_defaults(observe, last_window ? last_window : args, TRUE);
-        }
-        observer = find_tool(desktop ? "get_desktop_state" : "get_window_state");
+        observation = prepare_arguments(observe, 0, TRUE);
+        observer = desktop ? &desktop_observation : &window_observation;
     }
     if (observer && !validate_arguments(observer, yyjson_doc_get_root(observation))) {
         goto done;
     }
+    if (observer == &desktop_observation &&
+        json_member(yyjson_doc_get_root(observation), "zoom") && visual.canvas.id &&
+        !refresh_geometry()) {
+        goto done;
+    }
+    if (observer == &desktop_observation &&
+        !validate_zoom(yyjson_doc_get_root(observation), yyjson_get_uint(json_member(args, "id")))) {
+        goto done;
+    }
+    if (!require_computer_ready()) {
+        goto done;
+    }
     valid = TRUE;
-    guint completed = 0, skipped = 0;
+    guint completed = 0;
     gboolean failed = FALSE, foreground_attempted = FALSE;
     for (index = 0; index < count; index++) {
         JsonValue *merged = yyjson_doc_get_root(steps[index]);
-        foreground_attempted |= json_string(merged, "element_token") == NULL;
+        foreground_attempted |= strcmp(actions[index]->name, "delay_ms") != 0 &&
+            json_string(merged, "element_token") == NULL;
         JsonResult *value = execute_tool(actions[index], merged);
         if (value == NULL) {
             release_input();
             result_member(result, "failed", batch_failure(index, actions[index]));
-            skipped = count - index - 1;
             failed = TRUE;
             clear_tool_error();
             break;
@@ -3975,29 +4145,18 @@ static JsonResult *run_steps(JsonValue *args)
             result_member(item, "warning", yyjson_mut_val_mut_copy(scu.doc, warning));
             result_append(warnings, item);
         }
-        if (index + 1 < count && !scu_pause((unsigned)json_number(args, "delay_ms", 0))) {
-            JsonResult *failure = batch_failure(index, actions[index]);
-            result_string(failure, "phase", "delay");
-            result_member(result, "failed", failure);
-            skipped = count - completed;
-            failed = TRUE;
-            clear_tool_error();
-            break;
-        }
     }
     result_integer(result, "completed", completed);
-    result_integer(result, "skipped", skipped);
-    result_string(result, "effect", "unverifiable");
     if (yyjson_mut_arr_size(warnings) > 0) {
         result_member(result, "warnings", warnings);
     }
-    if (observer && (!automatic || foreground_attempted) &&
+    if (observer && (!automatic || !has_actions || foreground_attempted) &&
         !g_atomic_int_get(&scu.cancelled) && !g_atomic_int_get(&scu.stopping)) {
         /* A broken visual session is not reconnected inside the interrupted
          * batch. Only a subsequent request may establish another grant. */
         JsonResult *value = NULL;
         if (visual.broken || (failed && foreground_attempted &&
-                visual.session == NULL && !strcmp(observer->name, "get_desktop_state"))) {
+                visual.bus == NULL && !strcmp(observer->name, "get_desktop_state"))) {
             scu_fail("visual_session_closed", "Visual session disconnected during the batch.");
         } else {
             value = execute_tool(observer, yyjson_doc_get_root(observation));
@@ -4012,10 +4171,10 @@ static JsonResult *run_steps(JsonValue *args)
             clear_tool_error();
         }
     }
-    result_boolean(result, "ok", !failed);
+    result_string(result, "status", failed ? "failed" : "ok");
     goto done;
 invalid:
-    scu_fail("invalid_arguments", "Each step must be {tool,args} or one supported action-name shorthand.");
+    scu_fail("invalid_arguments", "Each step must be {tool,args} naming a supported computer action.");
 done:
     for (index = 0; index < count; index++) {
         yyjson_doc_free(steps[index]);
@@ -4026,31 +4185,40 @@ done:
 
 static JsonResult *execute_tool(const Tool *t, JsonValue *args)
 {
-    if (!strcmp(t->name, "health_report")) {
-        return scu_health();
-    }
     if (!scu_tick()) {
         return NULL;
     }
-    if (!strcmp(t->name, "run_steps")) {
-        return run_steps(args);
+    if (!strcmp(t->name, "status")) {
+        return scu_status();
+    }
+    if (!strcmp(t->name, "computer")) {
+        return computer(args);
+    }
+    if (!require_computer_access() || !scu_gate()) {
+        return NULL;
+    }
+    if (!strcmp(t->name, "delay_ms")) {
+        /* Keep explicit waits interruptible and recheck the host grant even
+         * when no EIS session exists. Observation runs only after this ends. */
+        gint64 end = g_get_monotonic_time() + (gint64)json_number(args, "ms", 0) * 1000;
+        while (g_get_monotonic_time() < end) {
+            gint64 remaining = end - g_get_monotonic_time();
+            if (!scu_pause((unsigned)MIN(10, MAX(0, (remaining + 999) / 1000))) ||
+                !require_computer_access()) {
+                return NULL;
+            }
+        }
+        return result_object();
     }
     if (!strcmp(t->name, "get_window_state") &&
         json_boolean(args, "include_screenshot")) {
         return scu_fail("unsupported_feature",
-            "Window screenshots are unsupported; use get_desktop_state for monitor "
+            "Window screenshots are unsupported; use computer with no steps for monitor "
             "pixels.");
     }
-    if (!strncmp(t->name, "get_accessibility", 17) ||
-        !strcmp(t->name, "list_windows") || !strcmp(t->name, "get_window_state") ||
+    if (!strcmp(t->name, "get_window_state") ||
         !strcmp(t->name, "set_value") || json_string(args, "element_token")) {
         return scu_atspi(t->name, args);
-    }
-    if (json_member(args, "pid") || json_member(args, "window_id") ||
-        !g_strcmp0(json_string(json_member(args, "target"), "kind"), "window")) {
-        return scu_fail("unsupported_feature",
-            "Window-targeted raw input is unsupported. Use an accessibility token or "
-            "explicit desktop target.");
     }
     return scu_visual(t->name, args);
 }
@@ -4152,11 +4320,14 @@ static void send_response(
 static void add_server_info(JsonResult *result)
 {
     result_string(result, "instructions",
-        "Read a tree or desktop image first. Use run_steps for known action sequences; "
+        "Call computer with {} for an initial desktop image, or read a window tree. All actions go through computer with JSON steps {tool,args}; "
         "foreground batches return one final image. Inspect it to verify effects; "
+        "insert delay_ms steps with args:{ms:500} to wait before another action or the final image. "
         "if loading continues, observe again without replaying actions. "
-        "An explicit display selects the monitor for later operations, not keyboard focus. "
-        "Accessibility permission is required. No browser, shell, JavaScript or window capture tools.");
+        "All pixel coordinates stay global to the full desktop overview; observe.zoom reads native detail without changing that frame or focus. "
+        "Call status for KWin windows and a desktop screenshot; missing prerequisites return an error. "
+        "All computer use requires the Spaces accessibility tier and a KWin host session; no portal prompts. "
+        "No browser, shell, JavaScript or window capture tools.");
     JsonResult *capabilities = result_object();
     JsonResult *info = result_object();
     result_member(capabilities, "tools", result_object());
@@ -4209,17 +4380,18 @@ static void add_tool_result(JsonResult *result, const Tool *tool, JsonResult *ou
 
     size_t index, count;
     JsonResult *image;
-    yyjson_mut_arr_foreach(scu.images, index, count, image)
-    {
-        /* Mutable values carry their container links. Copy before putting an
-         * image in another array so iteration does not alter its source list. */
-        result_append(content, yyjson_mut_val_mut_copy(scu.doc, image));
+    if (output != NULL) {
+        yyjson_mut_arr_foreach(scu.images, index, count, image)
+        {
+            /* Copy container links. Hard errors return no partial images. */
+            result_append(content, yyjson_mut_val_mut_copy(scu.doc, image));
+        }
     }
     result_member(result, "content", content);
     result_member(result, "structuredContent", structured);
     gboolean batch_failed = output != NULL && tool != NULL &&
-                            strcmp(tool->name, "run_steps") == 0 &&
-                            yyjson_mut_is_false(yyjson_mut_obj_get(output, "ok"));
+                            strcmp(tool->name, "computer") == 0 &&
+                            g_strcmp0(yyjson_mut_get_str(yyjson_mut_obj_get(output, "status")), "failed") == 0;
     result_boolean(result, "isError", output == NULL || batch_failed);
 }
 
@@ -4360,6 +4532,620 @@ static void stop_signal(int sig)
     g_atomic_int_set(&scu.stopping, 1);
 }
 
+/* Host-user service. The controller starts this only for an accessibility-tier
+ * Space and mounts only its private peer socket into that Space. The host bus,
+ * KWin scripting interface and capture authorization never reach the guest. */
+#define GEOMETRY_PATH "/org/anatase/Spaces/Geometry"
+#define GEOMETRY_INTERFACE "org.anatase.Spaces.Geometry1"
+static const char computer_xml[] =
+    "<node><interface name='" COMPUTER_INTERFACE "'>"
+    "<method name='Geometry'><arg type='s' direction='out'/></method>"
+    "<method name='Capture'><arg type='i' direction='in'/><arg type='i' direction='in'/>"
+    "<arg type='i' direction='in'/><arg type='i' direction='in'/><arg type='b' direction='in'/>"
+    "<arg type='h' direction='out'/><arg type='u' direction='out'/><arg type='u' direction='out'/></method>"
+    "<method name='ConnectInput'><arg type='h' direction='out'/></method>"
+    "<method name='SetClipboard'><arg type='s' direction='in'/></method>"
+    "</interface></node>";
+static const char geometry_xml[] =
+    "<node><interface name='" GEOMETRY_INTERFACE "'>"
+    "<method name='Publish'><arg type='s' direction='in'/><arg type='s' direction='in'/></method>"
+    "</interface></node>";
+
+typedef struct {
+    GDBusConnection *connection;
+    GArray *cookies;
+} ComputerPeer;
+typedef struct {
+    GDBusConnection *bus;
+    GDBusServer *server;
+    GPtrArray *peers;
+    GDBusNodeInfo *interface;
+    char *name, *owner, *token, *geometry, *script_path;
+    int script_id;
+    gboolean busy;
+} ComputerHost;
+static ComputerHost host;
+
+static GVariant *host_call(const char *name, const char *path, const char *interface,
+    const char *method, GVariant *args, GUnixFDList *input, GUnixFDList **output,
+    GError **error)
+{
+    return bounded_call(host.bus, name, path, interface, method, args, input, output, error);
+}
+
+static char *kwin_owner(GError **error)
+{
+    GVariant *reply = host_call("org.freedesktop.DBus", "/org/freedesktop/DBus",
+        "org.freedesktop.DBus", "GetNameOwner", g_variant_new("(s)", KWIN_NAME),
+        NULL, NULL, error);
+    char *owner = NULL;
+    if (reply) {
+        g_variant_get(reply, "(s)", &owner);
+        g_variant_unref(reply);
+    }
+    return owner;
+}
+
+static void host_publish(GDBusConnection *connection, const char *sender,
+    const char *path, const char *interface, const char *method, GVariant *args,
+    GDBusMethodInvocation *invocation, gpointer data)
+{
+    (void)connection; (void)path; (void)interface; (void)method; (void)data;
+    const char *token, *json;
+    g_variant_get(args, "(&s&s)", &token, &json);
+    if (g_strcmp0(sender, host.owner) || g_strcmp0(token, host.token) || strlen(json) > 1024 * 1024) {
+        g_dbus_method_invocation_return_error(invocation, G_DBUS_ERROR,
+            G_DBUS_ERROR_ACCESS_DENIED, "Invalid geometry publisher");
+        return;
+    }
+    g_free(host.geometry);
+    host.geometry = g_strdup(json);
+    g_dbus_method_invocation_return_value(invocation, NULL);
+}
+
+/* Only these fixed expressions run inside KWin. No public method accepts script
+ * code, a script path, a D-Bus destination or a window-management command. */
+static const char geometry_script[] =
+    "function rect(r){return {x:r.x,y:r.y,width:r.width,height:r.height};}\n"
+    "var result={outputs:[],windows:[]};\n"
+    "for(var i=0;i<workspace.screens.length;i++){var o=workspace.screens[i];"
+    "result.outputs.push({name:o.name,geometry:rect(o.geometry),scale:o.devicePixelRatio===undefined?o.scale:o.devicePixelRatio});}\n"
+    "var windows=workspace.windowList();\n"
+    "for(var i=0;i<windows.length;i++){var w=windows[i];"
+    "if(w.deleted||w.desktopWindow||w.dock)continue;"
+    "var shown=!w.minimized&&(!w.desktops.length||w.desktops.indexOf(workspace.currentDesktop)>=0)"
+    "&&(!w.activities.length||w.activities.indexOf(workspace.currentActivity)>=0);"
+    "result.windows.push({key:String(w.internalId),pid:w.pid,app_name:w.resourceClass||w.resourceName,"
+    "title:w.caption,frame:rect(w.frameGeometry),client:rect(w.clientGeometry),shown:shown,active:w===workspace.activeWindow});}\n"
+    "callDBus('%s','" GEOMETRY_PATH "','" GEOMETRY_INTERFACE "','Publish','%s',JSON.stringify(result));\n";
+
+static void unload_geometry_script(void)
+{
+    if (host.script_id >= 0 && host.bus && !g_dbus_connection_is_closed(host.bus)) {
+        char *path = g_strdup_printf("/Scripting/Script%d", host.script_id);
+        GVariant *reply = g_dbus_connection_call_sync(host.bus, KWIN_NAME, path,
+            "org.kde.kwin.Script", "stop", NULL, NULL,
+            G_DBUS_CALL_FLAGS_NO_AUTO_START, 500, NULL, NULL);
+        g_clear_pointer(&reply, g_variant_unref);
+        g_free(path);
+        /* unloadScript takes the unique plugin name, not a guest-supplied ID. */
+        reply = g_dbus_connection_call_sync(host.bus, KWIN_NAME, "/Scripting",
+            "org.kde.kwin.Scripting", "unloadScript", g_variant_new("(s)", host.token),
+            NULL, G_DBUS_CALL_FLAGS_NO_AUTO_START, 500, NULL, NULL);
+        g_clear_pointer(&reply, g_variant_unref);
+    }
+    host.script_id = -1;
+    if (host.script_path) {
+        unlink(host.script_path);
+        g_clear_pointer(&host.script_path, g_free);
+    }
+}
+
+static gboolean host_geometry(GError **error)
+{
+    char *owner = kwin_owner(error);
+    if (!owner) {
+        return FALSE;
+    }
+    g_free(host.owner);
+    host.owner = owner;
+    g_clear_pointer(&host.geometry, g_free);
+    g_free(host.token);
+    host.token = g_uuid_string_random();
+    char *script = g_strdup_printf(geometry_script, host.name, host.token);
+    int fd = g_file_open_tmp("spaces-scu-geometry-XXXXXX", &host.script_path, error);
+    if (fd < 0) {
+        g_free(script);
+        return FALSE;
+    }
+    gsize length = strlen(script), offset = 0;
+    while (offset < length) {
+        ssize_t count = write(fd, script + offset, length - offset);
+        if (count > 0) {
+            offset += count;
+        } else if (errno != EINTR) {
+            break;
+        }
+    }
+    close(fd);
+    g_free(script);
+    if (offset != length) {
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Could not write the fixed KWin geometry script");
+        unload_geometry_script();
+        return FALSE;
+    }
+    GVariant *reply = host_call(KWIN_NAME, "/Scripting", "org.kde.kwin.Scripting",
+        "loadScript", g_variant_new("(ss)", host.script_path, host.token), NULL, NULL, error);
+    if (reply) {
+        g_variant_get(reply, "(i)", &host.script_id);
+        g_variant_unref(reply);
+    }
+    if (host.script_id < 0) {
+        if (error && !*error) {
+            g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, "KWin refused its fixed geometry script");
+        }
+        unload_geometry_script();
+        return FALSE;
+    }
+    char *path = g_strdup_printf("/Scripting/Script%d", host.script_id);
+    reply = host_call(KWIN_NAME, path, "org.kde.kwin.Script", "run", NULL, NULL, NULL, error);
+    g_free(path);
+    gboolean ran = reply != NULL;
+    g_clear_pointer(&reply, g_variant_unref);
+    while (ran && !host.geometry && g_get_monotonic_time() < scu.deadline &&
+           (!host_active_peer || !g_dbus_connection_is_closed(host_active_peer)) &&
+           !g_atomic_int_get(&scu.stopping)) {
+        while (g_main_context_iteration(NULL, FALSE)) {
+        }
+        g_usleep(1000);
+    }
+    unload_geometry_script();
+    if (!host.geometry) {
+        if (error && !*error) {
+            g_set_error(error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT, "Timed out reading KWin geometry");
+        }
+        return FALSE;
+    }
+    yyjson_doc *document = yyjson_read(host.geometry, strlen(host.geometry), 0);
+    if (!document || !yyjson_is_obj(yyjson_doc_get_root(document))) {
+        yyjson_doc_free(document);
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA, "KWin returned invalid geometry JSON");
+        return FALSE;
+    }
+    yyjson_mut_doc *output = yyjson_doc_mut_copy(document, NULL);
+    yyjson_mut_obj_add_strcpy(output, yyjson_mut_doc_get_root(output), "owner", host.owner);
+    g_free(host.geometry);
+    host.geometry = yyjson_mut_write(output, 0, NULL);
+    yyjson_mut_doc_free(output);
+    yyjson_doc_free(document);
+    return TRUE;
+}
+
+static gboolean host_output_bounds(CanvasRect *bounds)
+{
+    yyjson_doc *doc = host.geometry ? yyjson_read(host.geometry, strlen(host.geometry), 0) : NULL;
+    JsonValue *outputs = json_member(doc ? yyjson_doc_get_root(doc) : NULL, "outputs");
+    guint count = yyjson_arr_size(outputs);
+    gboolean valid = count > 0 && count <= MAX_DISPLAYS;
+    for (guint i = 0; valid && i < count; i++) {
+        CanvasRect rect;
+        valid = read_rect(json_member(yyjson_arr_get(outputs, i), "geometry"), &rect);
+        if (!valid) {
+            break;
+        }
+        if (i == 0) {
+            *bounds = rect;
+        } else {
+            double right = MAX(bounds->x + bounds->width, rect.x + rect.width);
+            double bottom = MAX(bounds->y + bounds->height, rect.y + rect.height);
+            bounds->x = MIN(bounds->x, rect.x);
+            bounds->y = MIN(bounds->y, rect.y);
+            bounds->width = right - bounds->x;
+            bounds->height = bottom - bounds->y;
+        }
+    }
+    yyjson_doc_free(doc);
+    return valid;
+}
+
+/* Normalize the documented QImage raw formats to immutable RGB8. Bounds and
+ * stride are validated before allocation or indexing; alpha is painted black. */
+static GBytes *decode_kwin_pixels(const guchar *raw, gsize length, guint width,
+    guint height, guint stride, guint format, GError **error)
+{
+    guint channels = format == 13 ? 3 : 4;
+    gboolean supported = format == 4 || format == 5 || format == 6 || format == 13 ||
+        format == 16 || format == 17 || format == 18;
+    if (!supported || !width || !height || (guint64)width * height * 4 > MAX_FRAME_BYTES ||
+        (guint64)width * channels > stride || (guint64)stride * height != length) {
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA, "Unsupported or malformed KWin image format/stride");
+        return NULL;
+    }
+    guchar *pixels = g_try_malloc((gsize)width * height * 3);
+    if (!pixels) {
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_NO_SPACE, "Cannot allocate KWin image");
+        return NULL;
+    }
+    for (guint y = 0; y < height; y++) {
+        for (guint x = 0; x < width; x++) {
+            const guchar *in = raw + (gsize)y * stride + x * channels;
+            guchar *out = pixels + ((gsize)y * width + x) * 3;
+            guint alpha = 255;
+            if (format >= 4 && format <= 6) {
+                uint32_t argb;
+                memcpy(&argb, in, 4);
+                out[0] = argb >> 16; out[1] = argb >> 8; out[2] = argb;
+                if (format == 5) {
+                    alpha = argb >> 24;
+                }
+            } else {
+                memcpy(out, in, 3);
+                if (format == 17) {
+                    alpha = in[3];
+                }
+            }
+            for (guint c = 0; c < 3; c++) {
+                out[c] = out[c] * alpha / 255;
+            }
+        }
+    }
+    return g_bytes_new_take(pixels, (gsize)width * height * 3);
+}
+
+static gboolean host_read_pixels(int fd, guchar *pixels, gsize length,
+    GDBusConnection *peer, GError **error)
+{
+    gsize offset = 0;
+    while (offset < length && !g_atomic_int_get(&scu.stopping) &&
+           g_get_monotonic_time() < scu.deadline && !g_dbus_connection_is_closed(peer)) {
+        ssize_t count = read(fd, pixels + offset, MIN(length - offset, 1024u * 1024u));
+        if (count > 0) {
+            offset += count;
+        } else if (count == 0 || (errno != EAGAIN && errno != EINTR)) {
+            break;
+        } else {
+            while (g_main_context_iteration(NULL, FALSE)) {
+            }
+            struct pollfd pollfd = {.fd = fd, .events = POLLIN};
+            poll(&pollfd, 1, 5);
+        }
+    }
+    if (offset != length) {
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT, "KWin capture was truncated, disconnected or timed out");
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static int sealed_pixels(GBytes *pixels, GError **error)
+{
+    int fd = syscall(SYS_memfd_create, "scu-capture", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    if (fd < 0) {
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Cannot create capture descriptor");
+        return -1;
+    }
+    gsize length;
+    const guchar *bytes = g_bytes_get_data(pixels, &length);
+    gsize offset = 0;
+    while (offset < length) {
+        ssize_t n = write(fd, bytes + offset, length - offset);
+        if (n > 0) {
+            offset += n;
+        } else if (errno != EINTR) {
+            break;
+        }
+    }
+    if (offset != length || lseek(fd, 0, SEEK_SET) < 0 || fcntl(fd, F_ADD_SEALS,
+            F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) < 0) {
+        close(fd);
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Cannot seal capture descriptor");
+        return -1;
+    }
+    return fd;
+}
+
+static int host_capture(GVariant *args, GDBusConnection *peer, guint *width,
+    guint *height, GError **error)
+{
+    gint x, y, w, h;
+    gboolean native;
+    g_variant_get(args, "(iiiib)", &x, &y, &w, &h, &native);
+    CanvasRect bounds = {0};
+    if (!host_geometry(error)) {
+        return -1;
+    }
+    if (!host_output_bounds(&bounds) || w <= 0 || h <= 0 || x < bounds.x || y < bounds.y ||
+        (gint64)x + w > bounds.x + bounds.width || (gint64)y + h > bounds.y + bounds.height) {
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT, "Capture is outside the KWin desktop");
+        return -1;
+    }
+    /* Refuse excessive work before asking the compositor to allocate an image,
+     * rather than relying only on validating the metadata it returns later. */
+    double density = 1;
+    if (native) {
+        yyjson_doc *geometry = yyjson_read(host.geometry, strlen(host.geometry), 0);
+        JsonValue *outputs = json_member(yyjson_doc_get_root(geometry), "outputs");
+        size_t i, count;
+        JsonValue *output;
+        yyjson_arr_foreach(outputs, i, count, output) {
+            density = MAX(density, json_number(output, "scale", 1));
+        }
+        yyjson_doc_free(geometry);
+    }
+    if ((double)w * density * h * density * 4 > MAX_FRAME_BYTES) {
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_NO_SPACE, "Capture exceeds the 256 MiB image limit; request a smaller region");
+        return -1;
+    }
+    int pipes[2];
+    if (pipe2(pipes, O_CLOEXEC | O_NONBLOCK) < 0) {
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Cannot create capture pipe");
+        return -1;
+    }
+    GUnixFDList *fds = g_unix_fd_list_new();
+    gint handle = g_unix_fd_list_append(fds, pipes[1], error);
+    close(pipes[1]);
+    GVariantBuilder options;
+    g_variant_builder_init(&options, G_VARIANT_TYPE_VARDICT);
+    g_variant_builder_add(&options, "{sv}", "native-resolution", g_variant_new_boolean(native));
+    g_variant_builder_add(&options, "{sv}", "include-cursor", g_variant_new_boolean(FALSE));
+    g_variant_builder_add(&options, "{sv}", "hide-caller-windows", g_variant_new_boolean(FALSE));
+    gboolean full = x == bounds.x && y == bounds.y && w == bounds.width && h == bounds.height;
+    GVariant *params = full ? g_variant_new("(a{sv}h)", &options, handle) :
+        g_variant_new("(iiuua{sv}h)", x, y, (guint)w, (guint)h, &options, handle);
+    GVariant *reply = handle >= 0 ? host_call("org.kde.KWin.ScreenShot2",
+        "/org/kde/KWin/ScreenShot2", "org.kde.KWin.ScreenShot2",
+        full ? "CaptureWorkspace" : "CaptureArea", params, fds, NULL, error) : NULL;
+    g_object_unref(fds);
+    GVariant *metadata = NULL;
+    guint stride = 0, format = 0;
+    if (reply && g_variant_is_of_type(reply, G_VARIANT_TYPE("(a{sv})"))) {
+        g_variant_get(reply, "(@a{sv})", &metadata);
+        g_variant_lookup(metadata, "width", "u", width);
+        g_variant_lookup(metadata, "height", "u", height);
+        g_variant_lookup(metadata, "stride", "u", &stride);
+        g_variant_lookup(metadata, "format", "u", &format);
+    }
+    guint64 length = (guint64)stride * *height;
+    int result = -1;
+    if (reply && *width > 0 && *height > 0 && length > 0 && length <= MAX_FRAME_BYTES &&
+        (guint64)*width * *height * 4 <= MAX_FRAME_BYTES) {
+        guchar *raw = g_try_malloc(length);
+        if (raw && host_read_pixels(pipes[0], raw, length, peer, error)) {
+            GBytes *rgb = decode_kwin_pixels(raw, length, *width, *height, stride, format, error);
+            if (rgb) {
+                result = sealed_pixels(rgb, error);
+                g_bytes_unref(rgb);
+            }
+        } else if (error && !*error) {
+            g_set_error(error, G_IO_ERROR, G_IO_ERROR_NO_SPACE, "Capture exceeds memory limits");
+        }
+        g_free(raw);
+    } else if (error && !*error) {
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA, "Invalid or oversized KWin capture metadata");
+    }
+    close(pipes[0]);
+    g_clear_pointer(&metadata, g_variant_unref);
+    g_clear_pointer(&reply, g_variant_unref);
+    return result;
+}
+
+static void disconnect_peer_input(ComputerPeer *peer)
+{
+    for (guint i = 0; i < peer->cookies->len; i++) {
+        gint cookie = g_array_index(peer->cookies, gint, i);
+        g_dbus_connection_call(host.bus, KWIN_NAME, KWIN_EIS_PATH, KWIN_EIS_INTERFACE,
+            "disconnect", g_variant_new("(i)", cookie), NULL,
+            G_DBUS_CALL_FLAGS_NO_AUTO_START, 1000, NULL, NULL, NULL);
+    }
+    g_array_set_size(peer->cookies, 0);
+}
+
+static void host_method(GDBusConnection *connection, const char *sender,
+    const char *path, const char *interface, const char *method, GVariant *args,
+    GDBusMethodInvocation *invocation, gpointer data)
+{
+    (void)sender; (void)path; (void)interface;
+    ComputerPeer *peer = data;
+    if (host.busy) {
+        g_dbus_method_invocation_return_error(invocation, G_IO_ERROR, G_IO_ERROR_BUSY, "Computer-use service is busy");
+        return;
+    }
+    host.busy = TRUE;
+    host_active_peer = connection;
+    scu.deadline = g_get_monotonic_time() + 30 * G_USEC_PER_SEC;
+    GError *error = NULL;
+    GVariant *result = NULL;
+    GUnixFDList *fds = NULL;
+    if (!strcmp(method, "Geometry")) {
+        if (host_geometry(&error)) {
+            result = g_variant_new("(s)", host.geometry);
+        }
+    } else if (!strcmp(method, "Capture")) {
+        guint width = 0, height = 0;
+        int fd = host_capture(args, connection, &width, &height, &error);
+        if (fd >= 0) {
+            fds = g_unix_fd_list_new();
+            gint handle = g_unix_fd_list_append(fds, fd, &error);
+            close(fd);
+            if (handle >= 0) {
+                result = g_variant_new("(huu)", handle, width, height);
+            }
+        }
+    } else if (!strcmp(method, "ConnectInput")) {
+        if (peer->cookies->len >= 1) {
+            disconnect_peer_input(peer);
+        }
+        GVariant *reply = host_call(KWIN_NAME, KWIN_EIS_PATH, KWIN_EIS_INTERFACE,
+            "connectToEIS", g_variant_new("(i)", 3), NULL, &fds, &error);
+        if (reply && g_variant_is_of_type(reply, G_VARIANT_TYPE("(hi)"))) {
+            gint handle, cookie;
+            g_variant_get(reply, "(hi)", &handle, &cookie);
+            g_array_append_val(peer->cookies, cookie);
+            if (fds && handle >= 0 && handle < g_unix_fd_list_get_length(fds)) {
+                result = g_variant_new("(h)", handle);
+            } else {
+                disconnect_peer_input(peer);
+            }
+        }
+        g_clear_pointer(&reply, g_variant_unref);
+    } else if (!strcmp(method, "SetClipboard")) {
+        const char *text;
+        g_variant_get(args, "(&s)", &text);
+        if (strlen(text) <= 1024 * 1024) {
+            GVariant *reply = host_call("org.kde.klipper", "/klipper", "org.kde.klipper.klipper",
+                "setClipboardContents", g_variant_new("(s)", text), NULL, NULL, &error);
+            if (reply) {
+                result = g_variant_new("()");
+                g_variant_unref(reply);
+            }
+        } else {
+            g_set_error(&error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT, "Clipboard text exceeds 1 MiB");
+        }
+    }
+    if (result) {
+        g_dbus_method_invocation_return_value_with_unix_fd_list(invocation, result, fds);
+    } else {
+        g_dbus_method_invocation_return_error(invocation, G_IO_ERROR,
+            error ? error->code : G_IO_ERROR_FAILED, "%s", error ? error->message : "KWin operation failed");
+    }
+    g_clear_object(&fds);
+    g_clear_error(&error);
+    host.busy = FALSE;
+    host_active_peer = NULL;
+    scu.deadline = 0;
+}
+
+static gboolean authorize_peer(GDBusAuthObserver *observer, GIOStream *stream,
+    GCredentials *credentials, gpointer data)
+{
+    (void)observer; (void)stream; (void)data;
+    GError *error = NULL;
+    uid_t uid = credentials ? g_credentials_get_unix_user(credentials, &error) : (uid_t)-1;
+    g_clear_error(&error);
+    return uid == getuid();
+}
+
+static gboolean host_new_connection(GDBusServer *server, GDBusConnection *connection, gpointer data)
+{
+    (void)server; (void)data;
+    if (host.peers->len >= 32) {
+        return FALSE;
+    }
+    ComputerPeer *peer = g_new0(ComputerPeer, 1);
+    peer->connection = g_object_ref(connection);
+    peer->cookies = g_array_new(FALSE, FALSE, sizeof(gint));
+    static const GDBusInterfaceVTable table = {.method_call = host_method};
+    if (!g_dbus_connection_register_object(connection, COMPUTER_PATH,
+            host.interface->interfaces[0], &table, peer, NULL, NULL)) {
+        g_object_unref(peer->connection);
+        g_array_unref(peer->cookies);
+        g_free(peer);
+        return FALSE;
+    }
+    g_dbus_connection_set_exit_on_close(connection, FALSE);
+    g_ptr_array_add(host.peers, peer);
+    return TRUE;
+}
+
+static void free_peer(gpointer data)
+{
+    ComputerPeer *peer = data;
+    disconnect_peer_input(peer);
+    g_dbus_connection_close_sync(peer->connection, NULL, NULL);
+    g_object_unref(peer->connection);
+    g_array_unref(peer->cookies);
+    g_free(peer);
+}
+
+static int run_host_service(const char *socket_path, int ready_fd)
+{
+    host_service_mode = TRUE;
+    host.script_id = -1;
+    signal(SIGPIPE, SIG_IGN);
+    signal(SIGTERM, stop_signal);
+    signal(SIGINT, stop_signal);
+    char *parent = g_path_get_dirname(socket_path);
+    struct stat st;
+    gboolean safe = socket_path[0] == '/' && !scu_lstat(parent, &st) &&
+        S_ISDIR(st.st_mode) && st.st_uid == getuid() && (st.st_mode & 077) == 0;
+    g_free(parent);
+    if (!safe || getuid() == 0) {
+        g_printerr("scu: host service needs a private host-user directory\n");
+        return 1;
+    }
+    GError *error = NULL;
+    host.bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, &error);
+    host.name = g_strdup_printf("org.anatase.Spaces.Computer.p%lu.r%08x", (unsigned long)getpid(), g_random_int());
+    if (!host.bus) {
+        goto failed;
+    }
+    GVariant *reply = host_call("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
+        "RequestName", g_variant_new("(su)", host.name, 4), NULL, NULL, &error);
+    if (!reply) {
+        goto failed;
+    }
+    g_variant_unref(reply);
+    GDBusNodeInfo *publisher = g_dbus_node_info_new_for_xml(geometry_xml, NULL);
+    static const GDBusInterfaceVTable publish_table = {.method_call = host_publish};
+    g_dbus_connection_register_object(host.bus, GEOMETRY_PATH, publisher->interfaces[0],
+        &publish_table, NULL, NULL, &error);
+    g_dbus_node_info_unref(publisher);
+    if (error) {
+        goto failed;
+    }
+    host.interface = g_dbus_node_info_new_for_xml(computer_xml, NULL);
+    host.peers = g_ptr_array_new_with_free_func(free_peer);
+    GDBusAuthObserver *observer = g_dbus_auth_observer_new();
+    g_signal_connect(observer, "authorize-authenticated-peer", G_CALLBACK(authorize_peer), NULL);
+    char *escaped = g_dbus_address_escape_value(socket_path);
+    char *address = g_strconcat("unix:path=", escaped, NULL);
+    char *guid = g_dbus_generate_guid();
+    mode_t old_mask = umask(0077);
+    host.server = g_dbus_server_new_sync(address, G_DBUS_SERVER_FLAGS_NONE,
+        guid, observer, NULL, &error);
+    umask(old_mask);
+    g_free(escaped); g_free(address); g_free(guid);
+    g_object_unref(observer);
+    if (!host.server) {
+        goto failed;
+    }
+    chmod(socket_path, 0600);
+    g_signal_connect(host.server, "new-connection", G_CALLBACK(host_new_connection), NULL);
+    g_dbus_server_start(host.server);
+    if (ready_fd >= 0) {
+        if (write(ready_fd, "1", 1) != 1) {
+            close(ready_fd);
+            goto failed;
+        }
+        close(ready_fd);
+    }
+    while (!g_atomic_int_get(&scu.stopping)) {
+        while (g_main_context_iteration(NULL, FALSE)) {
+        }
+        for (guint i = host.peers->len; i > 0 && !host.busy; i--) {
+            ComputerPeer *peer = g_ptr_array_index(host.peers, i - 1);
+            if (g_dbus_connection_is_closed(peer->connection)) {
+                g_ptr_array_remove_index(host.peers, i - 1);
+            }
+        }
+        g_usleep(1000);
+    }
+    g_dbus_server_stop(host.server);
+    g_ptr_array_unref(host.peers);
+    unload_geometry_script();
+    g_dbus_connection_flush_sync(host.bus, NULL, NULL);
+    g_object_unref(host.server);
+    g_dbus_node_info_unref(host.interface);
+    g_object_unref(host.bus);
+    unlink(socket_path);
+    g_free(host.name); g_free(host.owner); g_free(host.token); g_free(host.geometry);
+    return 0;
+failed:
+    g_printerr("scu: cannot start KWin host service: %s\n", error ? error->message : "initialization failed");
+    g_clear_error(&error);
+    return 1;
+}
+
 /* Keep enrollment discoverable without starting MCP or touching the desktop. */
 static void print_help(FILE *stream)
 {
@@ -4388,6 +5174,9 @@ int main(int argc, char **argv)
         print_help(stdout);
         return 0;
     }
+    if (argc == 4 && !strcmp(argv[1], "--host-service")) {
+        return run_host_service(argv[2], (int)g_ascii_strtoll(argv[3], NULL, 10));
+    }
     if (argc == 3 && !strcmp(argv[1], "--atspi-worker")) {
         return run_atspi_worker((guint)g_ascii_strtoull(argv[2], NULL, 10));
     }
@@ -4411,10 +5200,8 @@ int main(int argc, char **argv)
         } else if (p) {
             handle_request(p);
             yyjson_doc_free(p);
-        } else if (scu.generation) {
-            scu_gate();
-            g_clear_pointer(&scu.code, g_free);
-            g_clear_pointer(&scu.hint, g_free);
+        } else {
+            refresh_accessibility();
         }
         poll_visual_events();
         while (g_main_context_iteration(NULL, FALSE)) {

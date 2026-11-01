@@ -24,7 +24,7 @@ static bool fake_capability(
     struct ei_device *device, enum ei_device_capability capability)
 {
     (void)device;
-    return capability == EI_DEVICE_CAP_POINTER_ABSOLUTE;
+    return capability == EI_DEVICE_CAP_POINTER_ABSOLUTE || capability == EI_DEVICE_CAP_BUTTON;
 }
 
 static struct ei_region *fake_region(struct ei_device *pointer, size_t index)
@@ -53,6 +53,22 @@ static uint32_t fake_height(struct ei_region *region)
     return ((TestRegion *)region)->height;
 }
 
+static void reset_error(void)
+{
+    g_clear_pointer(&scu.code, g_free);
+    g_clear_pointer(&scu.hint, g_free);
+}
+
+static void establish_canvas(guint width, guint height)
+{
+    CanvasLayout layout;
+    char *key = NULL;
+    assert(canvas_layout(&layout, &key));
+    g_free(visual.canvas.key);
+    visual.canvas = (CanvasSnapshot){.id = 1, .key = key,
+        .width = width, .height = height, .layout = layout};
+}
+
 static void test_mapping(void)
 {
     TestDevice raw = {
@@ -62,6 +78,11 @@ static void test_mapping(void)
     visual.devices = g_ptr_array_new();
     g_ptr_array_add(visual.devices, &device);
     visual.display_count = 2;
+    visual.displays[0] = (Display){.mapping_id = "left", .width = 3840, .height = 2160,
+        .has_geometry = TRUE, .logical_x = -1920, .logical_y = -200,
+        .logical_width = 1920, .logical_height = 1080};
+    visual.displays[1] = (Display){.mapping_id = "right", .width = 2560, .height = 1440,
+        .has_geometry = TRUE, .logical_width = 2560, .logical_height = 1440};
     ei_api.device_has_capability = fake_capability;
     ei_api.device_get_region = fake_region;
     ei_api.region_get_mapping_id = fake_mapping;
@@ -69,129 +90,159 @@ static void test_mapping(void)
     ei_api.region_get_y = fake_y;
     ei_api.region_get_width = fake_width;
     ei_api.region_get_height = fake_height;
-    Display display = {.mapping_id = "left",
-        .capture_id = "capture",
-        .revision = 1,
-        .capture_revision = 1,
-        .capture_width = 960,
-        .capture_height = 540};
+    establish_canvas(1120, 410);
     yyjson_doc *arguments = yyjson_read("{}", 2, 0);
     struct ei_device *mapped;
     double x, y;
-    assert(pointer_target(
-        &display, yyjson_doc_get_root(arguments), 480, 270, &mapped, &x, &y));
+    assert(pointer_target(yyjson_doc_get_root(arguments), 240, 135, FALSE, &mapped, &x, &y));
     assert(mapped == (struct ei_device *)&raw && x == -960 && y == 340);
-    display.mapping_id = "right";
-    assert(pointer_target(
-        &display, yyjson_doc_get_root(arguments), 480, 270, &mapped, &x, &y));
+    assert(pointer_target(yyjson_doc_get_root(arguments), 800, 230, FALSE, &mapped, &x, &y));
     assert(x == 1280 && y == 720);
+    assert(!pointer_target(yyjson_doc_get_root(arguments), 1000, 5, FALSE, &mapped, &x, &y));
+    assert(!strcmp(scu.code, "invalid_coordinates"));
+    reset_error();
+    assert(pointer_target(yyjson_doc_get_root(arguments), 1000, 5, TRUE, &mapped, &x, &y));
+    assert(mapped == NULL); /* Intermediate drag samples may cross a gap. */
+    assert(!pointer_target(yyjson_doc_get_root(arguments), 1120, 0, FALSE, &mapped, &x, &y));
+    reset_error();
+    visual.displays[0].has_geometry = visual.displays[1].has_geometry = FALSE;
+    CanvasLayout unavailable; char *unused = NULL;
+    assert(!canvas_layout(&unavailable, &unused));
+    assert(!strcmp(scu.code, "canvas_layout_unavailable"));
+    reset_error();
+    visual.displays[0].has_geometry = visual.displays[1].has_geometry = TRUE;
+    establish_canvas(1120, 410);
     raw.regions[1].mapping = "left";
-    display.mapping_id = "left";
-    assert(!pointer_target(
-        &display, yyjson_doc_get_root(arguments), 10, 10, &mapped, &x, &y));
-    assert(strcmp(scu.code, "ambiguous_display_mapping") == 0);
-    g_clear_pointer(&scu.code, g_free);
-    display.capture_revision = 0;
-    assert(!pointer_target(
-        &display, yyjson_doc_get_root(arguments), 0, 0, &mapped, &x, &y));
-    assert(strcmp(scu.code, "stale_capture") == 0);
+    assert(!validate_canvas(0));
+    assert(!strcmp(scu.code, "stale_capture"));
+    reset_error();
+    establish_canvas(1120, 410);
+    assert(!pointer_target(yyjson_doc_get_root(arguments), 240, 135, FALSE, &mapped, &x, &y));
+    assert(!strcmp(scu.code, "ambiguous_display_mapping"));
+    reset_error();
+    visual.displays[0].revision++;
+    assert(!validate_canvas(0));
+    assert(!strcmp(scu.code, "stale_capture"));
+    reset_error();
+    /* Prefer a matching absolute pointer over an earlier relative/button device. */
+    TestDevice other = {0};
+    InputDevice first = {.device = (struct ei_device *)&other, .resumed = TRUE};
+    g_ptr_array_insert(visual.devices, 0, &first);
+    assert(seat_device((struct ei_device *)&raw, EI_DEVICE_CAP_BUTTON) == &device);
     yyjson_doc_free(arguments);
     g_ptr_array_unref(visual.devices);
+    visual.devices = NULL;
 }
 
-static struct pw_buffer fake_buffer;
-static gboolean queued;
-static struct pw_buffer *fake_dequeue(struct pw_stream *stream)
+/* QImage decoding is tested against independent literal pixels. */
+static void test_images(void)
 {
-    (void)stream;
-    return queued ? NULL : (queued = TRUE, &fake_buffer);
-}
-static int fake_queue(struct pw_stream *stream, struct pw_buffer *buffer)
-{
-    (void)stream;
-    (void)buffer;
-    return 0;
-}
-
-static void test_frame(void)
-{
-    unsigned char pixels[] = {0, 0, 255, 0, 0, 255, 0, 0};
-    struct spa_chunk chunk = {.offset = 0, .size = sizeof(pixels), .stride = 8};
-    struct spa_data plane = {
-        .data = pixels, .maxsize = sizeof(pixels), .chunk = &chunk};
-    struct spa_buffer raw = {.n_datas = 1, .datas = &plane};
-    fake_buffer.buffer = &raw;
-    pipewire.stream_dequeue_buffer = fake_dequeue;
-    pipewire.stream_queue_buffer = fake_queue;
-    Display display = {
-        .width = 2, .height = 1, .format = {.format = SPA_VIDEO_FORMAT_BGRx}};
-    stream_process(&display);
-    assert(display.frame_sequence == 1 && display.frame_received > 0);
-    assert(display.revision == 0); /* Frame receipt must not change geometry. */
-    gsize size;
-    const unsigned char *result = g_bytes_get_data(display.pixels, &size);
-    const unsigned char expected[] = {255, 0, 0, 0, 255, 0};
-    assert(size == sizeof(expected) && memcmp(result, expected, size) == 0);
-    g_bytes_unref(display.pixels);
-    display.pixels = NULL;
-    chunk.size = 2;
-    queued = FALSE;
-    stream_process(&display);
-    assert(display.pixels == NULL); /* Truncated buffers must never be read. */
-}
-
-static void test_png(void)
-{
-    assert(load_visual_libraries());
-    static const unsigned char pixels[] = {255, 0, 0, 0, 255, 0};
-    Display *display = &visual.displays[0];
-    *display = (Display){.width = 2, .height = 1, .revision = 1};
-    strcpy(display->id, "display-1");
-    visual.display_count = 1;
-    display->pixels = g_bytes_new_static(pixels, sizeof(pixels));
-    const char *request = "{\"max_image_dimension\":1}";
-    yyjson_doc *arguments = yyjson_read(request, strlen(request), 0);
-    JsonResult *result = capture_desktop(display, yyjson_doc_get_root(arguments));
-    assert(
-        result != NULL && display->capture_width == 1 && display->capture_height == 1);
-    JsonResult *image = yyjson_mut_arr_get(scu.images, 0);
-    const char *base64 = yyjson_mut_get_str(yyjson_mut_obj_get(image, "data"));
-    gsize size;
-    guchar *png = g_base64_decode(base64, &size);
-    assert(size > 24 && memcmp(png, "\x89PNG\r\n\x1a\n", 8) == 0);
-    g_free(png);
-    yyjson_doc_free(arguments);
+    scu.doc = yyjson_mut_doc_new(NULL);
+    GError *error = NULL;
+    GCredentials *credentials = g_credentials_new();
+    assert(authorize_peer(NULL, NULL, credentials, NULL));
+    assert(g_credentials_set_unix_user(credentials, getuid() + 1, &error));
+    assert(!authorize_peer(NULL, NULL, credentials, NULL));
+    g_object_unref(credentials);
+    const guchar rgb[] = {10,20,30, 40,50,60};
+    GBytes *pixels = decode_kwin_pixels(rgb, sizeof(rgb), 2, 1, 6, 13, &error);
+    assert(pixels && !error && g_bytes_equal(pixels, g_bytes_new_static(rgb, sizeof(rgb))));
+    g_bytes_unref(pixels);
+    assert(!decode_kwin_pixels(rgb, 5, 2, 1, 6, 13, &error));
+    g_clear_error(&error);
+    assert(!decode_kwin_pixels(rgb, 6, 2, 1, 6, 999, &error));
+    g_clear_error(&error);
+    const uint32_t argb[] = {0xff112233, 0x80402010};
+    pixels = decode_kwin_pixels((const guchar *)argb, sizeof(argb), 2, 1, 8, 5, &error);
+    const guchar expected[] = {0x11,0x22,0x33, 0x20,0x10,0x08};
+    assert(pixels && !memcmp(g_bytes_get_data(pixels, NULL), expected, sizeof(expected)));
+    int fd = sealed_pixels(pixels, &error);
+    assert(fd >= 0 && (fcntl(fd, F_GET_SEALS) & F_SEAL_WRITE));
+    assert(write(fd, "x", 1) == -1 && errno == EPERM);
+    close(fd);
+    g_bytes_unref(pixels);
+    /* Native detail survives a tiny overview. Three independently patterned
+     * streams occupy a mixed-scale layout with a black inter-output gap. */
+    CanvasLayout layout = {.count=3};
+    layout.tiles[0]=(CanvasRect){-4,-1,4,2};
+    layout.tiles[1]=(CanvasRect){0,0,4,2};
+    layout.tiles[2]=(CanvasRect){5,0,4,2};
+    GBytes *frames[3];
+    guchar original[8*4*3];
+    for (guint i=0;i<sizeof(original);i++) original[i]=(i*37)%256;
+    for (guint i=0;i<3;i++) {
+        layout.native_widths[i]=8; layout.native_heights[i]=4;
+        frames[i]=g_bytes_new_static(original,sizeof(original));
+    }
+    CanvasRect full={-4,-1,13,3}, crop={-4,-1,4,2};
+    pixels=render_canvas(&layout,&full,13,3,frames);
+    assert(pixels && g_bytes_get_size(pixels)==13*3*3);
+    const guchar *data=g_bytes_get_data(pixels,NULL);
+    assert(data[(1*13+8)*3]==0); /* gap at logical x=4 */
+    g_bytes_unref(pixels);
+    pixels=render_canvas(&layout,&crop,8,4,frames);
+    assert(pixels && !memcmp(g_bytes_get_data(pixels,NULL),original,sizeof(original)));
+    g_bytes_unref(pixels);
+    for(guint i=0;i<3;i++)g_bytes_unref(frames[i]);
+    yyjson_mut_doc_free(scu.doc);
 }
 
-static void test_tokens(void)
-{
-    save_restore_token("one-use-token");
-    char *token = read_restore_token();
-    assert(token != NULL && strcmp(token, "one-use-token") == 0);
-    g_free(token);
-    char *path = restore_token_path();
-    struct stat metadata;
-    assert(scu_lstat(path, &metadata) == 0 && (metadata.st_mode & 077) == 0);
-    save_restore_token(NULL);
-    assert(read_restore_token() == NULL);
-    assert(symlink("/etc/passwd", path) == 0);
-    assert(read_restore_token() == NULL);
-    unlink(path);
-    g_free(path);
-}
-
-/* A real EIS peer validates wire delivery and release events. It runs on its
- * own thread just like the compositor; production still uses only libei. */
 typedef struct {
     struct eis *server;
-    gint stop, keys_down, buttons_down, keys, clicks, scrolls;
-    double x, y;
+    gint stop, keys_down, buttons_down, keys, clicks, scrolls, motions, dragged_motions;
+    gint x, y;
+    int control;
+    GPtrArray *clients;
+    GHashTable *bound_seats;
+    struct eis_client *keys_client, *buttons_client;
 } InputOracle;
+
+static void add_pointer(struct eis_seat *seat, const char *mapping, gint x, gint y)
+{
+    struct eis_device *device = eis_seat_new_device(seat);
+    eis_device_configure_name(device, mapping);
+    eis_device_configure_capability(device, EIS_DEVICE_CAP_POINTER_ABSOLUTE);
+    struct eis_region *region = eis_device_new_region(device);
+    eis_region_set_offset(region, x, y);
+    eis_region_set_size(region, 1920, 1080);
+    eis_region_set_mapping_id(region, mapping);
+    eis_region_add(region);
+    eis_region_unref(region);
+    eis_device_add(device);
+    eis_device_unref(device);
+}
 
 static gpointer serve_input(gpointer pointer)
 {
     InputOracle *oracle = pointer;
     while (!g_atomic_int_get(&oracle->stop)) {
+        char command;
+        ssize_t received = recv(oracle->control, &command, 1, MSG_DONTWAIT);
+        if (received == 0) {
+            break;
+        }
+        if (received > 0) {
+            if(command=='C') {
+                int fd=eis_backend_fd_add_client(oracle->server);
+                char data='F'; struct iovec iov={&data,1};
+                char control[CMSG_SPACE(sizeof(int))]={0};
+                struct msghdr message={.msg_iov=&iov,.msg_iovlen=1,.msg_control=control,.msg_controllen=sizeof(control)};
+                struct cmsghdr *c=CMSG_FIRSTHDR(&message);
+                c->cmsg_level=SOL_SOCKET;c->cmsg_type=SCM_RIGHTS;c->cmsg_len=CMSG_LEN(sizeof(int));
+                memcpy(CMSG_DATA(c),&fd,sizeof(fd));
+                assert(sendmsg(oracle->control,&message,0)==1);close(fd);
+            } else if(command=='S') {
+                char *json=g_strdup_printf("{\"keys_down\":%d,\"buttons_down\":%d,\"keys\":%d,\"clicks\":%d,\"scrolls\":%d,\"motions\":%d,\"dragged_motions\":%d,\"x\":%d,\"y\":%d}",
+                    oracle->keys_down,oracle->buttons_down,oracle->keys,oracle->clicks,oracle->scrolls,
+                    oracle->motions,oracle->dragged_motions,oracle->x,oracle->y);
+                assert(send(oracle->control,json,strlen(json),0)>0);g_free(json);
+            } else if(command=='D') {
+                for(guint i=0;i<oracle->clients->len;i++)eis_client_disconnect(g_ptr_array_index(oracle->clients,i));
+                g_ptr_array_set_size(oracle->clients,0);
+            } else if(command=='Q') {
+                break;
+            }
+        }
         eis_dispatch(oracle->server);
         struct eis_event *event;
         while ((event = eis_get_event(oracle->server)) != NULL) {
@@ -199,6 +250,7 @@ static gpointer serve_input(gpointer pointer)
             if (type == EIS_EVENT_CLIENT_CONNECT) {
                 struct eis_client *client = eis_event_get_client(event);
                 eis_client_connect(client);
+                g_ptr_array_add(oracle->clients,eis_client_ref(client));
                 struct eis_seat *seat = eis_client_new_seat(client, "fixture");
                 eis_seat_configure_capability(seat, EIS_DEVICE_CAP_POINTER_ABSOLUTE);
                 eis_seat_configure_capability(seat, EIS_DEVICE_CAP_BUTTON);
@@ -206,8 +258,42 @@ static gpointer serve_input(gpointer pointer)
                 eis_seat_configure_capability(seat, EIS_DEVICE_CAP_KEYBOARD);
                 eis_seat_add(seat);
                 eis_seat_unref(seat);
+                seat = eis_client_new_seat(client, "isolated");
+                eis_seat_configure_capability(seat, EIS_DEVICE_CAP_POINTER_ABSOLUTE);
+                eis_seat_add(seat);
+                eis_seat_unref(seat);
+            } else if (type == EIS_EVENT_CLIENT_DISCONNECT) {
+                struct eis_client *client = eis_event_get_client(event);
+                /* The compositor neutralizes a disconnected context even if
+                 * teardown overtakes its queued release events. Keep the
+                 * oracle's logical state consistent with that lifecycle. */
+                if (oracle->keys_client == client) {
+                    oracle->keys_down = 0;
+                    oracle->keys_client = NULL;
+                }
+                if (oracle->buttons_client == client) {
+                    oracle->buttons_down = 0;
+                    oracle->buttons_client = NULL;
+                }
+                g_hash_table_remove_all(oracle->bound_seats);
+                g_ptr_array_remove_fast(oracle->clients, client);
             } else if (type == EIS_EVENT_SEAT_BIND) {
                 struct eis_seat *seat = eis_event_get_seat(event);
+                if(g_hash_table_contains(oracle->bound_seats,seat)) {
+                    eis_event_unref(event);continue;
+                }
+                if(strcmp(eis_seat_get_name(seat),"isolated") &&
+                    (!eis_event_seat_has_capability(event,EIS_DEVICE_CAP_KEYBOARD) ||
+                     !eis_event_seat_has_capability(event,EIS_DEVICE_CAP_BUTTON) ||
+                     !eis_event_seat_has_capability(event,EIS_DEVICE_CAP_SCROLL))) {
+                    eis_event_unref(event);continue;
+                }
+                g_hash_table_add(oracle->bound_seats,seat);
+                if (!strcmp(eis_seat_get_name(seat), "isolated")) {
+                    add_pointer(seat, "isolated", 8000, 0);
+                    eis_event_unref(event);
+                    continue;
+                }
                 struct eis_device *device = eis_seat_new_device(seat);
                 eis_device_configure_name(device, "fixture input");
                 eis_device_configure_capability(
@@ -217,7 +303,7 @@ static gpointer serve_input(gpointer pointer)
                 eis_device_configure_capability(device, EIS_DEVICE_CAP_KEYBOARD);
                 struct eis_region *region = eis_device_new_region(device);
                 eis_region_set_size(region, 1920, 1080);
-                eis_region_set_mapping_id(region, "fixture");
+                eis_region_set_mapping_id(region, "center");
                 eis_region_add(region);
                 eis_region_unref(region);
                 struct xkb_context *context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
@@ -238,23 +324,32 @@ static gpointer serve_input(gpointer pointer)
                 xkb_keymap_unref(keymap);
                 xkb_context_unref(context);
                 eis_device_add(device);
-                eis_device_resume(device);
-                eis_device_unref(device);
+                            eis_device_unref(device);
+                add_pointer(seat, "left", -1920, -200);
+                add_pointer(seat, "right", 2080, 0);
+            } else if (type == EIS_EVENT_DEVICE_READY) {
+                eis_device_resume(eis_event_get_device(event));
             } else if (type == EIS_EVENT_KEYBOARD_KEY) {
                 gboolean down = eis_event_keyboard_get_key_is_press(event);
                 g_atomic_int_add(&oracle->keys_down, down ? 1 : -1);
                 if (down) {
+                    oracle->keys_client = eis_device_get_client(eis_event_get_device(event));
                     g_atomic_int_inc(&oracle->keys);
                 }
             } else if (type == EIS_EVENT_BUTTON_BUTTON) {
                 gboolean down = eis_event_button_get_is_press(event);
                 g_atomic_int_add(&oracle->buttons_down, down ? 1 : -1);
                 if (down) {
+                    oracle->buttons_client = eis_device_get_client(eis_event_get_device(event));
                     g_atomic_int_inc(&oracle->clicks);
                 }
             } else if (type == EIS_EVENT_POINTER_MOTION_ABSOLUTE) {
-                oracle->x = eis_event_pointer_get_absolute_x(event);
-                oracle->y = eis_event_pointer_get_absolute_y(event);
+                g_atomic_int_set(&oracle->x, (gint)eis_event_pointer_get_absolute_x(event));
+                g_atomic_int_set(&oracle->y, (gint)eis_event_pointer_get_absolute_y(event));
+                g_atomic_int_inc(&oracle->motions);
+                if (g_atomic_int_get(&oracle->buttons_down)) {
+                    g_atomic_int_inc(&oracle->dragged_motions);
+                }
             } else if (type == EIS_EVENT_SCROLL_DISCRETE) {
                 g_atomic_int_inc(&oracle->scrolls);
             }
@@ -265,264 +360,32 @@ static gpointer serve_input(gpointer pointer)
     return NULL;
 }
 
-static gpointer cancel_input(gpointer unused)
+
+static void free_oracle_client(gpointer pointer)
 {
-    (void)unused;
-    g_usleep(70000);
-    g_atomic_int_set(&scu.cancelled, 1);
-    return NULL;
+    eis_client_unref(pointer);
 }
 
-static JsonResult *batch(const char *json)
+static int run_eis_server(int fd)
 {
-    yyjson_doc *request = yyjson_read(json, strlen(json), 0);
-    JsonValue *args = yyjson_doc_get_root(request);
-    const Tool *tool = find_tool("run_steps");
-    assert(validate_arguments(tool, args));
-    JsonResult *result = execute_tool(tool, args);
-    assert(result != NULL);
-    yyjson_doc_free(request);
-    return result;
-}
-
-static gboolean receive_frame(gpointer pointer)
-{
-    Display *display = pointer;
-    display->frame_sequence++;
-    display->frame_received = g_get_monotonic_time();
-    return G_SOURCE_REMOVE;
-}
-
-static gboolean resize_display(gpointer pointer)
-{
-    Display *display = pointer;
-    /* Same geometry invalidation performed by stream_format_changed. */
-    display->revision++;
-    display->capture_revision = 0;
-    receive_frame(pointer);
-    return G_SOURCE_REMOVE;
-}
-
-static gboolean revoke_permission(gpointer unused)
-{
-    (void)unused;
-    unlink(SCU_ATSPI_SOCKET);
-    return G_SOURCE_REMOVE;
-}
-
-static void test_batch_observation(InputOracle *oracle)
-{
-    static const unsigned char pixels[] = {255, 0, 0, 0, 255, 0};
-    for (unsigned index = 0; index < 2; index++) {
-        Display *display = &visual.displays[index];
-        *display = (Display){.width = 2, .height = 1, .revision = 1, .frame_sequence = 1};
-        g_snprintf(display->id, sizeof(display->id), "display-%u", index + 1);
-        display->pixels = g_bytes_new_static(pixels, sizeof(pixels));
-        display->mapping_id = g_strdup(index ? "other" : "fixture");
-    }
-    visual.displays[1].width = 2000;
-    g_bytes_unref(visual.displays[1].pixels);
-    visual.displays[1].pixels = g_bytes_new_take(g_malloc0(6000), 6000);
-    visual.display_count = 2;
-    assert(selected_display("display-2") == &visual.displays[1]);
-    assert(selected_display(NULL) == &visual.displays[1]);
-    assert(selected_display("primary") == &visual.displays[0]);
-    assert(selected_display("missing") == NULL);
-    clear_tool_error();
-    assert(selected_display(NULL) == &visual.displays[0]);
-
-    /* A frame queued before delivery is drained, not called a new observation. */
-    Display *display = selected_display("display-2");
-    guint64 before_images = yyjson_mut_arr_size(scu.images);
-    guint64 before_frames = display->frame_sequence;
-    receive_frame(display);
-    g_timeout_add(150, receive_frame, display);
-    JsonResult *result = batch("{\"steps\":[{\"press_key\":{\"key\":\"a\"}}]}");
-    assert(yyjson_mut_is_true(yyjson_mut_obj_get(result, "ok")));
-    assert(yyjson_mut_obj_get(result, "steps") == NULL);
-    assert(yyjson_mut_get_uint(yyjson_mut_obj_get(result, "completed")) == 1);
-    JsonResult *observation = yyjson_mut_obj_get(result, "observation");
-    assert(strcmp(yyjson_mut_get_str(yyjson_mut_obj_get(observation, "display")), "display-2") == 0);
-    assert(strcmp(yyjson_mut_get_str(yyjson_mut_obj_get(observation, "frame_status")), "new") == 0);
-    assert(yyjson_mut_get_uint(yyjson_mut_obj_get(observation, "screenshot_width")) == 1600);
-    assert(display->frame_sequence > before_frames);
-    assert(yyjson_mut_arr_size(scu.images) == before_images + 1);
-    JsonResult *envelope = result_object();
-    add_tool_result(envelope, find_tool("run_steps"), result);
-    assert(yyjson_mut_is_false(yyjson_mut_obj_get(envelope, "isError")));
-    JsonResult *content = yyjson_mut_obj_get(envelope, "content");
-    assert(yyjson_mut_arr_size(content) == 2);
-    assert(strcmp(yyjson_mut_get_str(yyjson_mut_obj_get(
-        yyjson_mut_arr_get(content, 1), "type")), "image") == 0);
-
-    result = batch("{\"steps\":[{\"press_key\":{\"key\":\"a\"}}],\"observe\":false}");
-    assert(yyjson_mut_obj_get(result, "observation") == NULL);
-    assert(yyjson_mut_arr_size(scu.images) == before_images + 1);
-    const char *status = observation_frame(display);
-    assert(status && strcmp(status, "cached") == 0); /* Static desktop, bounded wait. */
-
-    /* An older libei still captures; it cannot prove input synchronization. */
-    __typeof__(ei_api.new_ping) saved_ping = ei_api.new_ping;
-    ei_api.new_ping = NULL;
-    visual.input_sequence++;
-    visual.last_input_time = g_get_monotonic_time();
-    g_timeout_add(120, receive_frame, display);
-    status = observation_frame(display);
-    assert(status && strcmp(status, "unknown") == 0);
-    ei_api.new_ping = saved_ping;
-
-    result = batch("{\"steps\":[{\"press_key\":{\"key\":\"a\"}}],"
-        "\"observe\":{\"kind\":\"desktop\",\"display_id\":\"primary\",\"max_image_dimension\":1}}");
-    observation = yyjson_mut_obj_get(result, "observation");
-    assert(yyjson_mut_get_uint(yyjson_mut_obj_get(observation, "screenshot_width")) == 1);
-    assert(visual.selected_display == 0);
-
-    /* Pixel defaults are shared within a batch; no intermediate capture replaces
-     * their token. Explicit targets on other displays do not inherit that token. */
-    char *json = g_strdup_printf("{\"target\":{\"kind\":\"desktop\",\"display_id\":\"primary\"},"
-        "\"capture_id\":\"%s\",\"steps\":[{\"click\":{\"x\":0,\"y\":0}},"
-        "{\"click\":{\"x\":0,\"y\":0}}],\"observe\":false}", visual.displays[0].capture_id);
-    gint clicks = g_atomic_int_get(&oracle->clicks);
-    result = batch(json);
-    assert(yyjson_mut_is_true(yyjson_mut_obj_get(result, "ok")));
-    assert(scu_pause(20));
-    assert(g_atomic_int_get(&oracle->clicks) == clicks + 2);
-    yyjson_doc *defaults = yyjson_read(json, strlen(json), 0);
-    const char *override = "{\"target\":{\"kind\":\"desktop\",\"display_id\":\"display-2\"},\"x\":0,\"y\":0}";
-    yyjson_doc *step = yyjson_read(override, strlen(override), 0);
-    yyjson_doc *merged = merge_batch_defaults(yyjson_doc_get_root(step), yyjson_doc_get_root(defaults), FALSE);
-    assert(json_member(yyjson_doc_get_root(merged), "capture_id") == NULL);
-    yyjson_doc_free(merged);
-    yyjson_doc_free(step);
-    yyjson_doc_free(defaults);
-    g_free(json);
-
-    result = batch("{\"steps\":[{\"press_key\":{\"key\":\"a\"}},"
-        "{\"press_key\":{\"key\":\"not-a-real-keysym\"}},"
-        "{\"press_key\":{\"key\":\"b\"}}],\"observe\":false}");
-    assert(yyjson_mut_is_false(yyjson_mut_obj_get(result, "ok")));
-    assert(yyjson_mut_get_uint(yyjson_mut_obj_get(result, "completed")) == 1);
-    assert(yyjson_mut_get_uint(yyjson_mut_obj_get(result, "skipped")) == 1);
-    assert(yyjson_mut_get_uint(yyjson_mut_obj_get(yyjson_mut_obj_get(result, "failed"), "index")) == 1);
-
-    /* Observation failure never erases a successful action. */
-    result = batch("{\"steps\":[{\"press_key\":{\"key\":\"a\"}}],"
-        "\"observe\":{\"kind\":\"desktop\",\"display_id\":\"missing\"}}");
-    assert(yyjson_mut_is_false(yyjson_mut_obj_get(result, "ok")));
-    assert(yyjson_mut_get_uint(yyjson_mut_obj_get(result, "completed")) == 1);
-    assert(yyjson_mut_obj_get(result, "observation_error") != NULL);
-    assert(yyjson_mut_obj_get(result, "failed") == NULL);
-
-    display = &visual.displays[0];
-    visual.input_sequence++;
-    visual.last_input_time = g_get_monotonic_time();
-    g_timeout_add(150, resize_display, display);
-    status = observation_frame(display);
-    assert(status && strcmp(status, "new") == 0 && display->capture_revision == 0);
-
-    visual.input_sequence++;
-    GThread *canceller = g_thread_new("cancel-observation", cancel_input, NULL);
-    assert(observation_frame(display) == NULL);
-    g_thread_join(canceller);
-    g_atomic_int_set(&scu.cancelled, 0);
-    assert(strcmp(scu.code, "cancelled") == 0);
-    clear_tool_error();
-
-    visual.input_sequence++;
-    g_timeout_add(30, revoke_permission, NULL);
-    assert(observation_frame(display) == NULL);
-    assert(strcmp(scu.code, "accessibility_permission_required") == 0);
-    assert(visual.session == NULL); /* Revocation also disposes captures/input. */
-    clear_tool_error();
-}
-
-static void test_input(void)
-{
-    /* The gate checks this isolated endpoint; no host bus is contacted. */
-    int socket_fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    struct sockaddr_un address = {.sun_family = AF_UNIX};
-    g_strlcpy(address.sun_path, SCU_ATSPI_SOCKET, sizeof(address.sun_path));
-    assert(bind(socket_fd, (struct sockaddr *)&address, sizeof(address)) == 0);
-    assert(load_visual_libraries());
-    InputOracle oracle = {.server = eis_new(NULL)};
-    assert(eis_setup_backend_fd(oracle.server) == 0);
-    int fd = eis_backend_fd_add_client(oracle.server);
-    assert(fd >= 0);
-    GThread *thread = g_thread_new("eis-oracle", serve_input, &oracle);
-    visual.session = g_strdup("/test/session");
-    visual.devices = g_ptr_array_new_with_free_func(free_input_device);
-    visual.input = ei_api.new_sender(NULL);
-    assert(ei_api.setup_backend_fd(visual.input, fd) == 0);
-    scu.deadline = g_get_monotonic_time() + 20 * G_USEC_PER_SEC;
-    InputDevice *keyboard = wait_for_device(EI_DEVICE_CAP_KEYBOARD);
-    assert(keyboard != NULL);
-    guint codes[] = {KEY_LEFTCTRL, KEY_A};
-    assert(press_codes(keyboard->device, codes, G_N_ELEMENTS(codes)));
-    const char *chord =
-        "{\"keys\":[\"exclam\",\"at\",\"numbersign\",\"dollar\",\"percent\"]}";
-    yyjson_doc *chord_arguments = yyjson_read(chord, strlen(chord), 0);
-    assert(keyboard_action("hotkey", yyjson_doc_get_root(chord_arguments)) != NULL);
-    yyjson_doc_free(chord_arguments);
-    Display display = {.mapping_id = "fixture",
-        .capture_id = "one",
-        .capture_width = 960,
-        .capture_height = 540,
-        .revision = 1,
-        .capture_revision = 1};
-    visual.display_count = 1;
-    const char *request = "{\"x\":100,\"y\":200,\"direction\":\"down\",\"amount\":2}";
-    yyjson_doc *arguments = yyjson_read(request, strlen(request), 0);
-    assert(pointer_action("click", &display, yyjson_doc_get_root(arguments)) != NULL);
-    assert(pointer_action("scroll", &display, yyjson_doc_get_root(arguments)) != NULL);
-    yyjson_doc_free(arguments);
-    request =
-        "{\"from_x\":100,\"from_y\":200,\"to_x\":200,\"to_y\":250,\"duration_ms\":30}";
-    arguments = yyjson_read(request, strlen(request), 0);
-    assert(pointer_action("drag", &display, yyjson_doc_get_root(arguments)) != NULL);
-    assert(scu_pause(40));
-    assert(oracle.x == 400 && oracle.y == 500);
-    yyjson_doc_free(arguments);
-    request =
-        "{\"from_x\":100,\"from_y\":200,\"to_x\":200,\"to_y\":250,\"duration_ms\":500}";
-    arguments = yyjson_read(request, strlen(request), 0);
-    GThread *canceller = g_thread_new("cancel-input", cancel_input, NULL);
-    assert(pointer_action("drag", &display, yyjson_doc_get_root(arguments)) == NULL);
-    g_thread_join(canceller);
-    g_atomic_int_set(&scu.cancelled, 0);
-    assert(scu_pause(40));
-    assert(g_atomic_int_get(&oracle.keys_down) == 0);
-    assert(g_atomic_int_get(&oracle.buttons_down) == 0);
-    assert(g_atomic_int_get(&oracle.keys) == 8);
-    assert(g_atomic_int_get(&oracle.clicks) == 3);
-    assert(g_atomic_int_get(&oracle.scrolls) == 1);
-    yyjson_doc_free(arguments);
-    clear_tool_error();
-    test_batch_observation(&oracle);
-    scu_visual_close();
-    g_atomic_int_set(&oracle.stop, 1);
-    g_thread_join(thread);
+    InputOracle oracle={.server=eis_new(NULL),.control=fd};
+    oracle.clients=g_ptr_array_new_with_free_func(free_oracle_client);
+    oracle.bound_seats=g_hash_table_new(g_direct_hash,g_direct_equal);
+    eis_set_flag(oracle.server,EIS_FLAG_DEVICE_READY);
+    assert(eis_setup_backend_fd(oracle.server)==0);
+    serve_input(&oracle);
+    for(guint i=0;i<oracle.clients->len;i++)eis_client_disconnect(g_ptr_array_index(oracle.clients,i));
+    g_ptr_array_unref(oracle.clients);
+    g_hash_table_unref(oracle.bound_seats);
     eis_unref(oracle.server);
-    close(socket_fd);
-    unlink(SCU_ATSPI_SOCKET);
+    return 0;
 }
-
-int main(int argc, char **argv)
+int main(int argc,char **argv)
 {
-    assert(argc == 2);
-    scu.doc = yyjson_mut_doc_new(NULL);
-    scu.images = result_array();
-    if (strcmp(argv[1], "mapping") == 0) {
-        test_mapping();
-    } else if (strcmp(argv[1], "frame") == 0) {
-        test_frame();
-    } else if (strcmp(argv[1], "png") == 0) {
-        test_png();
-    } else if (strcmp(argv[1], "tokens") == 0) {
-        test_tokens();
-    } else if (strcmp(argv[1], "input") == 0) {
-        test_input();
-    } else {
-        return 2;
-    }
+    if(argc==3&&!strcmp(argv[1],"eis-server"))return run_eis_server(atoi(argv[2]));
+    assert(argc==2);
+    if(!strcmp(argv[1],"mapping"))test_mapping();
+    else if(!strcmp(argv[1],"images"))test_images();
+    else return 2;
     return 0;
 }

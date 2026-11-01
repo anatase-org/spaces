@@ -37,6 +37,7 @@ SYSTEMD_RUN = "/usr/bin/systemd-run"
 XDG_DBUS_PROXY = "/usr/bin/xdg-dbus-proxy"
 DCONF = "/usr/bin/dconf"
 INTEGRATION_BROKER = "/usr/lib/spaces/spaces-broker"
+COMPUTER_SERVICE = "/usr/lib/spaces/scu-host"
 RUNTIME_ROOT = Path("/run/spaces")
 DESKTOP_ROOT = PurePosixPath("/run/spaces/desktop")
 CREDENTIAL_ROOT = PurePosixPath("/run/spaces/credentials")
@@ -282,6 +283,8 @@ class _ActiveDesktop:
     accessibility_binding: DesktopBind | None = None
     accessibility_source: DesktopBind | None = None
     accessibility_environment_dirty: bool = False
+    computer: PortalProxy | None = None
+    computer_binding: DesktopBind | None = None
 
 
 @dataclass
@@ -294,6 +297,7 @@ class PortalProxy:
     broker_process: subprocess.Popen[bytes] | None = None
     broker_name: str | None = None
     identity: PortalIdentity | None = None
+    executable_identity: tuple[int, int] | None = None
 
     def close(self) -> None:
         if self.control_fd >= 0:
@@ -916,7 +920,7 @@ def _prepare_portal_directory(
     space = RUNTIME_ROOT / space_name
     desktop = space / "desktop"
     parent = desktop / str(user.uid)
-    if component not in {"portal", "a11y"}:
+    if component not in {"portal", "a11y", "computer"}:
         raise ValueError(component)
     directory = parent / component
     expected_owner = 0 if os.geteuid() == 0 else os.getuid()
@@ -1228,6 +1232,52 @@ def start_accessibility_proxy(
         )
     except Exception:
         proxy.close()
+        socket_path.unlink(missing_ok=True)
+        raise
+
+
+def start_computer_service(
+    space_name: str, user: DesktopUser
+) -> tuple[PortalProxy, DesktopBind]:
+    """Expose a private KWin peer, never the unrestricted host session bus."""
+    socket_path = _prepare_portal_directory(space_name, user, component="computer")
+    executable = Path(COMPUTER_SERVICE).stat()
+    ready_read, ready_write = os.pipe2(os.O_CLOEXEC | os.O_NONBLOCK)
+    try:
+        process = subprocess.Popen(
+            [COMPUTER_SERVICE, "--host-service", str(socket_path), str(ready_write)],
+            env={
+                "DBUS_SESSION_BUS_ADDRESS": f"unix:path=/run/user/{user.uid}/bus",
+                "XDG_RUNTIME_DIR": f"/run/user/{user.uid}",
+                "PATH": "/usr/bin",
+                "LANG": "C.UTF-8",
+            },
+            user=user.uid, group=user.gid, pass_fds=(ready_write,),
+            stdout=subprocess.DEVNULL, stderr=None,
+        )
+    except Exception:
+        os.close(ready_read)
+        raise
+    finally:
+        os.close(ready_write)
+    service = PortalProxy(process, ready_read, socket_path)
+    service.executable_identity = (executable.st_dev, executable.st_ino)
+    try:
+        poller = select.poll()
+        poller.register(ready_read, select.POLLIN | select.POLLHUP | select.POLLERR)
+        if (not poller.poll(round(PORTAL_READY_TIMEOUT * 1000))
+                or not os.read(ready_read, 1) or process.poll() is not None):
+            raise core.SpacesError(_("Timed out starting the host computer-use service."))
+        metadata = socket_path.lstat()
+        if (not stat.S_ISSOCK(metadata.st_mode) or metadata.st_uid != user.uid
+                or metadata.st_mode & 0o077):
+            raise core.SpacesError(_("Unsafe host computer-use socket."))
+        return service, DesktopBind(
+            str(DESKTOP_ROOT / str(user.uid) / "computer" / "bus"),
+            socket_path, metadata.st_dev, metadata.st_ino,
+        )
+    except Exception:
+        service.close()
         socket_path.unlink(missing_ok=True)
         raise
 
@@ -2281,6 +2331,7 @@ class DesktopController:
         if current is not None and (
             not user.desktop or not getattr(user, "accessibility", False)
         ):
+            self._revoke_computer(user, current)
             self._revoke_accessibility(user, current)
         environment = host_manager_environment(user)
         selected = (
@@ -2293,6 +2344,7 @@ class DesktopController:
         ):
             # Revoke before planning: an unrelated setup failure must never
             # preserve access to a superseded login or permission grant.
+            self._revoke_computer(user, current)
             self._revoke_accessibility(user, current)
         if selected is None and not credential_agents:
             self.deactivate(user)
@@ -2361,6 +2413,7 @@ class DesktopController:
         if current is not None and current.plan == plan:
             self._repair_portal(user, current)
             self._repair_accessibility(user, current)
+            self._repair_computer(user, current)
             return
         set_status(self.space_name, user.uid, "pending")
         if previous is not None:
@@ -2459,11 +2512,15 @@ class DesktopController:
             if user is not None:
                 self._repair_portal(user, current)
                 self._repair_accessibility(user, current)
+                self._repair_computer(user, current)
 
     def abandon(self) -> None:
         """Forget state after the machine has already removed its namespaces."""
 
         for current in self.active.values():
+            if current.computer is not None:
+                current.computer.close()
+                current.computer.socket_path.unlink(missing_ok=True)
             if current.accessibility is not None:
                 current.accessibility.close()
                 current.accessibility.socket_path.unlink(missing_ok=True)
@@ -2566,6 +2623,7 @@ class DesktopController:
             graphical_session=graphical_session,
         )
         self._repair_accessibility(user, current)
+        self._repair_computer(user, current)
         return current
 
     @staticmethod
@@ -2725,6 +2783,56 @@ class DesktopController:
                 )
             )
 
+    def _revoke_computer(self, user: DesktopUser, current: _ActiveDesktop) -> None:
+        if current.computer is not None:
+            # Termination closes every KWin EIS context, including guest-held FDs.
+            current.computer.close()
+            current.computer.socket_path.unlink(missing_ok=True)
+            current.computer = None
+        if current.computer_binding is not None:
+            try:
+                self._unmount(user.uid, current.computer_binding)
+            except Exception as error:
+                raise DesktopRevocationError(
+                    _("Could not remove the revoked computer-use socket: {error}", error=error)
+                ) from error
+            current.computer_binding = None
+
+    def _repair_computer(self, user: DesktopUser, current: _ActiveDesktop) -> None:
+        if not (user.desktop and current.plan.desktop and current.plan.accessibility
+                and getattr(user, "accessibility", False) and user.uid != 0):
+            self._revoke_computer(user, current)
+            return
+        service = current.computer
+        binding = current.computer_binding
+        if service is not None and binding is not None and service.process.poll() is None:
+            try:
+                metadata = service.socket_path.lstat()
+                executable = Path(COMPUTER_SERVICE).stat() if service.executable_identity else None
+                if (stat.S_ISSOCK(metadata.st_mode) and metadata.st_uid == user.uid
+                        and not metadata.st_mode & 0o077
+                        and (executable is None or service.executable_identity
+                             == (executable.st_dev, executable.st_ino))
+                        and (metadata.st_dev, metadata.st_ino) == (binding.device, binding.inode)):
+                    return
+            except OSError:
+                pass
+        self._revoke_computer(user, current)
+        service = None
+        try:
+            service, binding = start_computer_service(self.space_name, user)
+            self._mount(user.uid, binding)
+            current.computer = service
+            current.computer_binding = binding
+        except Exception as error:
+            if service is not None:
+                service.close()
+                service.socket_path.unlink(missing_ok=True)
+            logger.warning(
+                _("Could not enable KWin computer use for {user}; retrying without affecting desktop forwarding: {error}",
+                  user=user.name, error=error)
+            )
+
     def _repair_portal(
         self,
         user: DesktopUser,
@@ -2849,6 +2957,7 @@ class DesktopController:
         *,
         remove_generated: bool = True,
     ) -> None:
+        self._revoke_computer(user, current)
         self._revoke_accessibility(user, current)
         if self.portals_enabled and current.plan.desktop:
             try:
