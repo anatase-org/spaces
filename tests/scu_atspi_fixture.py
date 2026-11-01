@@ -106,6 +106,15 @@ def main():
     readonly = "--readonly-entry" in sys.argv[3:]
     hidden = "--hidden-button" in sys.argv[3:]
     hidden_container = "--hidden-container" in sys.argv[3:]
+    deep = next((int(arg.split("=", 1)[1]) for arg in sys.argv[3:] if arg.startswith("--deep=")), 0)
+    wide = next((int(arg.split("=", 1)[1]) for arg in sys.argv[3:] if arg.startswith("--wide=")), 0)
+    delayed_window = "--delayed-window" in sys.argv[3:]
+    title_after_attributes = "--title-after-attributes" in sys.argv[3:]
+    geometry_after_attributes = "--geometry-after-attributes" in sys.argv[3:]
+    window_exposed = not delayed_window
+    window_pending = False
+    frame_ready = False
+    extra_paths = [f"{PANEL}/{i}" for i in range(deep)] + [f"{BUTTON}/{i}" for i in range(wide)]
     focused = False
     selected_fixture = "--selection" in sys.argv[3:] or "--selection-unstable" in sys.argv[3:]
     unstable_selection = "--selection-unstable" in sys.argv[3:]
@@ -159,6 +168,11 @@ def main():
         emit_children()
         return GLib.SOURCE_REMOVE
 
+    def expose_window():
+        nonlocal window_exposed
+        window_exposed = True
+        return GLib.SOURCE_REMOVE
+
     def idle_probe(sender):
         emit_children()
         def finished(connection, result, unused):
@@ -173,14 +187,29 @@ def main():
         return GLib.SOURCE_REMOVE
 
     def children(connection, path):
+        nonlocal window_pending
         if connection == registry:
             return [(app.get_unique_name(), ROOT)]
+        if path == ROOT and not window_exposed:
+            if not window_pending:
+                window_pending = True
+                GLib.timeout_add(200, expose_window)
+            return []
         if path == WINDOW and (not exposed or empty):
             # Chromium can advertise a child while it still returns null.
             return [("", "/org/a11y/atspi/null")] if not empty else []
         if hidden_container and path in (WINDOW, PANEL):
             paths = (PANEL, ENTRY, PASSWORD) if path == WINDOW else (BUTTON,)
             return [(app.get_unique_name(), path) for path in paths]
+        if deep:
+            if path == WINDOW:
+                return [(app.get_unique_name(), f"{PANEL}/0")]
+            if path.startswith(PANEL + "/"):
+                index = int(path.rsplit("/", 1)[1])
+                paths = [f"{PANEL}/{index + 1}"] if index + 1 < deep else [BUTTON, ENTRY, PASSWORD]
+                return [(app.get_unique_name(), child) for child in paths]
+        if wide and path == WINDOW:
+            return [(app.get_unique_name(), f"{BUTTON}/{i}") for i in range(wide)]
         return {ROOT: [(app.get_unique_name(), path) for path in window_paths],
                 WINDOW: [(app.get_unique_name(), p) for p in (BUTTON, ENTRY, PASSWORD)]}.get(path, [])
 
@@ -190,7 +219,7 @@ def main():
             values += ["org.a11y.atspi.Application"]
         if path != ROOT:
             values += ["org.a11y.atspi.Component"]
-        if path == BUTTON:
+        if path == BUTTON or path.startswith(BUTTON + "/"):
             values += ["org.a11y.atspi.Action"]
         if path in (ENTRY, PASSWORD):
             values += ["org.a11y.atspi.Text"]
@@ -199,13 +228,18 @@ def main():
         return values
 
     def method(connection, sender, path, interface, name, parameters, invocation):
-        nonlocal selection_queries, activation_pending, focused
+        nonlocal selection_queries, activation_pending, focused, frame_ready
         args = parameters.unpack()
+        original_path = path
+        if path.startswith(PANEL + "/"): path = PANEL
+        if path.startswith(BUTTON + "/"): path = BUTTON
         if name == "GetExtents":
             # Deliberately wrong SCREEN values expose any accidental raw-coordinate leak.
             rectangle = ((9000,9000,40,30) if args[0] == 0 else
                          {WINDOW:(0,0,40,30),WINDOW_TWO:(0,0,40,30),
                           BUTTON:(5,5,10,5),ENTRY:(5,12,20,5),PASSWORD:(5,20,20,5)}.get(path,(0,0,40,30)))
+            if path == WINDOW and geometry_after_attributes and not frame_ready:
+                rectangle = (0, 0, 23, 17)
             reply = GLib.Variant("((iiii))", (rectangle,))
         elif name == "GrabFocus":
             focused = not refuse_focus
@@ -213,12 +247,12 @@ def main():
             save()
             reply = GLib.Variant("(b)", (True,))
         elif name == "GetChildren":
-            reply = GLib.Variant("(a(so))", (children(connection, path),))
+            reply = GLib.Variant("(a(so))", (children(connection, original_path),))
         elif name == "GetChildAtIndex":
-            entries = children(connection, path)
+            entries = children(connection, original_path)
             reply = GLib.Variant("((so))", (entries[args[0]] if 0 <= args[0] < len(entries) else ("", "/org/a11y/atspi/null"),))
         elif name == "GetInterfaces":
-            reply = GLib.Variant("(as)", (interfaces(path, connection),))
+            reply = GLib.Variant("(as)", (interfaces(original_path, connection),))
         elif name == "GetRole":
             role = {ROOT: Atspi.Role.APPLICATION, WINDOW: Atspi.Role.FRAME, WINDOW_TWO: Atspi.Role.FRAME,
                     BUTTON: Atspi.Role.PUSH_BUTTON, ENTRY: Atspi.Role.ENTRY,
@@ -230,7 +264,7 @@ def main():
         elif name == "GetState":
             bits = sum(1 << int(s) for s in (Atspi.StateType.ENABLED, Atspi.StateType.SENSITIVE,
                                              Atspi.StateType.VISIBLE, Atspi.StateType.SHOWING))
-            if (path == BUTTON and hidden) or path == PANEL:
+            if (path == BUTTON and hidden) or original_path == PANEL:
                 bits &= ~((1 << Atspi.StateType.VISIBLE) | (1 << Atspi.StateType.SHOWING))
             if path == ENTRY:
                 bits |= 1 << Atspi.StateType.EDITABLE
@@ -249,6 +283,7 @@ def main():
                 invocation.return_dbus_error("org.freedesktop.DBus.Error.UnknownMethod", name)
                 return
             state["attribute_queries"] += 1
+            if path == WINDOW: frame_ready = True
             save()
             if path == WINDOW and activation is not None and not activation_pending:
                 activation_pending = True
@@ -318,6 +353,13 @@ def main():
 
     def property_get(connection, sender, path, interface, name):
         if name == "Name":
+            if path == WINDOW:
+                if title_after_attributes and not frame_ready:
+                    return GLib.Variant("s", "Loading")
+                title_file = Path(state_path).with_suffix(".title")
+                if title_file.exists(): return GLib.Variant("s", title_file.read_text())
+            if path.startswith(PANEL + "/"): return GLib.Variant("s", "")
+            if path.startswith(BUTTON + "/"): return GLib.Variant("s", "Repeated button " + path.rsplit("/", 1)[1])
             return GLib.Variant("s", {ROOT: "scu fixture", WINDOW: "scu test window", WINDOW_TWO: "scu test window" if duplicate_windows else "scu second window",
                 BUTTON: "Fixture button", ENTRY: "Fixture entry", PASSWORD: "Fixture password", PANEL: "Hidden container"}[path])
         if name in ("Description", "ToolkitName", "Version"): return GLib.Variant("s", "fixture")
@@ -328,7 +370,7 @@ def main():
         if name == "CaretOffset": return GLib.Variant("i", len(text_value()))
         if name == "Id": return GLib.Variant("i", 1)
 
-    for connection, paths in ((registry, [ROOT]), (app, [ROOT, *window_paths, BUTTON, ENTRY, PASSWORD, PANEL])):
+    for connection, paths in ((registry, [ROOT]), (app, [ROOT, *window_paths, BUTTON, ENTRY, PASSWORD, PANEL, *extra_paths])):
         if connection == registry and "--registry-unavailable" in sys.argv[3:]:
             continue  # Own the name, but expose no working registry object.
         for path in paths:

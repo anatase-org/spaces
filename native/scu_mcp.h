@@ -16,6 +16,7 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 #define MAX_CAPTURE_ID G_GUINT64_CONSTANT(9007199254740991)
+#define MAX_IMAGE_DIMENSION 2048
 /* Shared response state and JSON construction helpers. */
 typedef yyjson_val JsonValue;
 typedef yyjson_mut_val JsonResult;
@@ -146,9 +147,7 @@ typedef struct {
 } Tool;
 
 static const char *const pointer_buttons[] = {"left", "right", "middle", NULL};
-static const char *const tree_formats[] = {"markdown", "elements", "both", NULL};
 static const char *const scroll_directions[] = {"up", "down", "left", "right", NULL};
-static const char *const scroll_units[] = {"line", NULL};
 
 static const Argument action_arguments[] = {
     {.name = "element_token", .type = ARG_STRING},
@@ -161,21 +160,12 @@ static const Argument point_arguments[] = {
     {NULL},
 };
 static const Argument window_arguments[] = {
-    {.name = "pid", .type = ARG_INTEGER},
     {.name = "window_id", .type = ARG_INTEGER},
-    {.name = "max_elements", .type = ARG_INTEGER, .minimum = 1, .maximum = 2000},
-    {.name = "max_depth", .type = ARG_INTEGER, .minimum = 1, .maximum = 32},
-    {.name = "tree_format", .type = ARG_STRING, .choices = tree_formats},
-    {.name = "max_image_dimension", .type = ARG_INTEGER, .minimum = 0, .maximum = 16384},
     {NULL},
 };
 static const Argument capture_arguments[] = {
     {.name = "zoom", .type = ARG_NUMBER_ARRAY, .minimum = 4, .maximum = 4,
         .description = "[left,top,right,bottom] in full-overview coordinates. Read native detail without changing the global coordinate frame or capture ID."},
-    {.name = "max_image_dimension",
-        .type = ARG_INTEGER,
-        .minimum = 0,
-        .maximum = 16384},
     {NULL},
 };
 static const Argument click_arguments[] = {
@@ -196,7 +186,6 @@ static const Argument drag_arguments[] = {
 static const Argument scroll_arguments[] = {
     {.name = "direction", .type = ARG_STRING, .choices = scroll_directions},
     {.name = "amount", .type = ARG_INTEGER, .minimum = 1, .maximum = 50},
-    {.name = "by", .type = ARG_STRING, .choices = scroll_units},
     {NULL},
 };
 static const Argument text_arguments[] = {
@@ -225,7 +214,7 @@ static const Argument batch_arguments[] = {
     {NULL},
 };
 
-static const char *const require_window[] = {"pid", "window_id", NULL};
+static const char *const require_window[] = {"window_id", NULL};
 static const char *const require_point[] = {"x", "y", NULL};
 static const char *const require_drag[] = {"from_x", "from_y", "to_x", "to_y", NULL};
 static const char *const require_scroll[] = {"x", "y", "direction", NULL};
@@ -279,18 +268,18 @@ static const Tool action_tools[] = {
         .action = TRUE},
     {.name = "move_cursor",
         "Move the foreground pointer in desktop image coordinates.",
-        ARGS_ACTION | ARGS_POINT,
+        ARGS_POINT,
         .required = require_point,
         .action = TRUE},
     {.name = "drag",
         "Drag across the combined canvas using full-overview coordinates.",
-        ARGS_ACTION,
+        ARGS_NONE,
         drag_arguments,
         require_drag,
         TRUE},
     {.name = "scroll",
         "Scroll at desktop coordinates for a number of lines.",
-        ARGS_ACTION | ARGS_POINT,
+        ARGS_POINT,
         scroll_arguments,
         require_scroll,
         TRUE},
@@ -308,7 +297,7 @@ static const Tool action_tools[] = {
         TRUE},
     {.name = "press_keys",
         "Press keys in listed order and release in reverse; put modifiers first. Use keys:[meta] for a single key or keys:[ctrl,a] for a chord.",
-        ARGS_ACTION,
+        ARGS_NONE,
         key_arguments,
         require_keys,
         TRUE},
@@ -410,6 +399,7 @@ static yyjson_doc *build_tool_schema(const Tool *tool)
     JsonResult *schema = result_object();
     JsonResult *properties = result_object();
     JsonResult *required = result_array();
+    add_argument_schemas(properties, tool->arguments);
     if (tool->groups & ARGS_ACTION) {
         add_argument_schemas(properties, action_arguments);
     }
@@ -419,7 +409,6 @@ static yyjson_doc *build_tool_schema(const Tool *tool)
     if (tool->groups & ARGS_WINDOW) {
         add_argument_schemas(properties, window_arguments);
     }
-    add_argument_schemas(properties, tool->arguments);
     if (strcmp(tool->name, "computer") == 0) {
         /* Advertise the actual nested contract, not an opaque array of objects.
          * Individual steps are validated again after defaults are merged. */
@@ -471,7 +460,6 @@ static yyjson_doc *build_tool_schema(const Tool *tool)
             JsonResult *observe_required = result_array();
             result_append(observe_required, yyjson_mut_str(scu.doc, "kind"));
             if (index == 1) {
-                result_append(observe_required, yyjson_mut_str(scu.doc, "pid"));
                 result_append(observe_required, yyjson_mut_str(scu.doc, "window_id"));
             }
             result_member(option, "required", observe_required);
@@ -481,15 +469,27 @@ static yyjson_doc *build_tool_schema(const Tool *tool)
         result_member(observe, "anyOf", choices);
         result_string(observe, "description",
             "Omit for a desktop image with no steps or after foreground input; false disables it. "
-            "Use {kind:desktop,max_image_dimension,zoom:[left,top,right,bottom]} for an image or native-detail crop. "
-            "or {kind:window,pid,window_id,tree_format} for a tree. "
+            "Use {kind:desktop,zoom:[left,top,right,bottom]} for an image or native-detail crop. "
+            "or {kind:window,window_id} for a compact tree of visible content and controls. "
             "An explicit object replaces automatic observation. Zoom coordinates and all actions stay in the full overview's global pixel space; zoom never changes that frame.");
         result_member(properties, "observe", observe);
     }
     if (tool->required != NULL) {
+        JsonResult *ordered = result_object();
+        JsonResult *capture = yyjson_mut_obj_get(properties, "id");
+        if (capture) result_member(ordered, "id", yyjson_mut_val_mut_copy(scu.doc, capture));
         for (const char *const *name = tool->required; *name != NULL; name++) {
             result_append(required, yyjson_mut_strcpy(scu.doc, *name));
+            JsonResult *property = yyjson_mut_obj_get(properties, *name);
+            if (property) result_member(ordered, *name, yyjson_mut_val_mut_copy(scu.doc, property));
         }
+        size_t index, count;
+        JsonResult *key, *property;
+        yyjson_mut_obj_foreach(properties, index, count, key, property) {
+            if (!yyjson_mut_obj_get(ordered, yyjson_mut_get_str(key)))
+                result_member(ordered, yyjson_mut_get_str(key), yyjson_mut_val_mut_copy(scu.doc, property));
+        }
+        properties = ordered;
     }
     result_string(schema, "type", "object");
     result_member(schema, "properties", properties);

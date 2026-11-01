@@ -583,7 +583,7 @@ scale or priority through KScreen.
 ```
 
 Window enumeration and placement come from KWin, including applications without
-AT-SPI support. Window IDs are stable within the MCP process. Status must return
+AT-SPI support. Window IDs are unique and stable within the SCU host lifetime. Status must return
 an error if any required library, the accessibility registry, KWin input or
 capture is unavailable. It returns no health text, partial metadata or image on
 failure. `computer` checks the same prerequisites before starting a batch.
@@ -653,24 +653,44 @@ zoom crops; the global input coordinate frame remains the full overview.
 An explicit window observation requests an accessibility tree:
 
 ```json
-{"observe":{"kind":"window","pid":123,"window_id":1,"tree_format":"elements"}}
+{"observe":{"kind":"window","window_id":1}}
 ```
 
-Tree limits remain 250 elements / 12 levels by default, at most 2000 / 32.
-Formats are `markdown`, `elements`, or `both`. Password values are omitted.
-Element tokens identify semantic action targets; replacing that window's tree
-invalidates its old tokens. A window without a unique PID/title/client-geometry
-association to an AT-SPI window returns an explicit accessibility-window error.
-Unsupported individual element rectangles are null; they never expose another
-coordinate system. Semantic token actions do not need pixel coordinates.
+Window observations use one structured `elements` tree. SCU owns traversal,
+compaction and response limits; `max_depth`, `max_elements`, `tree_format` and
+PID selectors are not MCP arguments. The unique `window_id` selects a window;
+process identities remain internal to safe AT-SPI association.
 
-Both tree formats expose canonical supported actions. Element rows include
-`actions`, `click_buttons` and `text_input` (`accessibility`, `keyboard`, or
-`unavailable`). Toolkit click names such as Chromium's `jump`, `open`,
-`doDefault` and `clickAncestor` all use `click`; unknown actions never fall back
-to an arbitrary action index. Hidden nodes do not consume the element budget,
-but their exposed descendants remain reachable through flattened ancestry.
-Traversal also has independent node and recursion bounds.
+SCU refreshes desktop/application caches and requests frame attributes before
+matching, then retries unmatched discovery for up to one second. Both toolkit
+and compositor metadata are refreshed. Matching still requires a unique title
+and compatible client/buffer/frame geometry; PID-independent Flatpak matches
+must be unique in both inventories. An ambiguous association, incompatible
+geometry, and an unmatched window have distinct error codes and diagnostics.
+A title change alone does not invalidate an otherwise unchanged window;
+identity, PID and geometry changes still invalidate the observation.
+
+Unnamed structural wrappers and duplicate descendant text are flattened.
+Container hypertext is not copied into every ancestor. Visible controls and
+content retain tokens, roles, labels, compact ancestry and overview-coordinate
+frames. `actions` names the supported SCU actions, and `click_buttons` identifies
+supported click buttons. Only true focused/selected/checked states are included;
+password values remain excluded. Text values preserve whitespace, and clipped
+labels/values carry `text_truncated:true`.
+
+Internal limits bound traversal to 4096 raw nodes, 96 raw levels, five seconds,
+and 160 emitted rows. Rows have a 16 KiB budget; the converted tree is checked
+again against 18 KiB. Complexity produces a usable partial tree with
+`truncated:true` and `accessibility_error.code:"accessibility_tree_too_complex"`,
+with guidance to scroll and observe again or use screenshot input. Complexity
+is not reported as accessibility being unavailable. A missing bridge can still
+return the window screenshot with the specific accessibility error.
+
+Element tokens identify action targets; replacing a window's tree invalidates
+its old tokens. Unsupported rectangles are null. Toolkit click names such as
+Chromium's `jump`, `open`, `doDefault` and `clickAncestor` use the existing
+`click` action; unknown action names never invoke an arbitrary action index.
+Scroll `amount` always counts lines; no unit selector is exposed.
 
 `type_text` inserts and `set_value` replaces. Native EditableText remains the
 preferred route. For an editable non-password text control without EditableText,
@@ -700,8 +720,9 @@ preflight every route and capability, retain the button across devices on one
 EIS seat, and release it on interruption. Motion/buttons/scrolling use the same
 pointer device where possible; another device is used only for a split capability.
 
-The default image cap is 1600 pixels on the long edge; explicit
-`max_image_dimension:0` requests native detail within image/memory limits.
+All images have a 2048-pixel long-edge cap set by the shared
+`MAX_IMAGE_DIMENSION` constant. Image size is not configurable over MCP.
+Zoom reads native source detail and preserves aspect ratio within that same cap.
 `canvas` contains only overview `width`, `height`, and `id`.
 Zoom reads fresh native-detail ScreenShot2 pixels, not enlarged overview pixels:
 

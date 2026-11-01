@@ -154,10 +154,10 @@ def main():
 
     def fixture_window(probe):
         status = probe.tool("status")
-        target = next({"pid": app["pid"], "window_id": window["window_id"]}
+        target = next({"window_id": window["window_id"]}
                       for app in status["apps"] for window in app["windows"]
                       if window["title"] == "Spaces AT-SPI fixture " + token)
-        tree = probe.tool("computer", observe={"kind": "window", **target, "tree_format": "elements"})["observation"]
+        tree = probe.tool("computer", observe={"kind": "window", **target})["observation"]
         rows = {item["label"]: item for item in tree["elements"]}
         return status, rows
 

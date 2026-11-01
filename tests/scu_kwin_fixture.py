@@ -88,6 +88,8 @@ def geometry():
                    for name, x, y, scale in (("left", -80, -10, 2), ("center", 0, 0, 1), ("right", 90, 0, 1))]
     if config.get("large_capture"):
         outputs = [{"name": "large", "geometry": {"x": 0, "y": 0, "width": 512, "height": 512}, "scale": 1}]
+    if config.get("image_cap"):
+        outputs = [{"name": "center", "geometry": {"x": 0, "y": 0, "width": 4096, "height": 64}, "scale": 1}]
     if config.get("resize"):
         outputs[0]["geometry"]["width"] += 10
     if config.get("overlap") and len(outputs) > 1:
@@ -95,6 +97,10 @@ def geometry():
     windows = [{"key": "window-1", "pid": config.get("app_pid", 123), "app_name": "scu fixture",
                 "title": config.get("window_title", "scu test window"), "frame": {"x": 10, "y": 10, "width": 40, "height": 30},
                 "client": {"x": 10, "y": 10, "width": 40, "height": 30}, "shown": True, "active": config.get("active", True)}]
+    if config.get("image_cap"):
+        windows[0]["frame"] = {"x": 0, "y": 0, "width": 4096, "height": 64}
+    if "window_x" in config:
+        windows[0]["frame"]["x"] = windows[0]["client"]["x"] = config["window_x"]
     if config.get("two_windows"):
         windows.append({**windows[0], "key": "window-2", "title": "scu second window",
                         "frame": {"x": 15, "y": 15, "width": 40, "height": 30},
@@ -206,6 +212,9 @@ def method(connection, sender, path, interface, name, parameters, invocation):
             x, y, w, h = (window["frame"][key] for key in ("x", "y", "width", "height"))
             state.setdefault("window_captures", []).append(values[0])
             if config.get("change_window_on_capture"):
+                config["window_x"] = 20
+                args.control.write_text(json.dumps(config))
+            if config.get("change_title_on_capture"):
                 config["window_title"] = "changed during capture"
                 args.control.write_text(json.dumps(config))
         else:

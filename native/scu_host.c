@@ -443,11 +443,18 @@ static Window *register_window(
     return window;
 }
 
+static gboolean request_accessible_attributes(AtspiAccessible *node);
+
 static void discover_application_windows(AtspiAccessible *application)
 {
+    atspi.accessible_clear_cache(application);
     char *name = atspi.accessible_get_name(application, NULL);
     guint process_id = atspi.accessible_get_process_id(application, NULL);
     gint count = MIN(atspi.accessible_get_child_count(application, NULL), 128);
+    if (!count) {
+        request_accessible_attributes(application);
+        count = MIN(atspi.accessible_get_child_count(application, NULL), 128);
+    }
 
     for (gint index = 0; index < count; index++) {
         if (!scu_tick()) {
@@ -471,6 +478,7 @@ static gboolean discover_windows(void)
             "accessibility_unavailable", "Host accessibility registry is unavailable.");
         return FALSE;
     }
+    atspi.accessible_clear_cache(desktop);
     for (guint index = 0; index < windows->len; index++) {
         Window *window = g_ptr_array_index(windows, index);
         window->seen = FALSE;
@@ -533,6 +541,20 @@ static JsonResult *check_accessibility_ready(void)
     return result_object();
 }
 
+/* Refresh before association too: Chromium may only finish exposing its frame
+ * after this standard query, and names can change without a cached event. */
+static gboolean request_accessible_attributes(AtspiAccessible *node)
+{
+    atspi.accessible_clear_cache(node);
+    GError *error = NULL;
+    GHashTable *attributes = atspi.accessible_get_attributes(node, &error);
+    gboolean supported = attributes && !error;
+    if (attributes) g_hash_table_unref(attributes);
+    g_clear_error(&error);
+    atspi.accessible_clear_cache(node);
+    return supported;
+}
+
 static JsonResult *list_apps(void)
 {
     if (!discover_windows()) {
@@ -544,6 +566,8 @@ static JsonResult *list_apps(void)
         g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     for (guint index = 0; index < windows->len; index++) {
         Window *window = g_ptr_array_index(windows, index);
+        request_accessible_attributes(window->accessible);
+        if (!scu_tick()) { g_hash_table_unref(by_application); return NULL; }
         /* Keep distinct processes separate even when application names match.
          * Preserve discovery order while grouping multiple windows per app. */
         char *key = g_strdup_printf("%u:%s", window->pid, window->app);
@@ -575,14 +599,31 @@ static JsonResult *list_apps(void)
     return result;
 }
 
+/* Observation budgets belong to SCU, not to callers. Raw depth is independent
+ * of the compact hierarchy so toolkit wrappers cannot hide useful controls. */
+#define TREE_NODES 4096
+#define TREE_DEPTH 96
+#define TREE_BYTES (16 * 1024)
+#define TREE_ROWS 160
+
 typedef struct {
-    guint max, depth, count, visited;
+    guint count, visited, bytes;
+    gint64 until;
     gboolean truncated;
     Window *window;
     JsonResult *rows;
-    GString *markdown;
+    double width, height;
     char snapshot[16];
 } Walk;
+
+static void mark_tree_complex(JsonResult *tree)
+{
+    result_boolean(tree, "truncated", TRUE);
+    JsonResult *limitation = result_object();
+    result_string(limitation, "code", "accessibility_tree_too_complex");
+    result_string(limitation, "hint", "A compact portion of this window is shown. Scroll to the needed area and observe again, or use screenshot input.");
+    result_member(tree, "accessibility_error", limitation);
+}
 
 /* Toolkit action names describe the same semantic click. Never select an
  * arbitrary action index: that can invoke scrolling or a context menu. */
@@ -601,139 +642,174 @@ static gboolean keyboard_editable(AtspiAccessible *node)
         atspi.accessible_get_role(node, NULL) != ATSPI_ROLE_PASSWORD_TEXT;
 }
 
-/* Walk only a bounded subtree. Each token retains its accessible object, and
- * a new snapshot of the same window invalidates its previous tokens. */
-static void append_accessible(
-    Walk *state, AtspiAccessible *node, guint depth, gint parent, guint level)
+static gboolean structural_role(AtspiRole role)
 {
-    if (++state->visited > 8000 || level > 64) {
-        state->truncated = TRUE;
-        return;
-    }
-    if (state->count >= state->max) {
-        state->truncated = TRUE;
-        return;
-    }
-    if (!scu_tick()) {
-        return;
-    }
-    /* Hidden structural nodes can have exposed descendants. Flatten those
-     * paths rather than consuming the observation budget with hidden chrome. */
-    if (level && !accessible_has_state(node, ATSPI_STATE_VISIBLE) &&
-        !accessible_has_state(node, ATSPI_STATE_SHOWING)) {
-        gint count = MIN(atspi.accessible_get_child_count(node, NULL), 2000);
-        for (gint i = 0; i < count && !scu.code; i++) {
-            if (state->visited >= 8000) { state->truncated = TRUE; break; }
-            AtspiAccessible *child = atspi.accessible_get_child_at_index(node, i, NULL);
-            if (child) {
-                append_accessible(state, child, depth, parent, level + 1);
-                g_object_unref(child);
-            }
-            if (state->count >= state->max) { state->truncated = TRUE; break; }
+    return role == ATSPI_ROLE_PANEL || role == ATSPI_ROLE_FILLER ||
+        role == ATSPI_ROLE_SECTION || role == ATSPI_ROLE_PARAGRAPH ||
+        role == ATSPI_ROLE_UNKNOWN;
+}
+
+static char *observation_text(const char *text, guint maximum, gboolean *shortened, gboolean label)
+{
+    if (!text) return NULL;
+    char *valid = g_utf8_make_valid(text, -1);
+    GString *result = g_string_new(NULL);
+    guint count = 0;
+    for (const char *p = valid; *p; p = g_utf8_next_char(p)) {
+        gunichar c = g_utf8_get_char(p);
+        if (label && c == 0xfffc) continue; /* Embedded children have their own rows. */
+        if (count++ == maximum) {
+            g_string_append(result, "…");
+            *shortened = TRUE;
+            break;
         }
+        if (label && (g_unichar_isspace(c) || g_unichar_iscntrl(c))) c = ' ';
+        if (!label || c != ' ' || (result->len && result->str[result->len - 1] != ' '))
+            g_string_append_unichar(result, c);
+    }
+    g_free(valid);
+    char *value = g_string_free(result, FALSE);
+    return label ? g_strstrip(value) : value;
+}
+
+/* Keep only content in the window's viewport. A structural node may contain
+ * visible descendants even when its own state or bounds are hidden. */
+static gboolean frame_in_view(Walk *state, JsonResult *frame)
+{
+    if (!frame || yyjson_mut_is_null(frame)) return TRUE;
+    double x = yyjson_mut_get_num(yyjson_mut_obj_get(frame, "x"));
+    double y = yyjson_mut_get_num(yyjson_mut_obj_get(frame, "y"));
+    double w = yyjson_mut_get_num(yyjson_mut_obj_get(frame, "width"));
+    double h = yyjson_mut_get_num(yyjson_mut_obj_get(frame, "height"));
+    if (w <= 0 || h <= 0 || state->width <= 0 || state->height <= 0) return TRUE;
+    return x + w > 0 && y + h > 0 && x < state->width && y < state->height;
+}
+
+static void append_accessible(Walk *state, AtspiAccessible *node,
+    guint depth, gint parent, guint level, const char *parent_label)
+{
+    if (state->visited >= TREE_NODES || level > TREE_DEPTH ||
+        state->count >= TREE_ROWS || state->bytes >= TREE_BYTES ||
+        g_get_monotonic_time() >= state->until) {
+        state->truncated = TRUE;
         return;
     }
-    guint index = state->count++;
-    JsonResult *row = result_object();
-    char *name = atspi.accessible_get_name(node, NULL),
-         *role = atspi.accessible_get_role_name(node, NULL);
+    state->visited++;
+    if (!scu_tick()) return;
     AtspiRole type = atspi.accessible_get_role(node, NULL);
+    gint children = atspi.accessible_get_child_count(node, NULL);
+    gboolean structural = structural_role(type);
+    gboolean shown = !level || accessible_has_state(node, ATSPI_STATE_SHOWING) ||
+        accessible_has_state(node, ATSPI_STATE_VISIBLE);
+    gboolean shortened = FALSE;
+    char *raw_name = atspi.accessible_get_name(node, NULL);
+    char *name = observation_text(raw_name, 256, &shortened, TRUE);
+    g_free(raw_name);
+    JsonResult *frame = shown ? accessible_frame(node) : NULL;
+    shown &= frame_in_view(state, frame);
     gboolean password = type == ATSPI_ROLE_PASSWORD_TEXT;
-    char *token = g_strdup_printf("%s:%u", state->snapshot, index);
-    Element *e = g_new0(Element, 1);
-    e->accessible = g_object_ref(node);
-    e->window = state->window->id;
-    e->pid = state->window->pid;
-    g_hash_table_insert(elements, g_strdup(token), e);
-    result_integer(row, "element_index", index);
-    result_string(row, "element_token", token);
-    result_integer(row, "parent_index", parent);
-    result_integer(row, "depth", depth);
-    result_string(row, "role", role);
-    result_string(row, "label", name);
-    result_member(row, "frame", accessible_frame(node));
-    result_boolean(row, "enabled", accessible_has_state(node, ATSPI_STATE_ENABLED));
-    result_boolean(row, "focused", accessible_has_state(node, ATSPI_STATE_FOCUSED));
-    result_boolean(row, "selected", accessible_has_state(node, ATSPI_STATE_SELECTED));
-    result_boolean(row, "checked", accessible_has_state(node, ATSPI_STATE_CHECKED));
-    AtspiText *t = password ? NULL : atspi.accessible_get_text_iface(node);
-    char *value = NULL;
-    if (t) {
-        gint length = atspi.text_get_character_count(t, NULL);
-        if (length >= 0) {
-            value = atspi.text_get_text(t, 0, MIN(length, 4096), NULL);
-        }
-        g_object_unref(t);
-    }
-    if (!password) {
-        result_string(row, "value", value);
-    } else {
-        result_boolean(row, "protected", TRUE);
-    }
-    JsonResult *actions = result_array(), *buttons = result_array();
-    gboolean click = FALSE, context = FALSE;
-    AtspiAction *ac = atspi.accessible_get_action_iface(node);
-    if (ac) {
-        gint n = atspi.action_get_n_actions(ac, NULL);
-        for (gint i = 0; i < MIN(n, 32); i++) {
-            char *s = atspi.action_get_action_name(ac, i, NULL);
-            if (s) {
-                click |= accessible_click_name(s);
-                context |= strstr(s, "menu") != NULL || strstr(s, "Menu") != NULL;
-                g_free(s);
-            }
-        }
-        g_object_unref(ac);
-    }
-    if (click) result_append(buttons, yyjson_mut_str(scu.doc, "left"));
-    if (context) result_append(buttons, yyjson_mut_str(scu.doc, "right"));
-    if (click || context) result_append(actions, yyjson_mut_str(scu.doc, "click"));
-    AtspiEditableText *editable = password ? NULL : atspi.accessible_get_editable_text_iface(node);
-    AtspiValue *number = password ? NULL : atspi.accessible_get_value_iface(node);
-    gboolean numeric = number != NULL;
-    gboolean text_input = !password && (editable != NULL || keyboard_editable(node));
-    if (text_input) result_append(actions, yyjson_mut_str(scu.doc, "type_text"));
-    if (text_input || number) result_append(actions, yyjson_mut_str(scu.doc, "set_value"));
-    result_string(row, "text_input", text_input ? (editable ? "accessibility" : "keyboard") : "unavailable");
+    AtspiEditableText *editable = shown && !password ? atspi.accessible_get_editable_text_iface(node) : NULL;
+    gboolean text_input = shown && !password && (editable || keyboard_editable(node));
     g_clear_object(&editable);
-    g_clear_object(&number);
-    result_member(row, "click_buttons", buttons);
-    result_member(row, "actions", actions);
-    g_string_append_printf(state->markdown, "%*s[%u] %s %s%s%s", (int)depth * 2, "",
-        index, role ? role : "unknown", name ? name : "", value ? " = " : "",
-        value ? value : "");
-    if (click || context) g_string_append_printf(state->markdown, " | click button=%s%s%s",
-        click ? "left" : "", click && context ? "," : "", context ? "right" : "");
-    if (text_input) g_string_append_printf(state->markdown, " | type_text,set_value via %s",
-        yyjson_mut_get_str(yyjson_mut_obj_get(row, "text_input")));
-    else if (numeric) g_string_append(state->markdown, " | set_value");
-    g_string_append_c(state->markdown, '\n');
-    result_append(state->rows, row);
-    g_free(token);
-    g_free(name);
-    g_free(role);
-    g_free(value);
-    gint n = atspi.accessible_get_child_count(node, NULL);
-    if (depth >= state->depth) {
-        if (n > 0) {
-            state->truncated = TRUE;
+    gboolean duplicate = (type == ATSPI_ROLE_STATIC || type == ATSPI_ROLE_LABEL ||
+        type == ATSPI_ROLE_TEXT) && !text_input && !password && name && *name && !g_strcmp0(name, parent_label);
+    gboolean emit = shown && (!level || (!duplicate && (!structural || (name && *name))));
+    /* Unnamed wrappers and duplicate text do not consume rows or compact depth. */
+    char *value = NULL;
+    if (emit && !password && (text_input || (!children && (!name || !*name)))) {
+        AtspiText *text = atspi.accessible_get_text_iface(node);
+        if (text) {
+            gint length = atspi.text_get_character_count(text, NULL);
+            char *raw = length >= 0 ? atspi.text_get_text(text, 0, MIN(length, 513), NULL) : NULL;
+            value = observation_text(raw, 512, &shortened, FALSE);
+            if (length > 512) shortened = TRUE;
+            g_free(raw);
+            g_object_unref(text);
         }
-        return;
     }
-    for (gint i = 0; i < MIN(n, 2000); i++) {
-        if (state->count >= state->max || state->visited >= 8000) {
+    if (level && (!name || !*name) && (!value || !*value) && structural) emit = FALSE;
+    if (emit) {
+        guint index = state->count;
+        char *role = atspi.accessible_get_role_name(node, NULL);
+        char *token = g_strdup_printf("%s:%u", state->snapshot, index);
+        JsonResult *row = result_object();
+        result_integer(row, "element_index", index);
+        result_string(row, "element_token", token);
+        result_integer(row, "parent_index", parent);
+        result_integer(row, "depth", depth);
+        result_string(row, "role", role);
+        result_string(row, "label", name);
+        result_member(row, "frame", frame ? frame : yyjson_mut_null(scu.doc));
+        result_boolean(row, "enabled", accessible_has_state(node, ATSPI_STATE_ENABLED));
+        if (accessible_has_state(node, ATSPI_STATE_FOCUSED)) result_boolean(row, "focused", TRUE);
+        if (accessible_has_state(node, ATSPI_STATE_SELECTED)) result_boolean(row, "selected", TRUE);
+        if (accessible_has_state(node, ATSPI_STATE_CHECKED)) result_boolean(row, "checked", TRUE);
+        if (password) result_boolean(row, "protected", TRUE);
+        else if (value && g_strcmp0(value, name)) result_string(row, "value", value);
+        if (shortened) result_boolean(row, "text_truncated", TRUE);
+        JsonResult *actions = result_array(), *buttons = result_array();
+        gboolean click = FALSE, context = FALSE;
+        AtspiAction *action = !structural && level ? atspi.accessible_get_action_iface(node) : NULL;
+        if (action) {
+            gint count = MIN(atspi.action_get_n_actions(action, NULL), 32);
+            for (gint i = 0; i < count; i++) {
+                char *action_name = atspi.action_get_action_name(action, i, NULL);
+                if (action_name) {
+                    click |= accessible_click_name(action_name);
+                    context |= strstr(action_name, "menu") || strstr(action_name, "Menu");
+                    g_free(action_name);
+                }
+            }
+            g_object_unref(action);
+        }
+        if (click) result_append(buttons, yyjson_mut_str(scu.doc, "left"));
+        if (context) result_append(buttons, yyjson_mut_str(scu.doc, "right"));
+        if (click || context) {
+            result_append(actions, yyjson_mut_str(scu.doc, "click"));
+            result_member(row, "click_buttons", buttons);
+        }
+        AtspiValue *number = password ? NULL : atspi.accessible_get_value_iface(node);
+        if (text_input) result_append(actions, yyjson_mut_str(scu.doc, "type_text"));
+        if (text_input || number) result_append(actions, yyjson_mut_str(scu.doc, "set_value"));
+        g_clear_object(&number);
+        if (yyjson_mut_arr_size(actions)) result_member(row, "actions", actions);
+        size_t bytes = 0;
+        char *encoded = yyjson_mut_val_write(row, 0, &bytes);
+        free(encoded);
+        if (state->bytes + bytes > TREE_BYTES) {
+            state->truncated = TRUE;
+            state->bytes = TREE_BYTES;
+            emit = FALSE;
+        } else {
+            Element *element = g_new0(Element, 1);
+            element->accessible = g_object_ref(node);
+            element->window = state->window->id;
+            element->pid = state->window->pid;
+            g_hash_table_insert(elements, g_strdup(token), element);
+            result_append(state->rows, row);
+            state->count++;
+            state->bytes += bytes;
+            parent = (gint)index;
+            depth++;
+        }
+        g_free(token);
+        g_free(role);
+    }
+    if (children > 2048) state->truncated = TRUE;
+    for (gint i = 0; i < MIN(children, 2048) && !scu.code; i++) {
+        if (state->visited >= TREE_NODES || state->count >= TREE_ROWS ||
+            state->bytes >= TREE_BYTES || g_get_monotonic_time() >= state->until) {
             state->truncated = TRUE;
             break;
         }
         AtspiAccessible *child = atspi.accessible_get_child_at_index(node, i, NULL);
         if (child) {
-            append_accessible(state, child, depth + 1, (gint)index, level + 1);
+            append_accessible(state, child, depth, parent, level + 1, emit ? name : parent_label);
             g_object_unref(child);
         }
-        if (scu.code) {
-            break;
-        }
     }
+    g_free(name);
+    g_free(value);
 }
 
 /* Chromium enables its full tree when a consumer requests frame attributes.
@@ -741,12 +817,7 @@ static void append_accessible(
  * to arrive. A reported child count alone can describe null placeholders. */
 static gboolean prepare_accessible_window(AtspiAccessible *window)
 {
-    atspi.accessible_clear_cache(window);
-    GError *error = NULL;
-    GHashTable *attributes = atspi.accessible_get_attributes(window, &error);
-    gboolean supported = attributes != NULL && error == NULL;
-    if (attributes) g_hash_table_unref(attributes);
-    g_clear_error(&error);
+    gboolean supported = request_accessible_attributes(window);
     if (!supported) return scu_tick();
 
     gint64 until = g_get_monotonic_time() + 2 * G_USEC_PER_SEC;
@@ -800,30 +871,20 @@ static JsonResult *read_window_state(JsonValue *args)
             g_hash_table_iter_remove(&it);
         }
     }
-    Walk state = {.max = (guint)json_number(args, "max_elements", 250),
-        .depth = (guint)json_number(args, "max_depth", 12),
-        .window = w,
-        .rows = result_array(),
-        .markdown = g_string_new(NULL)};
+    JsonResult *bounds = accessible_frame(w->accessible);
+    Walk state = {.window = w, .rows = result_array(),
+        .width = yyjson_mut_get_num(yyjson_mut_obj_get(bounds, "width")),
+        .height = yyjson_mut_get_num(yyjson_mut_obj_get(bounds, "height")),
+        .until = g_get_monotonic_time() + 5 * G_USEC_PER_SEC};
     g_snprintf(state.snapshot, sizeof(state.snapshot), "s%08x", ++snapshot);
-    append_accessible(&state, w->accessible, 0, -1, 0);
-    if (scu.code) {
-        g_string_free(state.markdown, TRUE);
-        return NULL;
-    }
+    append_accessible(&state, w->accessible, 0, -1, 0, NULL);
+    if (scu.code) return NULL;
     JsonResult *r = result_object();
     result_string(r, "snapshot_id", state.snapshot);
-    result_integer(r, "pid", w->pid);
     result_integer(r, "window_id", w->id);
     result_boolean(r, "truncated", state.truncated);
-    const char *format = json_string(args, "tree_format");
-    if (!format || strcmp(format, "elements")) {
-        result_string(r, "tree_markdown", state.markdown->str);
-    }
-    if (format && strcmp(format, "markdown")) {
-        result_member(r, "elements", state.rows);
-    }
-    g_string_free(state.markdown, TRUE);
+    result_member(r, "elements", state.rows);
+    if (state.truncated) mark_tree_complex(r);
     return scu.code ? NULL : r;
 }
 
@@ -1125,7 +1186,7 @@ static JsonResult *operate_on_element(const char *tool, JsonValue *arguments)
     if (element == NULL) {
         return scu_fail("stale_element",
             "Element token is absent or stale. Read a window tree with computer "
-            "observe:{kind:window,pid,window_id} and use its new token.");
+            "observe:{kind:window,window_id} and use its new token.");
     }
 
     AtspiAccessible *node = g_object_ref(element->accessible);
@@ -2498,10 +2559,9 @@ static JsonResult *capture_desktop(JsonValue *arguments)
             (right - left) * layout.width / visual.canvas.width,
             (bottom - top) * layout.height / visual.canvas.height};
     }
-    guint maximum = (guint)json_number(arguments, "max_image_dimension", 1600);
     /* Overviews need orientation pixels, while zoom always requests native
      * detail. Avoid a huge native workspace allocation for ordinary overviews. */
-    gboolean native = zoomed || maximum == 0 || maximum > MAX(view.width, view.height);
+    gboolean native = zoomed || MAX_IMAGE_DIMENSION > MAX(view.width, view.height);
     guint source_width = 0, source_height = 0;
     CanvasRect captured;
     GBytes *source = capture_area(&view, native, &source_width, &source_height, &captured);
@@ -2511,8 +2571,8 @@ static JsonResult *capture_desktop(JsonValue *arguments)
     }
     double width = view.width * source_width / captured.width;
     double height = view.height * source_height / captured.height;
-    if (maximum && MAX(width, height) > maximum) {
-        double scale = maximum / MAX(width, height);
+    if (MAX(width, height) > MAX_IMAGE_DIMENSION) {
+        double scale = MAX_IMAGE_DIMENSION / MAX(width, height);
         width *= scale;
         height *= scale;
     }
@@ -2521,7 +2581,7 @@ static JsonResult *capture_desktop(JsonValue *arguments)
         (guint64)output_width * output_height * 4 > MAX_FRAME_BYTES) {
         g_bytes_unref(source);
         g_free(key);
-        return scu_fail("capture_failed", "Canvas exceeds the image memory limits; reduce max_image_dimension.");
+        return scu_fail("capture_failed", "Canvas exceeds the image memory limits. Observe a smaller area using zoom.");
     }
     CanvasLayout sampling = {.count = 1};
     sampling.tiles[0] = captured;
@@ -2673,14 +2733,10 @@ static JsonResult *kwin_status(void)
 /* A toolkit may expose its client, buffer (including invisible margins), or
  * decorated frame. Use only compositor-reported rectangles and desktop scales;
  * never stretch an accessibility tree to an approximately sized window. */
-static gboolean accessibility_geometry(JsonValue *window, JsonValue *candidate,
+static gboolean accessibility_size(JsonValue *window, JsonValue *candidate,
     CanvasRect *anchor, CanvasRect *origin, double *ratio)
 {
-    const char *title = json_string(candidate, "title");
-    if (!title || !*title || g_strcmp0(title, json_string(window, "title")) ||
-        !read_rect(json_member(candidate, "bounds"), anchor)) {
-        return FALSE;
-    }
+    if (!read_rect(json_member(candidate, "bounds"), anchor)) return FALSE;
     const char *rectangles[] = {"client", "buffer", "frame"};
     for (guint r = 0; r < G_N_ELEMENTS(rectangles); r++) {
         CanvasRect rect;
@@ -2701,65 +2757,110 @@ static gboolean accessibility_geometry(JsonValue *window, JsonValue *candidate,
     return FALSE;
 }
 
+static gboolean accessibility_geometry(JsonValue *window, JsonValue *candidate,
+    CanvasRect *anchor, CanvasRect *origin, double *ratio)
+{
+    const char *title = json_string(candidate, "title");
+    return title && *title && !g_strcmp0(title, json_string(window, "title")) &&
+        accessibility_size(window, candidate, anchor, origin, ratio);
+}
+
 /* Semantic rectangles are private window-relative coordinates until a unique
  * KWin association anchors them. Raw rectangles never cross the MCP boundary. */
+static JsonValue *requested_kwin_window(JsonValue *args);
+
+static char *window_geometry_signature(JsonValue *window)
+{
+    if (!window) return NULL;
+    const char *fields[] = {"key", "pid", "client", "buffer", "frame"};
+    JsonResult *geometry = result_object();
+    for (guint i = 0; i < G_N_ELEMENTS(fields); i++) {
+        JsonValue *value = json_member(window, fields[i]);
+        if (value) result_member(geometry, fields[i], yyjson_val_mut_copy(scu.doc, value));
+    }
+    return yyjson_mut_val_write(geometry, 0, NULL);
+}
+
 static JsonResult *window_tree(JsonValue *args, JsonValue *window)
 {
+    char *signature = window_geometry_signature(window);
     CanvasRect client = {0};
     JsonValue *candidate;
     size_t i, n;
-    JsonResult *discovery = atspi_worker_call("list_apps", NULL);
-    if (!discovery) {
-        return NULL;
-    }
-    yyjson_doc *listing = yyjson_mut_val_imut_copy(discovery, NULL);
+    yyjson_doc *listing = NULL;
     JsonValue *match = NULL;
     CanvasRect anchor = {0};
-    guint matches = 0, best = 0, match_pid = 0;
     double ratio = 1;
-    JsonValue *app;
-    yyjson_arr_foreach(json_member(yyjson_doc_get_root(listing), "apps"), i, n, app) {
-        guint score = json_number(app, "pid", -1) == json_number(args, "pid", -2) ? 2 : 1;
-        size_t j, m;
-        yyjson_arr_foreach(json_member(app, "windows"), j, m, candidate) {
-            CanvasRect root, origin;
-            double scale;
-            if (score < best || !accessibility_geometry(window, candidate, &root, &origin, &scale)) {
-                continue;
-            }
-            /* Bus credentials and compositor PIDs can identify different
-             * processes of a sandboxed application. A PID-independent fallback
-             * must be unique in both inventories, not merely in the AT-SPI list. */
-            if (score == 1) {
-                guint alternatives = 0;
-                size_t w, total;
-                JsonValue *other;
-                yyjson_arr_foreach(json_member(yyjson_doc_get_root(visual.geometry), "windows"), w, total, other) {
-                    CanvasRect unused_anchor, unused_origin;
-                    double unused_ratio;
-                    if (accessibility_geometry(other, candidate, &unused_anchor, &unused_origin, &unused_ratio)) {
-                        alternatives++;
+    guint matches = 0, best = 0, match_pid = 0, frames = 0, titles = 0, sizes = 0;
+    gboolean ambiguous = FALSE;
+    gint64 until = g_get_monotonic_time() + G_USEC_PER_SEC;
+    do {
+        yyjson_doc_free(listing);
+        listing = NULL;
+        JsonResult *discovery = atspi_worker_call("list_apps", NULL);
+        if (!discovery) { free(signature); return NULL; }
+        listing = yyjson_mut_val_imut_copy(discovery, NULL);
+        if (!refresh_geometry()) { free(signature); yyjson_doc_free(listing); return NULL; }
+        window = requested_kwin_window(args);
+        char *current = window_geometry_signature(window);
+        gboolean same = current && !g_strcmp0(signature, current);
+        free(current);
+        if (!same) {
+            free(signature);
+            yyjson_doc_free(listing);
+            return scu_fail("stale_window_geometry", "Window changed during observation. Observe again.");
+        }
+        matches = best = frames = titles = sizes = 0;
+        ambiguous = FALSE;
+        JsonValue *app;
+        yyjson_arr_foreach(json_member(yyjson_doc_get_root(listing), "apps"), i, n, app) {
+            guint score = json_number(app, "pid", -1) == json_number(window, "pid", -2) ? 2 : 1;
+            size_t j, m;
+            yyjson_arr_foreach(json_member(app, "windows"), j, m, candidate) {
+                CanvasRect root, origin;
+                double scale;
+                frames++;
+                titles += !g_strcmp0(json_string(candidate, "title"), json_string(window, "title"));
+                sizes += accessibility_size(window, candidate, &root, &origin, &scale);
+                if (score < best || !accessibility_geometry(window, candidate, &root, &origin, &scale))
+                    continue;
+                /* Flatpak bus credentials and compositor PIDs can differ.
+                 * Require uniqueness in both inventories for that fallback. */
+                if (score == 1) {
+                    guint alternatives = 0;
+                    size_t w, total;
+                    JsonValue *other;
+                    yyjson_arr_foreach(json_member(yyjson_doc_get_root(visual.geometry), "windows"), w, total, other) {
+                        CanvasRect unused_anchor, unused_origin;
+                        double unused_ratio;
+                        alternatives += accessibility_geometry(other, candidate, &unused_anchor, &unused_origin, &unused_ratio);
+                    }
+                    if (alternatives != 1) {
+                        ambiguous |= alternatives > 1;
+                        continue;
                     }
                 }
-                if (alternatives != 1) {
-                    continue;
-                }
+                if (score > best) { best = score; matches = 0; }
+                match = candidate;
+                match_pid = json_number(app, "pid", 0);
+                anchor = root;
+                client = origin;
+                ratio = scale;
+                matches++;
             }
-            if (score > best) {
-                best = score;
-                matches = 0;
-            }
-            match = candidate;
-            match_pid = json_number(app, "pid", 0);
-            anchor = root;
-            client = origin;
-            ratio = scale;
-            matches++;
         }
-    }
+        if (matches || ambiguous || g_get_monotonic_time() >= until) break;
+        if (!scu_pause(50)) { free(signature); yyjson_doc_free(listing); return NULL; }
+    } while (TRUE);
+    free(signature);
     if (matches != 1) {
+        const char *code = matches > 1 || ambiguous ? "accessibility_window_ambiguous"
+            : titles && !sizes ? "accessibility_geometry_mismatch" : "accessibility_window_unmatched";
+        char *hint = g_strdup_printf("Could not uniquely associate this window after refreshing accessibility metadata (%u frames, %u matching titles, %u matching sizes). Observe again or use screenshot input.", frames, titles, sizes);
+        scu_fail(code, hint);
+        g_free(hint);
         yyjson_doc_free(listing);
-        return scu_fail("accessibility_window_unavailable", "No unique accessibility window matches this KWin window and client geometry. Use screenshot-based input.");
+        return NULL;
     }
     yyjson_mut_doc *request = yyjson_mut_doc_new(NULL);
     JsonResult *copy = yyjson_val_mut_copy(request, args);
@@ -2767,7 +2868,6 @@ static JsonResult *window_tree(JsonValue *args, JsonValue *window)
         yyjson_mut_uint(request, json_number(match, "window_id", 0)));
     /* The worker validates its own process identity, not the KWin PID. */
     yyjson_mut_obj_put(copy, yyjson_mut_str(request, "pid"), yyjson_mut_uint(request, match_pid));
-    yyjson_mut_obj_put(copy, yyjson_mut_str(request, "tree_format"), yyjson_mut_str(request, "both"));
     yyjson_doc *parameters = yyjson_mut_val_imut_copy(copy, NULL);
     yyjson_mut_doc_free(request);
     yyjson_doc_free(listing);
@@ -2776,7 +2876,6 @@ static JsonResult *window_tree(JsonValue *args, JsonValue *window)
     if (!tree) {
         return NULL;
     }
-    result_boolean(tree, "pid_matched", best == 2);
     JsonResult *rows = yyjson_mut_obj_get(tree, "elements"), *row;
     yyjson_mut_arr_foreach(rows, i, n, row) {
         yyjson_doc *raw = yyjson_mut_val_imut_copy(yyjson_mut_obj_get(row, "frame"), NULL);
@@ -2786,17 +2885,27 @@ static JsonResult *window_tree(JsonValue *args, JsonValue *window)
             rect.y = client.y + (rect.y - anchor.y) * ratio;
             rect.width *= ratio;
             rect.height *= ratio;
-            result_member(row, "frame", overview_rect(&rect));
+            JsonResult *converted = overview_rect(&rect);
+            const char *coordinates[] = {"x", "y", "width", "height"};
+            for (guint c = 0; c < G_N_ELEMENTS(coordinates); c++) {
+                double value = yyjson_mut_get_num(yyjson_mut_obj_get(converted, coordinates[c]));
+                result_number(converted, coordinates[c], (double)(gint64)(value * 100 + (value < 0 ? -0.5 : 0.5)) / 100);
+            }
+            result_member(row, "frame", converted);
         } else {
             result_member(row, "frame", yyjson_mut_null(scu.doc));
         }
         yyjson_doc_free(raw);
     }
-    const char *format = json_string(args, "tree_format");
-    if (!format || !strcmp(format, "markdown")) {
-        yyjson_mut_obj_remove_str(tree, "elements");
-    } else if (!strcmp(format, "elements")) {
-        yyjson_mut_obj_remove_str(tree, "tree_markdown");
+    /* Recheck after coordinate conversion so the complete textual observation
+     * stays bounded even with large desktop scales or long toolkit labels. */
+    for (;;) {
+        size_t bytes = 0;
+        char *encoded = yyjson_mut_val_write(tree, 0, &bytes);
+        free(encoded);
+        if (bytes <= 18 * 1024 || yyjson_mut_arr_size(rows) <= 1) break;
+        yyjson_mut_arr_remove_last(rows);
+        mark_tree_complex(tree);
     }
     return tree;
 }
@@ -2807,15 +2916,14 @@ static JsonValue *requested_kwin_window(JsonValue *args)
     JsonValue *window;
     yyjson_arr_foreach(json_member(yyjson_doc_get_root(visual.geometry), "windows"), i, n, window) {
         if (json_string(window, "key") && kwin_window_id(json_string(window, "key")) ==
-                json_number(args, "window_id", -1) && json_number(window, "pid", -1) ==
-                json_number(args, "pid", -2)) {
+                json_number(args, "window_id", -1)) {
             return window;
         }
     }
     return NULL;
 }
 
-static JsonResult *window_image(JsonValue *args, JsonValue *window)
+static JsonResult *window_image(JsonValue *window)
 {
     CanvasRect frame;
     if (!read_rect(json_member(window, "frame"), &frame) || !prepare_capture()) {
@@ -2827,8 +2935,7 @@ static JsonResult *window_image(JsonValue *args, JsonValue *window)
     if (!source) {
         return NULL;
     }
-    guint maximum = json_number(args, "max_image_dimension", 1600);
-    double scale = maximum && MAX(width, height) > maximum ? (double)maximum / MAX(width, height) : 1;
+    double scale = MAX(width, height) > MAX_IMAGE_DIMENSION ? (double)MAX_IMAGE_DIMENSION / MAX(width, height) : 1;
     guint output_width = MAX(1, (guint)(width * scale));
     guint output_height = MAX(1, (guint)(height * scale));
     CanvasLayout sampling = {.count = 1};
@@ -2869,19 +2976,22 @@ static JsonResult *observe_window(JsonValue *args)
     if (!window) {
         return scu_fail("window_unavailable", "KWin window is unavailable. Call status again.");
     }
-    char *signature = yyjson_val_write(window, 0, NULL);
+    char *signature = window_geometry_signature(window);
     guint images = yyjson_mut_arr_size(scu.images);
     JsonResult *result = NULL, *tree_error = NULL;
     JsonResult *tree = window_tree(args, window);
     if (!tree) {
-        if (g_strcmp0(scu.code, "accessibility_window_unavailable") &&
+        if (g_strcmp0(scu.code, "accessibility_window_unmatched") &&
+            g_strcmp0(scu.code, "accessibility_window_ambiguous") &&
+            g_strcmp0(scu.code, "accessibility_geometry_mismatch") &&
             g_strcmp0(scu.code, "accessibility_unavailable")) {
             goto done;
         }
         tree_error = error_payload();
         clear_tool_error();
     }
-    JsonResult *image = window_image(args, window);
+    window = requested_kwin_window(args);
+    JsonResult *image = window ? window_image(window) : NULL;
     if (!image) {
         if (!tree || !scu_tick() || !require_computer_access()) {
             goto done;
@@ -2893,7 +3003,7 @@ static JsonResult *observe_window(JsonValue *args)
         goto done;
     }
     window = requested_kwin_window(args);
-    char *current = window ? yyjson_val_write(window, 0, NULL) : NULL;
+    char *current = window_geometry_signature(window);
     gboolean same = current && !strcmp(signature, current);
     free(current);
     if (!same) {
@@ -2906,7 +3016,6 @@ static JsonResult *observe_window(JsonValue *args)
     } else if (tree_error) {
         result_member(image, "accessibility_error", tree_error);
     }
-    result_integer(result, "pid", json_number(args, "pid", 0));
     result_integer(result, "window_id", json_number(args, "window_id", 0));
     result_integer(result, "id", visual.canvas.id);
 done:
@@ -3777,7 +3886,7 @@ static JsonResult *computer(JsonValue *args)
     /* Delays are neutral: semantic-only sequences stay semantic. With no
      * input actions, they provide a delayed observation of ongoing loading. */
     if (automatic && (!has_actions || has_foreground)) {
-        const char *defaults = "{\"max_image_dimension\":1600}";
+        const char *defaults = "{}";
         observation = yyjson_read(defaults, strlen(defaults), 0);
         observer = &desktop_schema;
     } else if (yyjson_is_obj(observe)) {
@@ -3818,7 +3927,7 @@ static JsonResult *computer(JsonValue *args)
         if (keyboard_fallback) {
             foreground_attempted = TRUE;
             if (automatic && !observer) {
-                const char *defaults = "{\"max_image_dimension\":1600}";
+                const char *defaults = "{}";
                 observation = yyjson_read(defaults, strlen(defaults), 0);
                 observer = &desktop_schema;
             }
