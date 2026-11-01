@@ -223,6 +223,7 @@ class ScuTests(unittest.TestCase):
                               (numeric_readonly, "--numeric-readonly"), (numeric_delay, "--numeric-delay")):
             if enabled: command.append(flag)
         self.atspi_state.with_suffix(".actions.json").unlink(missing_ok=True)
+        self.atspi_state.with_suffix(".bounds.json").unlink(missing_ok=True)
         self.atspi_state.with_suffix(".title").unlink(missing_ok=True)
         self.atspi = self.child(command)
         self.ready(self.atspi)

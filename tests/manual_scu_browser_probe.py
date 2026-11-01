@@ -130,8 +130,11 @@ def main():
         probe.tool("computer", steps=[{"tool": "press_keys", "args": {"keys": ["CTRL", "w"]}}], observe=False)
         tree = snapshot()
         offscreen = next(row for row in tree["elements"] if row["label"] == "Offscreen button")
-        result = probe.tool("computer", steps=[{"tool": "click", "args": {
-            "element_token": offscreen["element_token"], "button": "middle"}}], observe=False)
+        reply = probe.call("tools/call", {"name": "computer", "arguments": {
+            "steps": [{"tool": "click", "args": {
+                "element_token": offscreen["element_token"], "button": "middle"}}], "observe": False}})
+        result = reply.get("structuredContent", {})
+        assert reply.get("isError"), reply
         assert result.get("failed", {}).get("code") == "element_off_screen", result
         record("offscreen-middle-click", error="element_off_screen")
 

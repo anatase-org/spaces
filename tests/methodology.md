@@ -1223,3 +1223,17 @@ address-bar readback. It also verifies that an offscreen middle-click returns
 venv/bin/python tests/manual_scu_browser_probe.py \
   --artifacts .build/scu-token-pointer-browser
 ```
+
+On 2026-11-01, the deployed fallback passed on win5/win5f without accessibility
+launch overrides. Token double-click triggered the page's double-click handler;
+token middle-click opened `about:blank` in a new tab, confirmed after Ctrl+Tab.
+Offscreen middle-click returned `element_off_screen`, and the subsequent
+semantic click invoked the same offscreen button. Text, numeric value, shared
+client retention, teardown and reactivation checks also passed. The instance
+launched before consumer activation again exposed no tree; the instance
+launched afterward exposed all probe controls. Temporary profiles were removed,
+and final state was `IsEnabled=false`, no registered events, `MainPID=0` and
+SELinux enforcing. Artifacts are in `.build/scu-token-pointer-browser-final`.
+Eight focused regression checks and native ABI checks passed. The fixture
+resets its bounds override between tests so moved targets cannot affect later
+coordinate or shared-session checks.
