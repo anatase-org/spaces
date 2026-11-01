@@ -713,8 +713,10 @@ are rejected before effects.
 Window observations expose one compact `tree_markdown` string in both text and
 `structuredContent`; full element records stay inside the host. Each indented
 line starts with the integer `element_id` in brackets, followed by role, quoted
-label, value/range, supported actions, meaningful state flags and an optional
-`frame=[x,y,width,height]`. Quotes and newlines in labels/values are escaped, so
+label, value/range, supported actions and meaningful state flags. Vision also
+includes optional `frame=[x,y,width,height]`; accessibility omits coordinates and
+reads noninteractive text, including prose exposed by Text rather than the name.
+Quotes and newlines in labels/values are escaped, so
 one accessible object always occupies one line. Indentation shows hierarchy.
 The plain text content displays batch outcomes, observations and errors directly
 rather than JSON-encoding the tree again. Status text similarly lists screen
@@ -1490,8 +1492,10 @@ The `tree_format` cleanup in `28bd367` also removed the readable renderer,
 leaving full element records in both MCP text and structured output. The restored
 default puts compact `tree_markdown` in both representations and keeps raw rows
 inside the host. It introduces no format selector or input-schema changes.
-Persistent element IDs, offscreen controls, coordinates, values, states, supported
-actions and partial-tree diagnostics remain available. The 512 KiB observation
+Persistent element IDs, offscreen controls, values, states, supported actions
+and partial-tree diagnostics remain available. Vision retains coordinates;
+accessibility omits them and includes noninteractive text, including unnamed or
+hidden paragraphs and named read-only Text content. The 512 KiB observation
 budget now measures the serialized compact representation, including escapes and
 metadata, rather than the internal element records.
 
@@ -1513,3 +1517,237 @@ fixtures at `/tmp/scu-mcp-protocol`, with readable previews at
 `/tmp/scu-accessibility-output.txt`. The prior deployed dump is retained at
 `/tmp/scu-mcp-protocol-before-readable`. These examples are fixture responses,
 not a deployment or a resumed browser rollout; the real desktop was not changed.
+
+The follow-up accessibility presentation change omits coordinates from its
+public tree and reads Text content for noninteractive paragraphs, static text,
+labels, headings and text objects. This includes prose not present in the
+accessible name, including hidden paragraphs containing children. Vision keeps
+its existing content, geometry and image behavior. Private fixtures verify these
+paths while locked in both frontend modes, without focus/input, password reads
+or captures, and compare vision output before/after the accessibility read.
+
+Final validation: **246 tests passed** across SCU, computer integration, launch
+and native ABI coverage (266.869 seconds); `make -C native check-guest-abi`
+passed. Five focused reading/geometry/locked-accessibility checks also passed.
+
+Fresh real-site examples were captured on win5 from isolated Anatase Browser
+profiles using the modified native host/frontend in a temporary directory,
+without replacing installed binaries or services. They cover the Hacker News
+front page and comments, and YouTube's “An Overview of Linux Desktop
+Accessibility and ATSPI” watch page. Each site has exact status/vision/accessibility
+requests and responses, readable text, decoded PNGs, and no-vision examples in
+`/tmp/scu-mcp-protocol/hackernews` and `/tmp/scu-mcp-protocol/youtube`. YouTube's
+accessibility text was 23,173 bytes; its vision text was 33,226 bytes. Hacker News
+front-page accessibility was 48,207 bytes and comments accessibility was 194,017
+bytes. Any partial-tree diagnostics are preserved in the examples.
+
+These unlocked captures exercise real KWin/EIS/AT-SPI data and C rendering, but
+the temporary-host harness does not validate production registration or lock
+monitoring. The tests above cover those contracts. Profiles, browser windows
+and the temporary host were removed; the initial unlocked state was preserved
+and SELinux remained Enforcing. No rollout resumed or permanent deployment took
+place. `/tmp/scu-mcp-protocol/README.md` documents sources and the primary dump
+paths; the generic three-tool examples now show YouTube rather than fixtures.
+
+
+### Reading-text cleanup and article example (2026-11-02)
+
+Read-only paragraphs, static text, labels, headings and text objects no longer
+advertise browser-generic activation/context-menu actions. Editable and numeric
+controls retain their capabilities, and links/buttons still invoke advertised
+semantic actions. Reading text normalizes whitespace; whitespace-only and
+standalone pipe/bullet separator text is omitted. Empty or equivalent values and
+child text exactly repeating its parent's reading content are omitted. Editable
+values preserve their whitespace, including multiline input. Both trees use the
+cleanup; vision retains its geometry/image behavior and accessibility still
+includes reading text without coordinates.
+
+Private AT-SPI fixtures now advertise `clickAncestor`/`showContextMenu` on prose,
+include Unicode whitespace, standalone separators, a duplicate reading value,
+punctuation within a sentence, and a linked text child. Tests check retained
+prose, absent generic text actions, one representation of duplicate content,
+actual link activation/context menus while locked, and unchanged editable-value
+semantics and vision behavior across accessibility observations.
+
+The real-site dump includes an article opened from Hacker News,
+[“Tips for more effective fuzz testing with AFL++”](https://nullprogram.com/blog/2025/02/05/),
+in `/tmp/scu-mcp-protocol/article`. Matching status/vision/accessibility requests,
+exact responses, readable text and decoded screenshots permit direct inspection
+of headings, prose, inline links and code. YouTube and Hacker News front-page and
+comments examples were refreshed using temporary binaries and isolated normal
+browser profiles. This does not replace the installed SCU service.
+
+Primary references for presentation design were checked on 2026-11-02:
+
+- [Claude browser tools](https://platform.claude.com/docs/en/agents-and-tools/tool-use/browser-use-tool)
+  document role/name text with references, subtree reads and separate article text.
+  The application supplies the renderer and reference mapping.
+- [Codex browser documentation](https://learn.chatgpt.com/docs/browser) documents
+  rendered-state inspection and screenshots, but does not specify its compaction
+  implementation. The [public OpenAI browser driver contract](https://developers.openai.com/api/docs/guides/tools-computer-use-sdk-drivers#report-structured-reads)
+  separates reading text from control records; it is not evidence of Codex internals.
+- [Playwright's AI distiller](https://github.com/microsoft/playwright/blob/main/packages/injected/src/ariaSnapshotDistiller.ts)
+  merges text, removes redundant names, collapses wrappers and retains its reference
+  maps. Its [renderer](https://github.com/microsoft/playwright/blob/main/packages/isomorphic/ariaSnapshotRenderer.ts)
+  emits compact role/name/state text with references.
+- [Browser Use's serializer](https://github.com/browser-use/browser-use/blob/main/browser_use/dom/serializer/serializer.py)
+  builds a simplified DOM representation with interaction indices and reading text.
+  Its visibility/paint/bounds filtering differs from SCU's offscreen semantic contract.
+
+The useful shared principle is to distinguish reading text from actionable
+controls and keep target identity independent of rendering. The article still
+shows overlap between some aggregate paragraph Text and multiple child fragments;
+tables and browser containers may also retain generic actions. Removing aggregate
+text indiscriminately would lose content available only through Text. Further
+compaction should use a separate pass that preserves reading order and control
+identity. No viewport filtering, new tool options, or agent-selected limits were
+introduced. The complete reference comparison is saved beside the examples in
+`/tmp/scu-mcp-protocol/tree-format-references.md`.
+
+Validation passed: **246 tests** across SCU, computer integration, launch and
+native ABI coverage (265.723 seconds). After the final exact-parent-text
+refinement, the focused reading/semantic-action tests passed again (24.509
+seconds), and `make -C native check-guest-abi` passed. Final real-site accessibility
+text sizes were 30,955 bytes for Hacker News, 19,757 for YouTube and 39,768 for the
+article. The captures contain respectively 125, 131 and 300 reading rows with no
+actions; static/paragraph/heading rows advertise no generic actions. Cleanup
+restored the initially unlocked session, removed owned profiles/windows and the
+temporary host, and confirmed SELinux Enforcing. Prior examples remain in
+`/tmp/scu-mcp-protocol-before-text-cleanup`.
+
+
+### Static prose presentation (2026-11-02)
+
+Generic `activate`/`open_context_menu` flags are no longer printed on any tree
+row. Toolkit action names are queried only when those actions are invoked;
+unsupported actions retain the existing errors. Editing capabilities appear as
+plain, space-separated `type_text set_value` flags, without an `actions=` prefix.
+
+Read-only static text receives no element ID and consumes no target-ring entry.
+Accessibility combines consecutive sibling static rows in reading order, using
+the longer Text value when it extends a shortened accessible name. Lines shorter
+than five Unicode characters after concatenation are omitted. Short fragments
+can still form a retained combined line (`ab` plus `cd` becomes `ab cd`). Controls
+and hierarchy boundaries separate runs. Omitting a short static parent hoists
+its retained children; it does not remove a nested control or alter its identity.
+Vision omits static prose altogether while retaining control geometry and images.
+
+The private fixture covers concatenated announcement fragments, Unicode length
+checking, preserved punctuation, a longer Text value, short parents containing
+links, stable independent target IDs, and actual semantic action support. It
+checks that reading rows never consume IDs, both frontend modes retain locked
+accessibility, and vision contains no static rows. Existing ring rollover,
+geometry, cancellation, lifecycle and keyboard-editing coverage remains active.
+
+Only the article was refreshed for this revision, at
+`/tmp/scu-mcp-protocol/article/{status,vision,accessibility}-output.txt`, with
+matching exact wire packets and screenshots. Its vision response has 97 rows,
+no static rows and 6,818 text bytes. Accessibility has 213 rows, including 74
+combined static lines, and 28,495 text bytes; every static line has at least five
+Unicode characters and no target ID. The generic three-tool `/tmp/scu-*-output`
+examples now show this article. Older YouTube/Hacker News examples remain from
+the previous revision, as the dump README states.
+
+Validation passed: **246 tests** across SCU, computer integration, launch and
+native ABI coverage (243.554 seconds). Final focused reading/action checks passed
+again after the longer-value refinement (25.182 seconds), and
+`make -C native check-guest-abi` passed. Temporary binaries and owned browser
+profiles/windows were removed. The host remained unlocked and SELinux Enforcing;
+no permanent deployment occurred.
+
+
+### Unified prose and integer frame presentation (2026-11-02)
+
+Read-only paragraphs, headings and static nodes now share the same presentation:
+unnumbered `text` rows. Consecutive siblings of any of the three types concatenate
+into one run. Paragraph Text values become their content instead of a `value=`
+attribute or a repeated accessible label. The five-Unicode-character cutoff
+applies after concatenation. All three types are omitted from vision, with
+controls inside their subtrees still traversed and retained. They consume no
+entries in the target ring; editable/numeric controls keep their IDs and flags.
+
+The fixture mixes all three node types in one run, gives a paragraph a distinct
+metadata name and Text value, and verifies that the resulting text includes the
+content without the metadata name. It checks missing IDs, unchanged control IDs,
+locked observations through both frontend modes, and vision exclusion. Displayed
+frame/bounds coordinates and dimensions now round to the nearest integer, with
+half values rounded away from zero. Structured canvas/window geometry keeps its
+precision; positive/negative fractional-origin tests verify both presentation
+and subsequent window observations.
+
+Only the real article examples were refreshed, using temporary binaries and an
+isolated normal browser profile. Vision contains 85 rows, no prose rows and 4,844
+text bytes; accessibility contains 192 rows, including 107 unnumbered `text`
+rows, and 27,189 text bytes. All displayed vision frames contain integers. The
+exact packets, text previews, screenshots and both frontend modes are under
+`/tmp/scu-mcp-protocol/article`; the generic `/tmp/scu-*-output` files also show
+the article. The README marks YouTube/Hacker News examples as older revisions.
+Owned browser windows/profiles and the temporary host were removed; the desktop
+remained unlocked, SELinux remained Enforcing, and no permanent deployment was
+performed.
+
+Validation passed: **247 tests** across SCU, computer integration, launch and
+native ABI coverage (245.228 seconds). Focused prose/rounding checks passed
+(20.862 seconds), and `make -C native check-guest-abi` passed. All 85 target IDs
+matched between the real article's vision and accessibility observations.
+
+Validation passed: **247 tests** across SCU, computer integration, launch and
+native ABI coverage (244.202 seconds). Final focused prose/control-label checks
+passed after extending duplicate collapse to control labels (19.415 seconds),
+and `make -C native check-guest-abi` passed. The refreshed real article has 173
+accessibility rows, including 88 text rows, and 24,980 text bytes. The code block
+beginning `#define main oldmain` and the article date each occur once; the code
+shares its line with the following prose. All 85 control IDs match vision.
+Only the article dumps were refreshed. Temporary host/browser resources were
+removed, the initial unlocked state was preserved, and SELinux stayed Enforcing.
+
+Validation passed: **247 tests** across SCU, computer integration, launch and
+native ABI coverage (247.264 seconds), plus `make -C native check-guest-abi`.
+These binaries were built before the concurrent lock-warning wording edit.
+The refreshed article has one `memfd_create` block, joined with the following
+prose, and all 85 control IDs match vision. Accessibility contains 165 rows,
+including 80 text rows, and 24,266 text bytes. Only the article examples were
+refreshed. Owned temporary resources were removed; the initial unlocked state
+and SELinux Enforcing were preserved. No permanent deployment was performed.
+
+
+### Compose reading text from embedded objects (2026-11-02)
+
+Comparing the flattened parent and child strings could not handle aggregate
+AT-SPI Text containing embedded-object markers: stripping those markers left
+incomplete parent summaries beside richer child content. The walker now retains
+the literal parts around each marker internally, along with whether the Text
+read itself was partial. The compactor processes children first and replaces a
+prose aggregate only when the children cover those literal parts in order. A
+partial aggregate can be replaced by the longer child representation when its
+known prefix is covered. Unique content available only through a parent's Text
+is retained when the children do not cover it.
+
+Removed wrappers' children are hoisted, parent/depth indices are rebuilt, and
+adjacent text is concatenated afterward. Exact duplicate children and control
+labels still collapse, and every control keeps its original element ID. The
+internal marker metadata is never exported. Vision, geometry checks, coordinate
+rounding, the target ring and the public schemas retain their existing contracts.
+No fuzzy word matching or additional AT-SPI bindings were introduced.
+
+Private fixtures cover inline `std::string`/`std::string_view` objects, Text-only
+content that must not be discarded, a partial parent with longer complete
+children, nested duplicates, meaningful string-literal whitespace, and both
+frontend modes while locked. Lock-warning assertions now require the core
+warning and error shape while allowing the user's appended guidance wording.
+
+The real article was refreshed using the temporary host and an isolated normal
+browser profile. Each reported paragraph occurs once with `std::string`,
+`std::string_view` and `buf` retained. Accessibility contains 109 rows, including
+24 text runs, and 16,163 text bytes. Vision has no prose rows; all 85 control IDs
+match between the tools. Marker metadata remains internal. The exact packets
+and readable examples are under `/tmp/scu-mcp-protocol/article` and the generic
+`/tmp/scu-*-output` aliases. Owned profiles/windows and the temporary host were
+removed; the initial unlocked state and SELinux Enforcing were preserved.
+
+Validation passed: **247 tests** across SCU, computer integration, launch and
+native ABI coverage (245.864 seconds), including the updated lock-warning wording.
+The focused composition regression passed (19.371 seconds), and
+`make -C native check-guest-abi` passed. The real article checks verify one
+occurrence of each reported paragraph, complete inline identifiers, no internal
+marker metadata on the wire, and identical control IDs across both tools.

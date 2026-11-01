@@ -696,7 +696,7 @@ static JsonResult *list_apps(void)
 typedef struct {
     guint count, visited;
     gint64 until;
-    gboolean truncated;
+    gboolean truncated, read_text;
     Window *window;
     JsonResult *rows;
     JsonValue *scales;
@@ -711,12 +711,205 @@ static void mark_tree_complex(JsonResult *tree)
     result_member(tree, "accessibility_error", limitation);
 }
 
+static gboolean prose_row(JsonResult *row)
+{
+    const char *role = yyjson_mut_get_str(yyjson_mut_obj_get(row, "role"));
+    return !yyjson_mut_obj_get(row, "element_id") &&
+        (!g_strcmp0(role, "static") || !g_strcmp0(role, "paragraph") || !g_strcmp0(role, "heading"));
+}
+
+static char *prose_text(JsonResult *row)
+{
+    GString *text = g_string_new(NULL);
+    const char *label = yyjson_mut_get_str(yyjson_mut_obj_get(row, "label"));
+    const char *value = yyjson_mut_get_str(yyjson_mut_obj_get(row, "value"));
+    gboolean paragraph = !g_strcmp0(yyjson_mut_get_str(yyjson_mut_obj_get(row, "role")), "paragraph");
+    gsize prefix = label ? strlen(label) : 0;
+    if (prefix && g_str_has_suffix(label, "…")) prefix -= strlen("…");
+    /* Text may extend the same shortened accessible name. */
+    if (label && *label && !(value && *value && (paragraph || (prefix && !strncmp(label, value, prefix)))))
+        g_string_append(text, label);
+    if (value && *value) {
+        if (text->len) g_string_append_c(text, ' ');
+        g_string_append(text, value);
+    }
+    return g_string_free(text, FALSE);
+}
+
+/* AT-SPI uses embedded-object markers in aggregate Text. Its literal parts
+ * must all be represented by the children before that aggregate can go away. */
+static gboolean child_text_covers(JsonResult *parts, gboolean partial, const char *text)
+{
+    const char *cursor = text, *end = text + strlen(text);
+    size_t i, n;
+    JsonResult *value;
+    yyjson_mut_arr_foreach(parts, i, n, value) {
+        const char *part = yyjson_mut_get_str(value);
+        gsize length = strlen(part);
+        if (!i) {
+            if (!g_str_has_prefix(cursor, part)) return FALSE;
+            cursor += length;
+        } else if (i + 1 == n && !partial) {
+            if ((gsize)(end - cursor) < length || memcmp(end - length, part, length)) return FALSE;
+            cursor = end;
+        } else {
+            const char *match = strstr(cursor, part);
+            if (!match) return FALSE;
+            cursor = match + length;
+        }
+    }
+    return partial || cursor == end;
+}
+
+/* Distill children first. Complete child content replaces an aggregate with
+ * embedded objects; exact copies collapse into their parent. Hoist retained
+ * children and rebuild the hierarchy before joining adjacent text siblings. */
+static JsonResult *compact_text_rows(JsonResult *rows)
+{
+    size_t count = yyjson_mut_arr_size(rows);
+    gboolean *omitted = g_new0(gboolean, count);
+    gint *children = g_new(gint, count), *siblings = g_new(gint, count);
+    char **content = g_new0(char *, count), **rendered = g_new0(char *, count);
+    for (size_t i = 0; i < count; i++) children[i] = siblings[i] = -1;
+    for (size_t i = count; i-- > 0;) {
+        JsonResult *row = yyjson_mut_arr_get(rows, i);
+        gint parent = yyjson_mut_get_sint(yyjson_mut_obj_get(row, "parent_index"));
+        if (parent >= 0) {
+            siblings[i] = children[parent];
+            children[parent] = (gint)i;
+        }
+        if (prose_row(row)) content[i] = prose_text(row);
+    }
+    for (size_t i = count; i-- > 0;) {
+        JsonResult *row = yyjson_mut_arr_get(rows, i);
+        const char *own = content[i] ? content[i] : yyjson_mut_get_str(yyjson_mut_obj_get(row, "label"));
+        /* A removed wrapper's children now belong to this node. */
+        for (gint *link = &children[i]; *link >= 0;) {
+            gint child = *link;
+            if (!omitted[child]) link = &siblings[child];
+            else if (children[child] < 0) *link = siblings[child];
+            else {
+                gint tail = children[child];
+                while (siblings[tail] >= 0) tail = siblings[tail];
+                siblings[tail] = siblings[child];
+                *link = children[child];
+            }
+        }
+        /* Keep the parent's original spelling when its leaf children merely
+         * repeat it, allowing only spaces invented at fragment boundaries. */
+        for (gint *link = &children[i]; own && *own && *link >= 0;) {
+            gint first = *link, last = first, next = first;
+            if (!content[first] || children[first] >= 0) {
+                link = &siblings[first];
+                continue;
+            }
+            const char *cursor = own;
+            gboolean matches = TRUE;
+            while (next >= 0 && content[next] && children[next] < 0) {
+                if (matches) {
+                    if (next != first) while (*cursor == ' ') cursor++;
+                    if (g_str_has_prefix(cursor, content[next])) cursor += strlen(content[next]);
+                    else matches = FALSE;
+                }
+                last = next;
+                next = siblings[next];
+            }
+            if (matches && !*cursor) {
+                for (gint j = first; j != next; j = siblings[j]) {
+                    omitted[j] = TRUE;
+                    if (yyjson_mut_is_true(yyjson_mut_obj_get(yyjson_mut_arr_get(rows, j), "text_truncated")))
+                        result_boolean(row, "text_truncated", TRUE);
+                }
+                *link = next;
+            } else link = &siblings[last];
+        }
+        GString *descendants = g_string_new(NULL);
+        for (gint child = children[i]; child >= 0; child = siblings[child]) {
+            if (*rendered[child]) {
+                if (descendants->len) g_string_append_c(descendants, ' ');
+                g_string_append(descendants, rendered[child]);
+            }
+        }
+        JsonResult *parts = yyjson_mut_obj_get(row, "text_parts");
+        if (content[i] && descendants->len && parts && child_text_covers(parts,
+                yyjson_mut_is_true(yyjson_mut_obj_get(row, "text_partial")), descendants->str)) {
+            omitted[i] = TRUE;
+            rendered[i] = g_string_free(descendants, FALSE);
+        } else {
+            GString *text = g_string_new(own ? own : "");
+            if (text->len && descendants->len) g_string_append_c(text, ' ');
+            g_string_append(text, descendants->str);
+            rendered[i] = g_string_free(text, FALSE);
+            g_string_free(descendants, TRUE);
+        }
+    }
+    JsonResult *compact = result_array();
+    gint *parents = g_new(gint, count);
+    guint *depths = g_new(guint, count);
+    for (size_t i = 0; i < count; i++) {
+        JsonResult *row = yyjson_mut_arr_get(rows, i);
+        gint parent = yyjson_mut_get_sint(yyjson_mut_obj_get(row, "parent_index"));
+        parent = parent >= 0 ? parents[parent] : -1;
+        parents[i] = parent;
+        if (!omitted[i]) {
+            row = yyjson_mut_val_mut_copy(scu.doc, row);
+            guint index = yyjson_mut_arr_size(compact);
+            parents[i] = (gint)index;
+            depths[index] = parent >= 0 ? depths[parent] + 1 : 0;
+            result_integer(row, "element_index", index);
+            result_integer(row, "parent_index", parent);
+            result_integer(row, "depth", depths[index]);
+            result_append(compact, row);
+        }
+        g_free(content[i]);
+        g_free(rendered[i]);
+    }
+    g_free(parents);
+    g_free(depths);
+    g_free(content);
+    g_free(rendered);
+    g_free(children);
+    g_free(siblings);
+    g_free(omitted);
+    return compact;
+}
+
+/* A control or a retained hierarchy boundary separates reading runs. Duplicate
+ * children have already collapsed, so their parents can concatenate here. */
+static JsonResult *prose_text_run(JsonResult *rows, size_t *index)
+{
+    JsonResult *first = yyjson_mut_arr_get(rows, *index);
+    JsonResult *row = yyjson_mut_val_mut_copy(scu.doc, first);
+    gint64 parent = yyjson_mut_get_sint(yyjson_mut_obj_get(first, "parent_index"));
+    gint64 depth = yyjson_mut_get_sint(yyjson_mut_obj_get(first, "depth"));
+    GString *prose = g_string_new(NULL);
+    for (size_t i = *index; i < yyjson_mut_arr_size(rows); i++) {
+        JsonResult *next = yyjson_mut_arr_get(rows, i);
+        if (!prose_row(next) || yyjson_mut_get_sint(yyjson_mut_obj_get(next, "parent_index")) != parent ||
+            yyjson_mut_get_sint(yyjson_mut_obj_get(next, "depth")) != depth) break;
+        char *part = prose_text(next);
+        if (prose->len && *part) g_string_append_c(prose, ' ');
+        g_string_append(prose, part);
+        g_free(part);
+        if (yyjson_mut_is_true(yyjson_mut_obj_get(next, "text_truncated")))
+            result_boolean(row, "text_truncated", TRUE);
+        *index = i;
+    }
+    result_string(row, "role", "text");
+    result_string(row, "label", prose->str);
+    yyjson_mut_obj_remove_key(row, "value");
+    gboolean keep = g_utf8_strlen(prose->str, -1) >= 5;
+    g_string_free(prose, TRUE);
+    return keep ? row : NULL;
+}
+
 /* Render only after geometry revalidation. Raw rows stay inside the host;
  * the response budget applies to the compact representation actually sent. */
-static void limit_tree_output(JsonResult *tree)
+static void limit_tree_output(JsonResult *tree, gboolean include_frame)
 {
     JsonResult *rows = yyjson_mut_obj_get(tree, "elements");
     if (!rows) return;
+    rows = compact_text_rows(rows);
     JsonResult *metadata = result_object(), *key, *value;
     size_t i, n;
     yyjson_mut_obj_foreach(tree, i, n, key, value) {
@@ -730,9 +923,18 @@ static void limit_tree_output(JsonResult *tree)
     char *encoded = yyjson_mut_val_write(metadata, 0, &bytes);
     free(encoded);
     GString *text = g_string_new(NULL);
-    yyjson_mut_arr_foreach(rows, i, n, value) {
+    guint *levels = g_new0(guint, yyjson_mut_arr_size(rows));
+    for (i = 0, n = yyjson_mut_arr_size(rows); i < n; i++) {
+        size_t first = i;
+        value = yyjson_mut_arr_get(rows, i);
+        gint64 parent = yyjson_mut_get_sint(yyjson_mut_obj_get(value, "parent_index"));
+        guint depth = parent >= 0 ? levels[parent] : 0;
+        if (prose_row(value)) value = prose_text_run(rows, &i);
+        for (size_t j = first; j <= i; j++) levels[j] = depth + (value != NULL);
+        if (!value) continue;
+        result_integer(value, "depth", depth);
         gsize start = text->len;
-        append_tree_row(text, value);
+        append_tree_row(text, value, include_frame);
         size_t line_bytes = 0;
         encoded = yyjson_mut_val_write(yyjson_mut_str(scu.doc, text->str + start), 0, &line_bytes);
         free(encoded);
@@ -745,6 +947,7 @@ static void limit_tree_output(JsonResult *tree)
     }
     yyjson_mut_obj_remove_key(tree, "elements");
     result_string(tree, "tree_markdown", text->str);
+    g_free(levels);
     g_string_free(text, TRUE);
 }
 
@@ -770,6 +973,23 @@ static gboolean structural_role(AtspiRole role)
     return role == ATSPI_ROLE_PANEL || role == ATSPI_ROLE_FILLER ||
         role == ATSPI_ROLE_SECTION || role == ATSPI_ROLE_PARAGRAPH ||
         role == ATSPI_ROLE_UNKNOWN;
+}
+
+static gboolean reading_role(AtspiRole role)
+{
+    return role == ATSPI_ROLE_PARAGRAPH || role == ATSPI_ROLE_STATIC ||
+        role == ATSPI_ROLE_TEXT || role == ATSPI_ROLE_LABEL || role == ATSPI_ROLE_HEADING;
+}
+
+static gboolean reading_content(const char *text)
+{
+    if (!text) return FALSE;
+    for (const char *p = text; *p; p = g_utf8_next_char(p)) {
+        gunichar c = g_utf8_get_char(p);
+        if (!g_unichar_isspace(c) && c != '|' && c != 0x2022 && c != 0xb7 && c != 0xfffc)
+            return TRUE;
+    }
+    return FALSE;
 }
 
 static char *observation_text(const char *text, guint maximum, gboolean *shortened, gboolean label)
@@ -871,16 +1091,45 @@ static void append_accessible(Walk *state, AtspiAccessible *node,
     gboolean emit = exposed && (!level || (!duplicate && (!structural || (visible && name && *name))));
     /* Unnamed wrappers and duplicate text do not consume rows or compact depth. */
     char *value = NULL;
-    if (emit && !password && (text_input || (!children && (!name || !*name)))) {
+    JsonResult *text_parts = NULL;
+    gboolean text_partial = FALSE;
+    gboolean reading = reading_role(type) && !text_input && !number && !password;
+    gboolean prose = reading && (type == ATSPI_ROLE_STATIC || type == ATSPI_ROLE_PARAGRAPH || type == ATSPI_ROLE_HEADING);
+    if (prose && !state->read_text) emit = FALSE;
+    gboolean content_text = state->read_text && exposed && reading_role(type);
+    if ((emit || content_text) && !password &&
+        (text_input || content_text || (!children && (!name || !*name)))) {
         AtspiText *text = atspi.accessible_get_text_iface(node);
         if (text) {
             gint length = atspi.text_get_character_count(text, NULL);
             char *raw = length >= 0 ? atspi.text_get_text(text, 0, MIN(length, 513), NULL) : NULL;
-            value = observation_text(raw, 512, &shortened, FALSE);
+            value = observation_text(raw, 512, &shortened, reading);
+            if (prose && raw && (strstr(raw, "\xef\xbf\xbc") || length > 512)) {
+                text_partial = length > 512;
+                char *prefix = g_utf8_substring(raw, 0, MIN(g_utf8_strlen(raw, -1), 512));
+                char **parts = g_strsplit(prefix, "\xef\xbf\xbc", -1);
+                text_parts = result_array();
+                for (guint i = 0; parts[i]; i++) {
+                    gboolean clipped = FALSE;
+                    char *part = observation_text(parts[i], 512, &clipped, TRUE);
+                    result_append(text_parts, yyjson_mut_strcpy(scu.doc, part));
+                    g_free(part);
+                }
+                g_strfreev(parts);
+                g_free(prefix);
+            }
             if (length > 512) shortened = TRUE;
             g_free(raw);
             g_object_unref(text);
         }
+    }
+    /* Read-only prose can live in Text without an accessible name, including
+     * paragraphs containing links/controls. Accessibility must expose that text
+     * even when no action or screenshot can reveal it. */
+    if (content_text && value && *value && g_strcmp0(value, parent_label)) emit = TRUE;
+    if (reading) {
+        if (value && (!*value || !g_strcmp0(value, name))) g_clear_pointer(&value, g_free);
+        if (level && !reading_content(name) && !reading_content(value)) emit = FALSE;
     }
     /* Chromium exports many empty placeholder buttons/notifications. Flatten
      * nodes with no semantic content, retaining unnamed editable/value controls
@@ -891,7 +1140,8 @@ static void append_accessible(Walk *state, AtspiAccessible *node,
         char *role = atspi.accessible_get_role_name(node, NULL);
         JsonResult *row = result_object();
         result_integer(row, "element_index", index);
-        result_integer(row, "element_id", cache_element(node, state->window));
+        if (!prose)
+            result_integer(row, "element_id", cache_element(node, state->window));
         result_integer(row, "parent_index", parent);
         result_integer(row, "depth", depth);
         result_string(row, "role", role);
@@ -904,23 +1154,12 @@ static void append_accessible(Walk *state, AtspiAccessible *node,
         if (password) result_boolean(row, "protected", TRUE);
         else if (value && g_strcmp0(value, name)) result_string(row, "value", value);
         if (shortened) result_boolean(row, "text_truncated", TRUE);
-        JsonResult *actions = result_array();
-        gboolean activate = FALSE, context = FALSE;
-        AtspiAction *action = !structural && level ? atspi.accessible_get_action_iface(node) : NULL;
-        if (action) {
-            gint count = MIN(atspi.action_get_n_actions(action, NULL), 32);
-            for (gint i = 0; i < count; i++) {
-                char *action_name = atspi.action_get_action_name(action, i, NULL);
-                if (action_name) {
-                    activate |= accessible_activate_name(action_name);
-                    context |= strstr(action_name, "menu") || strstr(action_name, "Menu");
-                    g_free(action_name);
-                }
-            }
-            g_object_unref(action);
+        if (text_parts) {
+            result_member(row, "text_parts", text_parts);
+            result_boolean(row, "text_partial", text_partial);
         }
-        if (activate) result_append(actions, yyjson_mut_str(scu.doc, "activate"));
-        if (context) result_append(actions, yyjson_mut_str(scu.doc, "open_context_menu"));
+        JsonResult *actions = result_array();
+        /* Resolve generic actions on invocation; only editing needs tree flags. */
         if (text_input) result_append(actions, yyjson_mut_str(scu.doc, "type_text"));
         if (text_input || number) result_append(actions, yyjson_mut_str(scu.doc, "set_value"));
         if (number) {
@@ -951,7 +1190,7 @@ static void append_accessible(Walk *state, AtspiAccessible *node,
         AtspiAccessible *child = atspi.accessible_get_child_at_index(node, i, NULL);
         if (child) {
             append_accessible(state, child, depth, parent, level + 1,
-                emit ? name : parent_label, scale, frame);
+                emit ? (reading && value ? value : name) : parent_label, scale, frame);
             g_object_unref(child);
         }
     }
@@ -1013,6 +1252,7 @@ static JsonResult *read_window_state(JsonValue *args)
     if (!element_table)
         return scu_fail("stale_element", "No MCP instance is associated with this tree read.");
     Walk state = {.window = w, .rows = result_array(), .scales = json_member(args, "device_scales"),
+        .read_text = json_boolean(args, "read_text"),
         .until = g_get_monotonic_time() + 5 * G_USEC_PER_SEC};
     append_accessible(&state, w->accessible, 0, -1, 0, NULL, 1, NULL);
     if (scu.code) return NULL;
@@ -2944,7 +3184,7 @@ static char *window_geometry_signature(JsonValue *window)
     return yyjson_mut_val_write(geometry, 0, NULL);
 }
 
-static JsonResult *window_tree(JsonValue *args, JsonValue *window)
+static JsonResult *window_tree(JsonValue *args, JsonValue *window, gboolean read_text)
 {
     char *signature = window_geometry_signature(window);
     CanvasRect client = {0};
@@ -3027,6 +3267,7 @@ static JsonResult *window_tree(JsonValue *args, JsonValue *window)
     }
     yyjson_mut_doc *request = yyjson_mut_doc_new(NULL);
     JsonResult *copy = yyjson_val_mut_copy(request, args);
+    yyjson_mut_obj_add_bool(request, copy, "read_text", read_text);
     yyjson_mut_obj_put(copy, yyjson_mut_str(request, "window_id"),
         yyjson_mut_uint(request, json_number(match, "window_id", 0)));
     /* The worker validates its own process identity, not the KWin PID. */
@@ -3137,7 +3378,7 @@ static JsonResult *observe_window(JsonValue *args, gboolean screenshot)
     char *signature = window_geometry_signature(window);
     guint images = yyjson_mut_arr_size(scu.images);
     JsonResult *result = NULL, *tree_error = NULL;
-    JsonResult *tree = window_tree(args, window);
+    JsonResult *tree = window_tree(args, window, !screenshot);
     if (!tree) {
         if (!screenshot || (g_strcmp0(scu.code, "accessibility_window_unmatched") &&
             g_strcmp0(scu.code, "accessibility_window_ambiguous") &&
@@ -3179,7 +3420,7 @@ static JsonResult *observe_window(JsonValue *args, gboolean screenshot)
     }
     result_integer(result, "window_id", json_number(args, "window_id", 0));
     result_integer(result, "id", visual.canvas.id);
-    limit_tree_output(result);
+    limit_tree_output(result, screenshot);
 done:
     free(signature);
     if (!result) {

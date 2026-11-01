@@ -3,7 +3,7 @@ from copy import deepcopy
 import json
 import re
 
-ROW = re.compile(r'^( *)\[(\d+)\] (.*?) (null|"(?:[^"\\]|\\.)*")(.*)$')
+ROW = re.compile(r'^( *)(?:\[(\d+)\] )?(.*?) (null|"(?:[^"\\]|\\.)*")(.*)$')
 DECODER = json.JSONDecoder()
 
 
@@ -18,9 +18,11 @@ def tree_rows(text):
         if depth > len(parents):
             raise ValueError("SCU tree skips a parent level")
         parents = parents[:depth]
-        row = {"element_index": len(rows), "element_id": int(element_id),
+        row = {"element_index": len(rows),
                "parent_index": parents[-1] if parents else -1, "depth": depth,
                "role": role, "label": json.loads(label), "enabled": True, "frame": None}
+        if element_id is not None:
+            row["element_id"] = int(element_id)
         while rest.strip():
             rest = rest.lstrip()
             field = re.match(r'(value|minimum|maximum|frame)=', rest)
@@ -30,8 +32,8 @@ def tree_rows(text):
                 row[field[1]] = dict(zip(("x", "y", "width", "height"), value)) if field[1] == "frame" else value
             else:
                 word, _, rest = rest.partition(" ")
-                if word.startswith("actions="):
-                    row["actions"] = word.removeprefix("actions=").split(",")
+                if word in ("type_text", "set_value"):
+                    row.setdefault("actions", []).append(word)
                 elif word == "disabled":
                     row["enabled"] = False
                 elif word in ("focused", "selected", "checked", "protected", "text_truncated"):

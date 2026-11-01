@@ -143,7 +143,6 @@ def main():
         probe.tool("vision", steps=[{"tool": "press_keys", "args": {"keys": ["CTRL", "w"]}}], observations=False)
         tree = probe.tool("vision", observations=[target["window_id"]])["observations"][0]
         link = next(row for row in tree["elements"] if row["label"] == "Probe link")
-        assert {"activate", "open_context_menu"} <= set(link["actions"]), link
         assert "click_buttons" not in link, link
         result = probe.tool("accessibility", steps=[{"tool": "open_context_menu", "args": {
             "element_id": link["element_id"]}}], observations=[target["window_id"]])
@@ -160,12 +159,14 @@ def main():
             tree = snapshot()
             row = next(row for row in tree["elements"] if row["label"] == label)
             if label == "Offscreen button":
-                assert row["frame"]["y"] > bounds["y"] + bounds["height"], row
+                visible_tree = snapshot(vision=True)
+                frame = next(item["frame"] for item in visible_tree["elements"] if item["label"] == label)
+                assert frame["y"] > bounds["y"] + bounds["height"], frame
             result = probe.tool("accessibility", steps=[{"tool": "activate", "args": {"element_id": row["element_id"]}}],
                 observations=[target["window_id"]])
             assert result["status"] == "ok", result
             assert any(text in (row.get("label", "") + row.get("value", "")) for row in result["observations"][0]["elements"]), result
-            record("activate", target=label, actions=row["actions"], status=result["status"])
+            record("activate", target=label, status=result["status"])
 
         for tool, field, text, expected in (("set_value", "value", "hello", "hello"),
                                              ("set_value", "value", "changed", "changed"),

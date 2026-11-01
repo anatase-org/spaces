@@ -13,7 +13,7 @@ from types import SimpleNamespace
 # Stable AT-SPI wire enum values; no libatspi client is used by the server.
 Atspi = SimpleNamespace(
     Role=SimpleNamespace(APPLICATION=75, FRAME=23, PUSH_BUTTON=43, ENTRY=79, PASSWORD_TEXT=40,
-                         PANEL=39, SLIDER=51, DOCUMENT_WEB=95, TOOL_TIP=64),
+                         PANEL=39, SLIDER=51, DOCUMENT_WEB=95, TOOL_TIP=64, PARAGRAPH=73, STATIC=116, HEADING=83, LINK=88),
     StateType=SimpleNamespace(DEFUNCT=6, EDITABLE=7, ENABLED=8, FOCUSED=12, SENSITIVE=24, SHOWING=25, VISIBLE=30),
 )
 
@@ -27,6 +27,11 @@ PANEL = "/org/a11y/atspi/accessible/panel"
 SLIDER = "/org/a11y/atspi/accessible/slider"
 DOCUMENT = "/org/a11y/atspi/accessible/document"
 TOOLTIP = "/org/a11y/atspi/accessible/tooltip"
+PROSE = "/org/a11y/atspi/accessible/prose"
+CAPTION = "/org/a11y/atspi/accessible/caption"
+HEADING = "/org/a11y/atspi/accessible/heading"
+LINK = "/org/a11y/atspi/accessible/link"
+SHORT = CAPTION + "/short"
 XML = """<node>
 <interface name='org.a11y.atspi.Accessible'>
  <property name='Name' type='s' access='read'/>
@@ -124,6 +129,71 @@ def main():
     browser = "--browser" in sys.argv[3:]
     offscreen = "--offscreen" in sys.argv[3:]
     tooltips = "--tooltips" in sys.argv[3:]
+    reading_text = "--reading-text" in sys.argv[3:]
+    reading_values = {PROSE: "Read-only paragraph text, with a nested caption.",
+                      CAPTION: "The complete caption text is not its accessible name.",
+                      HEADING: "Article heading",
+                      CAPTION + "/space": " \t\n\u00a0 ",
+                      CAPTION + "/separator": " | \u2022 \u00b7 ",
+                      CAPTION + "/duplicate": "  by\t ",
+                      CAPTION + "/link_label": " Article link ",
+                      CAPTION + "/caption_text": "The complete caption text is not its accessible name.",
+                      CAPTION + "/punctuation": "C++: x | y."}
+    reading_names = {CAPTION + "/space": "", CAPTION + "/separator": "|",
+                     CAPTION + "/duplicate": "by", CAPTION + "/link_label": "Article link",
+                     CAPTION + "/caption_text": "The complete caption text is not its accessible name.",
+                     CAPTION + "/punctuation": "C++: x | y."}
+    reading_names.update({CAPTION + "/fragment1": "Consider applying for YC's Winter 2027 batch!",
+                          CAPTION + "/fragment2": "Applications",
+                          CAPTION + "/fragment3": "are open till November 2.",
+                          CAPTION + "/long": "Detailed sentence. " * 20,
+                          PROSE + "/second": "Paragraph metadata",
+                          CAPTION + "/before_code": "Before code",
+                          CAPTION + "/code": "#define main oldmain #include <unistd.h>",
+                          CAPTION + "/after_code": "After code",
+                          CAPTION + "/code/first": "#define main oldmain",
+                          CAPTION + "/code/second": "#include <unistd.h>",
+                          CAPTION + "/code/second/first": "#include",
+                          CAPTION + "/code/second/second": "<unistd.h>",
+                          CAPTION + "/punct_code": 'int fd = memfd_create("fuzz space", 0);',
+                          CAPTION + "/punct_code/first": "int fd = memfd_create(",
+                          CAPTION + "/punct_code/string": '"fuzz space"',
+                          CAPTION + "/punct_code/comma": ",",
+                          CAPTION + "/punct_code/zero": "0",
+                          CAPTION + "/punct_code/end": ");",
+                          CAPTION + "/string_spaces": 'print("ab");',
+                          CAPTION + "/string_spaces/child": 'print("a b");',
+                          PROSE + "/embedded": "Inline paragraph metadata",
+                          CAPTION + "/embedded/before": "An owning type like",
+                          CAPTION + "/embedded/type": "std::string",
+                          CAPTION + "/embedded/between": "and view",
+                          CAPTION + "/embedded/view": "std::string_view",
+                          CAPTION + "/embedded/end": ".",
+                          PROSE + "/fallback": "Text-only metadata",
+                          CAPTION + "/fallback/inline": "inline code",
+                          PROSE + "/partial": "Long paragraph metadata",
+                          CAPTION + "/partial/first": "Complete reading text. " * 20,
+                          CAPTION + "/partial/second": "Complete reading text. " * 20,
+                          CAPTION + "/echo1": "Echo", CAPTION + "/echo2": "Echo",
+                          CAPTION + "/link_first": "Article", CAPTION + "/link_second": "link",
+                          SHORT: "四字字字", CAPTION + "/ab": "ab", CAPTION + "/cd": "cd"})
+    for path, name in reading_names.items():
+        reading_values.setdefault(path, name)
+    reading_values[PROSE + "/second"] = "Another paragraph."
+    reading_values[PROSE + "/embedded"] = "An owning type like \ufffc and view \ufffc."
+    reading_values[PROSE + "/fallback"] = "Only Text exposes this prefix \ufffc and its suffix."
+    reading_values[PROSE + "/partial"] = "Complete reading text. " * 40
+    reading_children = {
+        CAPTION + "/code": [CAPTION + "/code/first", CAPTION + "/code/second"],
+        CAPTION + "/code/second": [CAPTION + "/code/second/first", CAPTION + "/code/second/second"],
+        CAPTION + "/punct_code": [CAPTION + "/punct_code/" + name for name in ("first", "string", "comma", "zero", "end")],
+        CAPTION + "/string_spaces": [CAPTION + "/string_spaces/child"],
+        PROSE + "/embedded": [CAPTION + "/embedded/" + name for name in ("before", "type", "between", "view", "end")],
+        PROSE + "/fallback": [CAPTION + "/fallback/inline"],
+        PROSE + "/partial": [CAPTION + "/partial/first", CAPTION + "/partial/second"],
+    }
+    reading_nested = {child for paths in reading_children.values() for child in paths}
+    state["reading_text_reads"] = 0
     placeholders = next((int(arg.split("=", 1)[1]) for arg in sys.argv[3:] if arg.startswith("--placeholders=")), 0)
     deep = next((int(arg.split("=", 1)[1]) for arg in sys.argv[3:] if arg.startswith("--deep=")), 0)
     wide = next((int(arg.split("=", 1)[1]) for arg in sys.argv[3:] if arg.startswith("--wide=")), 0)
@@ -251,6 +321,14 @@ def main():
         if path == WINDOW and (not exposed or empty):
             # Chromium can advertise a child while it still returns null.
             return [("", "/org/a11y/atspi/null")] if not empty else []
+        if reading_text and path in (WINDOW, PROSE, LINK, CAPTION, SHORT, *reading_children):
+            paths = {WINDOW: [BUTTON, ENTRY, PASSWORD, PROSE, SHORT, CAPTION + "/ab", CAPTION + "/cd"],
+                     PROSE: [HEADING, CAPTION, *(p for p in reading_names if
+                         not p.endswith(("/link_label", "/link_first", "/link_second", "/caption_text", "/short", "/ab", "/cd")) and
+                         p not in reading_nested)],
+                     CAPTION: [CAPTION + "/caption_text"], SHORT: [LINK],
+                     LINK: [CAPTION + "/link_first", CAPTION + "/link_second"], **reading_children}[path]
+            return [(app.get_unique_name(), p) for p in paths]
         if browser and path in (WINDOW, PANEL, DOCUMENT):
             paths = {WINDOW: [PANEL], PANEL: [DOCUMENT], DOCUMENT: [BUTTON, ENTRY, PASSWORD]}[path]
             return [(app.get_unique_name(), p) for p in paths]
@@ -281,12 +359,15 @@ def main():
             values += ["org.a11y.atspi.Application"]
         if path != ROOT:
             values += ["org.a11y.atspi.Component"]
-        if path == BUTTON or path.startswith(BUTTON + "/") or (element_ids and path == ENTRY):
+        if (path == BUTTON or path.startswith(BUTTON + "/") or (element_ids and path == ENTRY)
+                or (reading_text and path in (*reading_values, LINK))):
             values += ["org.a11y.atspi.Action"]
         if path in (ENTRY, PASSWORD):
             values += ["org.a11y.atspi.Text"]
             if not keyboard or path == PASSWORD:
                 values += ["org.a11y.atspi.EditableText"]
+        if reading_text and path in reading_values:
+            values += ["org.a11y.atspi.Text"]
         if path == SLIDER:
             values += ["org.a11y.atspi.Value"]
         return values
@@ -297,6 +378,8 @@ def main():
         original_path = path
         if path.startswith(PANEL + "/"): path = PANEL
         if path.startswith(BUTTON + "/"): path = BUTTON
+        if path.startswith(CAPTION + "/"): path = CAPTION
+        if path.startswith(PROSE + "/"): path = PROSE
         if name == "GetExtents":
             # Deliberately wrong SCREEN values expose any accidental raw-coordinate leak.
             rectangle = ((9000,9000,40,30) if args[0] == 0 else
@@ -325,16 +408,19 @@ def main():
             role = {ROOT: Atspi.Role.APPLICATION, WINDOW: Atspi.Role.FRAME, WINDOW_TWO: Atspi.Role.FRAME,
                     BUTTON: Atspi.Role.PUSH_BUTTON, ENTRY: Atspi.Role.ENTRY,
                     PASSWORD: Atspi.Role.PASSWORD_TEXT, PANEL: Atspi.Role.PANEL, SLIDER: Atspi.Role.SLIDER,
-                    DOCUMENT: Atspi.Role.DOCUMENT_WEB, TOOLTIP: Atspi.Role.TOOL_TIP}[path]
+                    DOCUMENT: Atspi.Role.DOCUMENT_WEB, TOOLTIP: Atspi.Role.TOOL_TIP,
+                    PROSE: Atspi.Role.PARAGRAPH, CAPTION: Atspi.Role.STATIC, HEADING: Atspi.Role.HEADING, LINK: Atspi.Role.LINK}[path]
             reply = GLib.Variant("(u)", (int(role),))
         elif name in ("GetRoleName", "GetLocalizedRoleName"):
             reply = GLib.Variant("(s)", ({ROOT: "application", WINDOW: "frame", WINDOW_TWO: "frame",
                     BUTTON: "push button", ENTRY: "entry", PASSWORD: "password text", PANEL: "panel", SLIDER: "slider",
-                    DOCUMENT: "document web", TOOLTIP: "tool tip"}[path],))
+                    DOCUMENT: "document web", TOOLTIP: "tool tip", PROSE: "paragraph", CAPTION: "static", HEADING: "heading", LINK: "link"}[path],))
         elif name == "GetState":
             bits = sum(1 << int(s) for s in (Atspi.StateType.ENABLED, Atspi.StateType.SENSITIVE,
                                              Atspi.StateType.VISIBLE, Atspi.StateType.SHOWING))
             if (path == BUTTON and hidden) or original_path == PANEL:
+                bits &= ~((1 << Atspi.StateType.VISIBLE) | (1 << Atspi.StateType.SHOWING))
+            if reading_text and path == PROSE:
                 bits &= ~((1 << Atspi.StateType.VISIBLE) | (1 << Atspi.StateType.SHOWING))
             if (path == BUTTON and offscreen) or path == TOOLTIP:
                 bits &= ~(1 << Atspi.StateType.SHOWING)
@@ -397,7 +483,11 @@ def main():
                 state["password_reads"] += 1
                 save()
             start, end = args
-            reply = GLib.Variant("(s)", (text_value()[start:None if end < 0 else end],))
+            if original_path in (PROSE, CAPTION, HEADING):
+                state["reading_text_reads"] += 1
+                save()
+            content = reading_values[original_path] if original_path in reading_values else text_value()
+            reply = GLib.Variant("(s)", (content[start:None if end < 0 else end],))
         elif name == "GetNSelections":
             selection_queries += 1
             if keyboard:
@@ -436,6 +526,7 @@ def main():
 
     def property_get(connection, sender, path, interface, name):
         if name == "Name":
+            if path in reading_names: return GLib.Variant("s", reading_names[path])
             if element_ids:
                 label = element_config().get("labels", {}).get(path.rsplit("/accessible/", 1)[-1])
                 if label is not None: return GLib.Variant("s", label)
@@ -450,13 +541,13 @@ def main():
                 return GLib.Variant("s", "Repeated button " + path.rsplit("/", 1)[1] + (" x" * 110 if long_labels else ""))
             return GLib.Variant("s", {ROOT: "scu fixture", WINDOW: "scu test window", WINDOW_TWO: "scu test window" if duplicate_windows else "scu second window",
                 BUTTON: "Fixture button", ENTRY: "Fixture entry", PASSWORD: "Fixture password", PANEL: "Hidden container", SLIDER: "Fixture volume",
-                DOCUMENT: "Fixture document", TOOLTIP: "tooltip"}[path])
+                DOCUMENT: "Fixture document", TOOLTIP: "tooltip", PROSE: "Article paragraph", CAPTION: "Caption", HEADING: "Article heading", LINK: "Article link"}[path])
         if name == "ToolkitName" and browser: return GLib.Variant("s", "Chromium")
         if name in ("Description", "ToolkitName", "Version"): return GLib.Variant("s", "fixture")
         if name == "ChildCount": return GLib.Variant("i", len(children(connection, path)))
         if name == "Parent": return GLib.Variant("(so)", (app.get_unique_name(), ROOT if path in window_paths else WINDOW))
         if name == "NActions": return GLib.Variant("i", len(actions()))
-        if name == "CharacterCount": return GLib.Variant("i", len(text_value()))
+        if name == "CharacterCount": return GLib.Variant("i", len(reading_values[path] if path in reading_values else text_value()))
         if name == "CaretOffset": return GLib.Variant("i", len(text_value()))
         if name == "Id": return GLib.Variant("i", 1)
         if name == "CurrentValue": return GLib.Variant("d", number_value())
@@ -477,7 +568,7 @@ def main():
         save()
         return True
 
-    for connection, paths in ((registry, [ROOT]), (app, [ROOT, *window_paths, BUTTON, ENTRY, PASSWORD, PANEL, SLIDER, DOCUMENT, TOOLTIP, *extra_paths])):
+    for connection, paths in ((registry, [ROOT]), (app, [ROOT, *window_paths, BUTTON, ENTRY, PASSWORD, PANEL, SLIDER, DOCUMENT, TOOLTIP, PROSE, CAPTION, HEADING, LINK, *reading_names, *extra_paths])):
         if connection == registry and "--registry-unavailable" in sys.argv[3:]:
             continue  # Own the name, but expose no working registry object.
         for path in paths:

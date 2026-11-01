@@ -40,7 +40,7 @@ static const char usage[] =
     "enable Accessibility and Agent computer use or use the Development preset.\n";
 
 static const char desktop_locked_warning[] =
-    "The screen is locked. Vision tools are unavailable.";
+    "The screen is locked. Vision tools are unavailable. You need to use the accesibility tool or ask the user to unlock.";
 
 static const char server_instructions[] =
     "Computer use MCP server. Control the host desktop: screenshots, mouse, "
@@ -72,14 +72,14 @@ static const char vision_description[] =
     "Prefer the accessibility tree to locate controls when working with a "
     "single application without the need for vision feedback, especially browsers. "
     "When the tree provides the controls you need, use accessibility with "
-    "observations:[window_id] for subsequent trees to skip screenshots. "
+    "observations:[window_id] for subsequent trees for faster navigation. "
     "All pixel coordinates are global to the full overview. ";
 static const char accessibility_description[] =
     "Execute up to 64 JSON steps shaped {tool,args}, in order and stop "
     "on failure. Responses report status:ok/failed and the completed step count. "
     "Insert {tool:delay_ms,args:{ms:500}} to pause anywhere. "
-    "Use observations:[window_id,...] for accessibility trees after all steps, "
-    "including trailing delays. Omit observations or pass [] to skip tree reads. "
+    "Use observations:[window_id,...] for accessibility trees that also include text content"
+    "after all steps, including trailing delays. Omit observations or pass [] to skip tree reads. "
     "Returns observations without images. Element actions can target offscreen controls. ";
 
 typedef enum {
@@ -807,18 +807,21 @@ static void append_result_frame(GString *text, JsonResult *frame)
     g_string_append_c(text, '[');
     for (guint i = 0; i < G_N_ELEMENTS(fields); i++) {
         if (i) g_string_append_c(text, ',');
-        append_result_value(text, yyjson_mut_obj_get(frame, fields[i]));
+        double value = yyjson_mut_get_num(yyjson_mut_obj_get(frame, fields[i]));
+        gint64 rounded = (gint64)(value < 0 ? value - 0.5 : value + 0.5);
+        g_string_append_printf(text, "%" G_GINT64_FORMAT, rounded);
     }
     g_string_append_c(text, ']');
 }
 
 #ifdef SCU_HOST
-static void append_tree_row(GString *text, JsonResult *row)
+static void append_tree_row(GString *text, JsonResult *row, gboolean include_frame)
 {
     const char *role = yyjson_mut_get_str(yyjson_mut_obj_get(row, "role"));
-    g_string_append_printf(text, "%*s[%" G_GINT64_FORMAT "] %s ",
-        (int)yyjson_mut_get_sint(yyjson_mut_obj_get(row, "depth")) * 2, "",
-        yyjson_mut_get_sint(yyjson_mut_obj_get(row, "element_id")), role ? role : "unknown");
+    g_string_append_printf(text, "%*s", (int)yyjson_mut_get_sint(yyjson_mut_obj_get(row, "depth")) * 2, "");
+    JsonResult *element_id = yyjson_mut_obj_get(row, "element_id");
+    if (element_id) g_string_append_printf(text, "[%" G_GINT64_FORMAT "] ", yyjson_mut_get_sint(element_id));
+    g_string_append_printf(text, "%s ", role ? role : "unknown");
     append_result_value(text, yyjson_mut_obj_get(row, "label"));
     const char *values[] = {"value", "minimum", "maximum"};
     for (guint i = 0; i < G_N_ELEMENTS(values); i++) {
@@ -830,12 +833,10 @@ static void append_tree_row(GString *text, JsonResult *row)
     }
     JsonResult *actions = yyjson_mut_obj_get(row, "actions"), *action;
     size_t i, n;
-    if (yyjson_mut_arr_size(actions)) {
-        g_string_append(text, " actions=");
-        yyjson_mut_arr_foreach(actions, i, n, action) {
-            if (i) g_string_append_c(text, ',');
-            g_string_append(text, yyjson_mut_get_str(action));
-        }
+    yyjson_mut_arr_foreach(actions, i, n, action) {
+        const char *name = yyjson_mut_get_str(action);
+        if (!strcmp(name, "type_text") || !strcmp(name, "set_value"))
+            g_string_append_printf(text, " %s", name);
     }
     if (yyjson_mut_is_false(yyjson_mut_obj_get(row, "enabled"))) g_string_append(text, " disabled");
     const char *flags[] = {"focused", "selected", "checked", "protected", "text_truncated"};
@@ -843,7 +844,7 @@ static void append_tree_row(GString *text, JsonResult *row)
         if (yyjson_mut_is_true(yyjson_mut_obj_get(row, flags[i]))) g_string_append_printf(text, " %s", flags[i]);
     }
     JsonResult *frame = yyjson_mut_obj_get(row, "frame");
-    if (yyjson_mut_is_obj(frame)) {
+    if (include_frame && yyjson_mut_is_obj(frame)) {
         g_string_append(text, " frame=");
         append_result_frame(text, frame);
     }
