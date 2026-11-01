@@ -425,25 +425,81 @@ class ScuTests(unittest.TestCase):
         for earlier, later in zip(times, times[1:]):
             self.assertGreaterEqual(later - earlier, .15)
         capture_time = json.loads(self.state.read_text())["capture_times"][-1]
-        self.assertGreaterEqual(capture_time - times[-1], .15)
+        self.assertGreaterEqual(capture_time - times[-1], .3)
         self.assertEqual(sum(block["type"] == "image" for block in result["content"]), 1)
 
-    def test_explicit_zero_delay_disables_all_automatic_pauses(self):
+    def test_trailing_zero_delay_replaces_only_the_final_pause(self):
         self.start_accessibility()
         self.start_host()
         client = self.client()
         tree = self.snapshot(client)
         button = next(row for row in tree["elements"] if row["label"] == "Fixture button")
         click = {"tool": "click", "args": {"element_token": button["element_token"]}}
-        # Six actions would otherwise introduce at least 750 ms of pauses.
         result = client.tool("computer", steps=[click] * 6 + [
             {"tool": "delay_ms", "args": {"ms": 0}}], observe={"kind": "desktop"})
         self.assertFalse(result["isError"], result)
         self.assertEqual(result["structuredContent"]["completed"], 7)
         times = json.loads(self.atspi_state.read_text())["action_times"]
-        self.assertLess(times[-1] - times[0], .6)
+        for earlier, later in zip(times, times[1:]):
+            self.assertGreaterEqual(later - earlier, .15)
         capture_time = json.loads(self.state.read_text())["capture_times"][-1]
-        self.assertLess(capture_time - times[-1], .15)
+        self.assertLess(capture_time - times[-1], .3)
+
+    def test_intermediate_zero_delay_replaces_only_its_action_gap(self):
+        self.start_host()
+        client = self.client()
+        tree = self.snapshot(client)
+        button = next(row for row in tree["elements"] if row["label"] == "Fixture button")
+        click = {"tool": "click", "args": {"element_token": button["element_token"]}}
+        result = client.tool("computer", steps=[click,
+            {"tool": "delay_ms", "args": {"ms": 0}}, click, click], observe={"kind": "desktop"})
+        self.assertFalse(result["isError"], result)
+        times = json.loads(self.atspi_state.read_text())["action_times"]
+        self.assertEqual(len(times), 3)
+        self.assertLess(times[1] - times[0], .15)
+        self.assertGreaterEqual(times[2] - times[1], .15)
+        self.assertGreaterEqual(json.loads(self.state.read_text())["capture_times"][-1] - times[-1], .3)
+
+    def test_explicit_action_and_final_delays_are_not_padded(self):
+        self.start_host()
+        client = self.client()
+        tree = self.snapshot(client)
+        button = next(row for row in tree["elements"] if row["label"] == "Fixture button")
+        click = {"tool": "click", "args": {"element_token": button["element_token"]}}
+        result = client.tool("computer", steps=[click,
+            {"tool": "delay_ms", "args": {"ms": 200}}, click,
+            {"tool": "delay_ms", "args": {"ms": 50}}], observe={"kind": "desktop"})
+        self.assertFalse(result["isError"], result)
+        times = json.loads(self.atspi_state.read_text())["action_times"]
+        self.assertGreaterEqual(times[1] - times[0], .2)
+        self.assertLess(times[1] - times[0], .35)
+        final_gap = json.loads(self.state.read_text())["capture_times"][-1] - times[-1]
+        self.assertGreaterEqual(final_gap, .05)
+        self.assertLess(final_gap, .3)
+
+    def test_observation_only_uses_the_default_final_delay(self):
+        self.start_host()
+        client = self.client()
+        start = time.monotonic()
+        result = client.tool("computer", observe={"kind": "desktop"})
+        self.assertFalse(result["isError"], result)
+        self.assertGreaterEqual(json.loads(self.state.read_text())["capture_times"][-1] - start, .3)
+
+    def test_unexecuted_trailing_delay_does_not_replace_the_final_pause(self):
+        self.start_host()
+        client = self.client()
+        tree = self.snapshot(client)
+        button = next(row for row in tree["elements"] if row["label"] == "Fixture button")
+        result = client.tool("computer", steps=[
+            {"tool": "click", "args": {"element_token": button["element_token"]}},
+            {"tool": "delay_ms", "args": {"ms": 0}},
+            {"tool": "click", "args": {"element_token": "stale"}},
+            {"tool": "delay_ms", "args": {"ms": 0}},
+        ], observe={"kind": "desktop"})
+        self.assertEqual(result["structuredContent"]["completed"], 2)
+        self.assertEqual(result["structuredContent"]["status"], "failed")
+        last_action = json.loads(self.atspi_state.read_text())["action_times"][-1]
+        self.assertGreaterEqual(json.loads(self.state.read_text())["capture_times"][-1] - last_action, .3)
 
     def test_automatic_delay_stops_on_permission_revocation(self):
         self.start_accessibility()

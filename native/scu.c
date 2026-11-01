@@ -3752,9 +3752,9 @@ static const Tool tools[] = {
         "Execute up to 64 JSON steps shaped {tool,args}, in order and stop "
         "on failure. Returns one final overview image. "
         "Responses report status:ok/failed and the completed step count. "
-        "Without delay_ms steps, pauses 150 ms between steps and before the final image. "
-        "Insert {tool:delay_ms,args:{ms:500}} to pause anywhere, the final image waits for all steps including trailing delays. "
-        "Any explicit delay disables automatic pauses for the whole batch. "
+        "Insert {tool:delay_ms,args:{ms:500}} to pause anywhere, the final image "
+        "waits for all steps including trailing delays (there are some default "
+        "delays if not provided). "
         "use observe:false to skip it or specify a window. "
         "All pixel coordinates are global to the full overview, including after observe.zoom. "
         "Use zoom:[left,top,right,bottom] to read native detail on large desktops. ",
@@ -4205,7 +4205,7 @@ static JsonResult *computer(JsonValue *args)
     const Tool *observer = NULL;
     JsonValue *observe = json_member(args, "observe");
     gboolean automatic = observe == NULL, has_foreground = FALSE, has_actions = FALSE;
-    gboolean valid = FALSE, has_delay = FALSE;
+    gboolean valid = FALSE, previous_delay = FALSE;
     JsonResult *result = result_object(), *warnings = result_array();
 
     yyjson_arr_foreach(array, index, length, step) {
@@ -4223,8 +4223,6 @@ static JsonResult *computer(JsonValue *args)
         if (strcmp(action->name, "delay_ms")) {
             has_actions = TRUE;
             has_foreground |= json_string(merged, "element_token") == NULL;
-        } else {
-            has_delay = TRUE;
         }
     }
     /* Delays are neutral: semantic-only sequences stay semantic. With no
@@ -4258,14 +4256,16 @@ static JsonResult *computer(JsonValue *args)
     gboolean failed = FALSE, foreground_attempted = FALSE;
     for (index = 0; index < count; index++) {
         JsonValue *merged = yyjson_doc_get_root(steps[index]);
-        foreground_attempted |= strcmp(actions[index]->name, "delay_ms") != 0 &&
+        gboolean delay = !strcmp(actions[index]->name, "delay_ms");
+        foreground_attempted |= !delay &&
             json_string(merged, "element_token") == NULL;
-        /* An explicit delay anywhere gives the caller full control of timing.
-         * Otherwise leave a small gap before each subsequent action. */
+        /* A delay step supplies its own gap. Other action boundaries retain
+         * their default wait, including after an earlier explicit delay. */
         JsonResult *value = NULL;
-        if (!index || has_delay || wait_for_delay(150)) {
+        if (!index || delay || previous_delay || wait_for_delay(150)) {
             value = execute_tool(actions[index], merged);
         }
+        previous_delay = value != NULL && delay;
         if (value == NULL) {
             release_input();
             result_member(result, "failed", batch_failure(index, actions[index]));
@@ -4292,9 +4292,8 @@ static JsonResult *computer(JsonValue *args)
         /* A broken visual session is not reconnected inside the interrupted
          * batch. Only a subsequent request may establish another grant. */
         JsonResult *value = NULL;
-        /* Also allow rendering time before a screenshot of a partial batch.
-         * Empty observations and tree-only observations need no final pause. */
-        if (count && !has_delay && !wait_for_delay(150)) {
+        /* Only a completed trailing delay replaces the final rendering wait. */
+        if (!previous_delay && !wait_for_delay(300)) {
             release_input();
         } else if (visual.broken || (failed && foreground_attempted &&
                 visual.bus == NULL)) {
