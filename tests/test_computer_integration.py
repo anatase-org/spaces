@@ -29,7 +29,7 @@ class ComputerLifecycleTests(unittest.TestCase):
             self.path, metadata.st_dev, metadata.st_ino)
         self.service = mock.Mock(socket_path=self.path)
         self.service.executable_identity = None
-        self.service.process.poll.return_value = None
+        self.service.alive.return_value = True
         self.start = mock.patch.object(session, "start_computer_service", return_value=(self.service, self.binding)).start()
         self.addCleanup(mock.patch.stopall)
         self.mount = mock.patch.object(self.controller, "_mount").start()
@@ -46,7 +46,7 @@ class ComputerLifecycleTests(unittest.TestCase):
         self.assertIsNone(self.current.portal)
         self.controller._repair_computer(self.user, self.current)
         self.controller._repair_computer(self.user, self.current)
-        self.start.assert_called_once_with("fedora", self.user)
+        self.start.assert_called_once_with("fedora", self.user, self.current.plan)
         self.mount.assert_called_once_with(self.user.uid, self.binding)
 
     def test_downgrade_closes_connections_before_removing_mount(self):
@@ -62,7 +62,7 @@ class ComputerLifecycleTests(unittest.TestCase):
 
     def test_dead_service_is_retired_before_recovery(self):
         self.controller._repair_computer(self.user, self.current)
-        self.service.process.poll.return_value = 1
+        self.service.alive.return_value = False
         self.controller._repair_computer(self.user, self.current)
         self.service.close.assert_called_once()
         self.assertEqual(self.start.call_count, 2)

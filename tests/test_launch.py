@@ -3,10 +3,13 @@ from __future__ import annotations
 import json
 import os
 import pwd
+import select
 import shutil
+import socket
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -2329,6 +2332,24 @@ class LoginAndMountWorkerTests(unittest.TestCase):
             self.assertTrue(monitor.wait())
 
         flush.assert_called_once_with()
+
+    def test_login_monitor_wakes_on_a_computer_socket(self) -> None:
+        reader, writer = socket.socketpair()
+        self.addCleanup(reader.close)
+        self.addCleanup(writer.close)
+        monitor = object.__new__(launch_module._LoginMonitor)
+        monitor._monitor = mock.Mock()
+        monitor._read_fd = -1
+        monitor._library = mock.Mock()
+        monitor._library.sd_login_monitor_get_fd.return_value = -2
+        monitor._poll = select.poll()
+        writer.sendall(b"ready")
+        with mock.patch.object(monitor, "_timeout_ms", return_value=1000), \
+             mock.patch.object(monitor, "_flush"):
+            start = time.monotonic()
+            self.assertTrue(monitor.wait(descriptors=(reader.fileno(),)))
+            self.assertLess(time.monotonic() - start, .75)
+        self.assertEqual(monitor._poll.poll(0), [], "closed listeners must not remain watched")
 
     def test_registration_waits_for_guest_system_bus(self) -> None:
         worker = launch_module._MountWorker(

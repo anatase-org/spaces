@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
-/* Host-only desktop engine. Each private socket connection owns one worker. */
+/* One host-user desktop engine; each Space holds a revocable registration. */
 #define _GNU_SOURCE
 #define SCU_HOST
 #include <atspi/atspi.h>
@@ -39,6 +39,9 @@ static void clear_clipboard_selection(void);
 static JsonResult *scu_visual(const char *tool, JsonValue *args);
 static void scu_visual_close(void);
 static void poll_backend(void);
+static gboolean desktop_ready(void);
+static void desktop_check_lock(void);
+static gboolean desktop_input_allowed(void);
 
 static const char *libs[] = {"libatspi.so.0", "libei.so.1",
     "libxkbcommon.so.0", "libgdk_pixbuf-2.0.so.0", NULL};
@@ -73,13 +76,14 @@ static void scu_invalidate(void)
     scu_atspi_close();
 }
 
-/* Long operations call this at safe boundaries. Cancellation flags are shared
- * with the stdin thread; desktop objects are touched only by this thread. */
+/* Long operations dispatch transport callbacks at safe boundaries. Those may
+ * cancel work, but only this thread executes desktop operations. */
 static gboolean scu_tick(void)
 {
     poll_backend();
     while (g_main_context_iteration(NULL, FALSE)) {
     }
+    desktop_check_lock();
     if (g_atomic_int_get(&scu.cancelled) || g_atomic_int_get(&scu.stopping)) {
         scu_fail("cancelled",
             "Operation cancelled; completed actions were not rolled back.");
@@ -1722,7 +1726,7 @@ static gboolean refresh_geometry(void)
 
 static gboolean ensure_visual_session(void)
 {
-    if (!require_computer_access() || !refresh_geometry()) {
+    if (!require_computer_access() || !desktop_ready() || !refresh_geometry()) {
         return FALSE;
     }
     if (visual.input) {
@@ -1780,7 +1784,7 @@ static gboolean visual_step(void)
     if (!scu_tick() || !require_computer_access()) {
         return FALSE;
     }
-    return !visual.broken;
+    return !visual.broken && desktop_input_allowed();
 }
 
 
@@ -2001,7 +2005,7 @@ static gboolean validate_zoom(JsonValue *arguments, guint64 id)
  * before requesting pixels, but never claim that the application has finished. */
 static gboolean prepare_capture(void)
 {
-    if (!visual_step()) {
+    if (!desktop_ready() || !visual_step()) {
         return FALSE;
     }
     if (!visual.input_sequence || visual.observed_input_sequence == visual.input_sequence) {
@@ -3882,7 +3886,7 @@ static int connect_input(GError **error)
     return fd;
 }
 
-static int run_worker(void)
+static gboolean initialize_host(void)
 {
     GError *error = NULL;
     host.bus = session_bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, &error);
@@ -3909,20 +3913,14 @@ static int run_worker(void)
     next_kwin_window = g_random_int_range(1, G_MAXINT);
     atspi_worker_base = (guint)g_random_int_range(1, 1024) << 20;
     initialized = TRUE; /* The guest owns public MCP negotiation. */
-    int result = serve_mcp();
-    unload_geometry_script();
-    g_dbus_connection_flush_sync(host.bus, NULL, NULL);
-    g_object_unref(host.bus);
-    return result;
+    return TRUE;
 failed:
-    g_printerr("scu: cannot start host worker: %s\n", error ? error->message : "initialization failed");
+    g_printerr("scu: cannot start host: %s\n", error ? error->message : "initialization failed");
     g_clear_error(&error);
-    return 1;
+    return FALSE;
 }
 
-/* Exec each worker before opening desktop libraries or creating threads.
- * Worker process groups include the isolated AT-SPI child. Parent death also
- * tears down descendants, including when the controller force-kills us. */
+/* The accessibility helper retains its existing parent-death behavior. */
 static void die_with_parent(void)
 {
     pid_t parent = getppid();
@@ -3931,112 +3929,21 @@ static void die_with_parent(void)
     }
 }
 
-static int run_host_service(const char *socket_path, int ready_fd)
-{
-    /* Reap semantic children orphaned by a worker crash. */
-    if (prctl(PR_SET_CHILD_SUBREAPER, 1) < 0) {
-        g_printerr("scu: cannot supervise host workers: %s\n", strerror(errno));
-        return 1;
-    }
-    signal(SIGPIPE, SIG_IGN);
-    signal(SIGTERM, stop_signal);
-    signal(SIGINT, stop_signal);
-    char *parent = g_path_get_dirname(socket_path);
-    struct stat st;
-    gboolean safe = socket_path[0] == '/' && !lstat(parent, &st) &&
-        S_ISDIR(st.st_mode) && st.st_uid == getuid() && (st.st_mode & 077) == 0;
-    g_free(parent);
-    struct sockaddr_un address = {.sun_family = AF_UNIX};
-    if (!safe || getuid() == 0 || strlen(socket_path) >= sizeof(address.sun_path)) {
-        g_printerr("scu: host service needs a private host-user directory\n");
-        return 1;
-    }
-    strcpy(address.sun_path, socket_path);
-    int listener = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
-    mode_t old_mask = umask(0077);
-    int bound = listener >= 0 ? bind(listener, (struct sockaddr *)&address, sizeof(address)) : -1;
-    umask(old_mask);
-    if (bound < 0 || chmod(socket_path, 0600) || listen(listener, 32)) {
-        g_printerr("scu: cannot listen on host socket: %s\n", strerror(errno));
-        if (listener >= 0) close(listener);
-        if (bound == 0) unlink(socket_path);
-        return 1;
-    }
-    if (ready_fd >= 0) {
-        int ready = write(ready_fd, "1", 1);
-        close(ready_fd);
-        if (ready != 1) {
-            close(listener);
-            unlink(socket_path);
-            return 1;
-        }
-    }
-    GArray *workers = g_array_new(FALSE, FALSE, sizeof(pid_t));
-    while (!g_atomic_int_get(&scu.stopping)) {
-        pid_t reaped;
-        while ((reaped = waitpid(-1, NULL, WNOHANG)) > 0) {
-            for (guint i = workers->len; i > 0; i--) {
-                if (g_array_index(workers, pid_t, i - 1) == reaped) {
-                    kill(-reaped, SIGTERM);
-                    g_array_remove_index_fast(workers, i - 1);
-                    break;
-                }
-            }
-        }
-        struct pollfd p = {.fd = listener, .events = POLLIN};
-        if (poll(&p, 1, 50) <= 0) continue;
-        int peer = accept4(listener, NULL, NULL, SOCK_CLOEXEC);
-        if (peer < 0) continue;
-        struct ucred credentials;
-        socklen_t size = sizeof(credentials);
-        if (workers->len >= 32 || getsockopt(peer, SOL_SOCKET, SO_PEERCRED, &credentials, &size) ||
-            credentials.uid != getuid()) {
-            close(peer);
-            continue;
-        }
-        pid_t pid = fork();
-        if (pid == 0) {
-            setpgid(0, 0);
-            die_with_parent();
-            if (dup2(peer, STDIN_FILENO) < 0 || dup2(peer, STDOUT_FILENO) < 0) _exit(1);
-            if (peer > STDOUT_FILENO) close(peer);
-            execl("/proc/self/exe", "scu-host", "--worker", NULL);
-            _exit(1);
-        }
-        close(peer);
-        if (pid > 0) {
-            setpgid(pid, pid);
-            g_array_append_val(workers, pid);
-        }
-    }
-    close(listener);
-    unlink(socket_path);
-    for (guint i = 0; i < workers->len; i++) kill(-g_array_index(workers, pid_t, i), SIGTERM);
-    gint64 deadline = g_get_monotonic_time() + G_USEC_PER_SEC;
-    while (workers->len && g_get_monotonic_time() < deadline) {
-        for (guint i = workers->len; i > 0; i--) {
-            if (waitpid(g_array_index(workers, pid_t, i - 1), NULL, WNOHANG) > 0)
-                g_array_remove_index_fast(workers, i - 1);
-        }
-        g_usleep(1000);
-    }
-    for (guint i = 0; i < workers->len; i++) {
-        pid_t pid = g_array_index(workers, pid_t, i);
-        kill(-pid, SIGKILL);
-        waitpid(pid, NULL, 0);
-    }
-    g_array_unref(workers);
-    return 0;
-}
+#include "scu_desktop.h"
+#include "scu_service.h"
 
 int main(int argc, char **argv)
 {
+    if (argc == 3 && !strcmp(argv[1], "--listen"))
+        return listen((int)g_ascii_strtoll(argv[2], NULL, 10), 32) < 0;
     if (argc == 4 && !strcmp(argv[1], "--host-service"))
-        return run_host_service(argv[2], (int)g_ascii_strtoll(argv[3], NULL, 10));
-    die_with_parent();
-    if (argc == 2 && !strcmp(argv[1], "--worker")) return run_worker();
-    if (argc == 3 && !strcmp(argv[1], "--atspi-worker"))
+        return run_shared_host(argv[2], (int)g_ascii_strtoll(argv[3], NULL, 10));
+    if (argc == 2 && !strcmp(argv[1], "--user-service"))
+        return run_shared_host(NULL, -1);
+    if (argc == 3 && !strcmp(argv[1], "--atspi-worker")) {
+        die_with_parent();
         return run_atspi_worker((guint)g_ascii_strtoull(argv[2], NULL, 10));
+    }
     print_help(stderr);
     return 2;
 }

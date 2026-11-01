@@ -78,6 +78,11 @@ def save():
 def geometry():
     config = control()
     outputs = [{"name": "center", "geometry": {"x": 0, "y": 0, "width": 80, "height": 60}, "scale": 2}]
+    if config.get("headless"):
+        display = args.control.parent / "display-state.json"
+        outputs = ([{"name": "Virtual-" + json.loads(display.read_text())["name"],
+                    "geometry": {"x": 0, "y": 0, "width": 1280, "height": 720}, "scale": 1}]
+                   if display.exists() else [])
     if config.get("triple"):
         outputs = [{"name": name, "geometry": {"x": x, "y": y, "width": 80, "height": 60}, "scale": scale}
                    for name, x, y, scale in (("left", -80, -10, 2), ("center", 0, 0, 1), ("right", 90, 0, 1))]

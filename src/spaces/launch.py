@@ -1721,7 +1721,8 @@ class _LoginMonitor:
                 self._libc.free(values)
         return tuple(sessions)
 
-    def wait(self, maximum_seconds: float | None = None) -> bool:
+    def wait(self, maximum_seconds: float | None = None, *,
+             descriptors: tuple[int, ...] = ()) -> bool:
         timeout_ms = self._timeout_ms()
         if maximum_seconds is not None:
             maximum_ms = max(0, round(maximum_seconds * 1000))
@@ -1731,7 +1732,14 @@ class _LoginMonitor:
                 else min(timeout_ms, maximum_ms)
             )
         monitor_fd = self._library.sd_login_monitor_get_fd(self._monitor)
-        for descriptor, _events in self._poll.poll(timeout_ms):
+        for descriptor in descriptors:
+            self._poll.register(descriptor, select.POLLIN)
+        try:
+            ready = self._poll.poll(timeout_ms)
+        finally:
+            for descriptor in descriptors:
+                self._poll.unregister(descriptor)
+        for descriptor, _events in ready:
             if descriptor == self._read_fd:
                 return False
             if descriptor == monitor_fd:
@@ -1927,7 +1935,8 @@ class _MountWorker:
                             for user in self._users
                         )
                     )
-                    else None
+                    else None,
+                    descriptors=self._desktop.computer_descriptors(),
                 )
             ):
                 if self._stopping.is_set():

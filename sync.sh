@@ -154,6 +154,7 @@ ssh -t "$remote_host" "sudo rpm-ostree usroverlay || true
 sudo systemctl stop 'spaces@*' &&
 sudo dnf5 install -y $remote_rpms &&
 rm -f -- $remote_rpms &&
-sudo systemctl try-reload-or-restart polkit.service"
+sudo systemctl try-reload-or-restart polkit.service &&
+sudo systemctl start 'spaces@fedora'"
 
 echo "Spaces is ready on $remote_host."

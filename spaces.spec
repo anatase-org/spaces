@@ -56,6 +56,10 @@ Requires:       dconf
 Requires:       xdg-dbus-proxy
 Requires:       %{name}-selinux
 
+# Optional KDE helpers for SCU headless output detection and virtual monitors.
+Recommends:     libkscreen
+Recommends:     krfb
+
 %description
 Spaces provide a chroot-like sandboxing environment for you to access your favorite distributions: Arch, Fedora, Kali, and Ubuntu. A simple permission system ensures your local files and credentials remain secure, even if your space is compromised. Spaces are constructed directly using packages from your chosen distribution repositories with signature enforcement. No container middleman or surprises.
 
@@ -110,15 +114,15 @@ done
 
 %post
 %systemd_post spaces@.service
-%systemd_user_post spaces@.service
+%systemd_user_post spaces@.service spaces-scu-host.socket spaces-scu-host.service
 
 %preun
 %systemd_preun spaces@.service
-%systemd_user_preun spaces@.service
+%systemd_user_preun spaces@.service spaces-scu-host.socket spaces-scu-host.service
 
 %postun
 %systemd_postun_with_restart spaces@.service
-%systemd_user_postun_with_restart spaces@.service
+%systemd_user_postun_with_restart spaces@.service spaces-scu-host.socket spaces-scu-host.service
 
 %post selinux
 %selinux_modules_install %{_datadir}/selinux/packages/spaces.pp
@@ -182,6 +186,8 @@ fi
 %dir %{_prefix}/local/share/applications/spaces-icons
 %{_unitdir}/spaces@.service
 %{_userunitdir}/spaces@.service
+%{_userunitdir}/spaces-scu-host.service
+%{_userunitdir}/spaces-scu-host.socket
 
 %files selinux
 %license LICENSE

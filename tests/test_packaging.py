@@ -152,7 +152,9 @@ class PackagingTests(unittest.TestCase):
         )
         self.assertEqual(
             data_files["lib/systemd/user"],
-            ["data/systemd/user/spaces@.service"],
+            ["data/systemd/user/spaces@.service",
+             "data/systemd/user/spaces-scu-host.service",
+             "data/systemd/user/spaces-scu-host.socket"],
         )
 
         manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8")
@@ -839,6 +841,10 @@ class PackagingTests(unittest.TestCase):
             self.assertIn("/usr/lib/spaces/scu-host", computer_spec)
             self.assertIn("%{_datadir}/applications/org.anatase.spaces.scu.desktop", computer_spec)
             self.assertNotIn("pkgconfig(libpipewire-0.3)", computer_spec)
+            self.assertIn("Recommends:     libkscreen", computer_spec)
+            self.assertIn("Recommends:     krfb", computer_spec)
+            self.assertNotIn("Requires:       libkscreen", computer_spec)
+            self.assertNotIn("Requires:       krfb", computer_spec)
         identity = configparser.ConfigParser(interpolation=None)
         identity.read(ROOT / "data/applications/org.anatase.spaces.scu.desktop")
         self.assertEqual(identity["Desktop Entry"]["Exec"], "/usr/lib/spaces/scu-host")

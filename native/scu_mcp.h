@@ -19,6 +19,10 @@
 /* Shared response state and JSON construction helpers. */
 typedef yyjson_val JsonValue;
 typedef yyjson_mut_val JsonResult;
+#ifdef SCU_HOST
+static void host_send_line(const char *line);
+static char *host_request_key(JsonValue *id);
+#endif
 typedef struct {
     yyjson_mut_doc *doc;
     JsonResult *images;
@@ -252,7 +256,8 @@ static const Tool window_schema = {
 static const Tool tools[] = {
     {.name = "status",
         "Run first for health checks, canvas metadata, apps/windows and a full desktop screenshot. "
-        "Window bounds, element frames and pixel actions share the full screenshot's coordinates. ",
+        "Window bounds, element frames and pixel actions share the full screenshot's coordinates. "
+        "Screenshots unlock the host desktop when needed. ",
         ARGS_NONE},
     {.name = "computer",
         "Execute up to 64 JSON steps shaped {tool,args}, in order and stop "
@@ -263,7 +268,9 @@ static const Tool tools[] = {
         "delays if not provided). "
         "use observe:false to skip it or specify a window. "
         "All pixel coordinates are global to the full overview, including after observe.zoom. "
-        "Use zoom:[left,top,right,bottom] to read native detail on large desktops. ",
+        "Use zoom:[left,top,right,bottom] to read native detail on large desktops. "
+        "Screenshots and foreground input unlock the host desktop when needed; "
+        "accessibility-only steps with observe:false leave it locked. ",
         ARGS_NONE,
         batch_arguments,
         .action = TRUE},
@@ -647,7 +654,7 @@ static char *request_id_key(JsonValue *id)
 /* Only this thread reads stdin. It queues complete request documents and can
  * flag cancellation immediately while the main thread is inside a desktop call.
  * It never uses response JSON or accessibility objects owned by the main thread. */
-static gpointer read_requests(gpointer unused)
+static G_GNUC_UNUSED gpointer read_requests(gpointer unused)
 {
     (void)unused;
     GString *line = g_string_new(NULL);
@@ -725,8 +732,12 @@ static void send_response(
     yyjson_mut_doc_set_root(scu.doc, reply);
     char *line = yyjson_mut_write(scu.doc, 0, NULL);
     if (line) {
+#ifdef SCU_HOST
+        host_send_line(line);
+#else
         puts(line);
         fflush(stdout);
+#endif
         free(line);
     }
 }
@@ -816,7 +827,12 @@ static gboolean call_tool(JsonValue *id, JsonValue *parameters, JsonResult *resu
         arguments = yyjson_doc_get_root(empty);
     }
 
-    char *key = request_id_key(id);
+    char *key =
+#ifdef SCU_HOST
+        host_request_key(id);
+#else
+        request_id_key(id);
+#endif
     g_mutex_lock(&active_lock);
     active_id = g_strdup(key);
     g_atomic_int_set(&scu.cancelled, g_hash_table_contains(cancelled_ids, key));
@@ -981,7 +997,7 @@ static void print_help(FILE *stream)
         stream);
 }
 
-static int serve_mcp(void)
+static G_GNUC_UNUSED int serve_mcp(void)
 {
     signal(SIGPIPE, SIG_IGN);
     signal(SIGINT, stop_signal);

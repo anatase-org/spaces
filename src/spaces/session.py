@@ -8,6 +8,7 @@ callers never supply paths, mount destinations, or systemd properties.
 from __future__ import annotations
 
 import configparser
+import array
 import hashlib
 import json
 import logging
@@ -16,6 +17,7 @@ import pwd
 import re
 import select
 import signal
+import socket
 import stat
 import subprocess
 import tempfile
@@ -283,7 +285,7 @@ class _ActiveDesktop:
     accessibility_binding: DesktopBind | None = None
     accessibility_source: DesktopBind | None = None
     accessibility_environment_dirty: bool = False
-    computer: PortalProxy | None = None
+    computer: ComputerLease | None = None
     computer_binding: DesktopBind | None = None
 
 
@@ -333,6 +335,101 @@ class PortalProxy:
             except FileNotFoundError:
                 pass
             self.identity = None
+
+
+@dataclass
+class ComputerLease:
+    """A private listener, registered with SCU only while clients need it."""
+
+    listener: socket.socket
+    socket_path: Path
+    user: DesktopUser
+    session_id: str
+    wayland: str
+    control: socket.socket | None = None
+    executable_identity: tuple[int, int] | None = None
+
+    def alive(self) -> bool:
+        if self.listener.fileno() < 0:
+            return False
+        if self.control is not None and select.select([self.control], [], [], 0)[0]:
+            # The host released an idle listener or exited. Keep the listener
+            # inode mounted; a fresh connection can activate a new host.
+            self.control.close()
+            self.control = None
+            self.executable_identity = None
+        if self.control is None and select.select([self.listener], [], [], 0)[0]:
+            try:
+                self._activate()
+            except Exception as error:
+                logger.warning(_("Could not activate shared SCU; retrying while a client is waiting: {error}", error=error))
+        return True
+
+    def _activate(self) -> None:
+        executable = Path(COMPUTER_SERVICE).stat()
+        identity = (executable.st_dev, executable.st_ino)
+        _computer_unit(self.user, "start", "spaces-scu-host.socket")
+        payload = json.dumps({"session": self.session_id, "wayland": self.wayland}).encode() + b"\n"
+        for attempt in range(2):
+            control = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM | socket.SOCK_CLOEXEC)
+            try:
+                control.settimeout(PORTAL_READY_TIMEOUT)
+                control.connect(f"/run/user/{self.user.uid}/spaces-scu/control")
+                control.sendmsg([payload], [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
+                                           array.array("i", [self.listener.fileno()]))])
+                reply = _computer_reply(control)
+                if not reply or not reply.get("ready"):
+                    raise DesktopSetupError(_("The shared SCU host rejected this desktop registration."))
+            except Exception:
+                control.close()
+                raise
+            self.control = control
+            self.executable_identity = (reply["device"], reply["inode"])
+            if self.executable_identity == identity:
+                return
+            self._release_control()
+            if attempt:
+                raise DesktopSetupError(_("The shared SCU executable changed during registration."))
+            _computer_unit(self.user, "restart", "spaces-scu-host.service")
+
+    def _release_control(self) -> None:
+        if self.control is None:
+            return
+        try:
+            self.control.settimeout(PORTAL_READY_TIMEOUT)
+            try:
+                self.control.sendall(b"R")
+                reply = _computer_reply(self.control)
+                if reply and not reply.get("released"):
+                    raise DesktopRevocationError(_("SCU did not acknowledge access revocation."))
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # The host exited; its desktop connections are gone.
+            except TimeoutError:
+                # A failed common host must not retain a revoked guest's live
+                # descriptors. Other Spaces reconnect through reconciliation.
+                _computer_unit(self.user, "stop", "spaces-scu-host.service")
+                if self.control.recv(8192):
+                    raise DesktopRevocationError(_("SCU access revocation did not complete."))
+        finally:
+            self.control.close()
+            self.control = None
+            self.executable_identity = None
+
+    def close(self) -> None:
+        self._release_control()
+        self.listener.close()
+
+
+def _computer_reply(control: socket.socket) -> dict | None:
+    data = bytearray()
+    while not data.endswith(b"\n"):
+        part = control.recv(8192)
+        if not part:
+            return None
+        data.extend(part)
+        if len(data) > 8192:
+            raise DesktopSetupError(_("SCU returned an oversized registration response."))
+    return json.loads(data)
 
 
 def prepare_user_paths(
@@ -1236,48 +1333,48 @@ def start_accessibility_proxy(
         raise
 
 
+def _computer_unit(user: DesktopUser, action: str, unit: str) -> None:
+    """Use the host user's manager so SCU outlives any individual Space."""
+    subprocess.run(
+        [SYSTEMCTL, "--user", action, unit],
+        env={"XDG_RUNTIME_DIR": f"/run/user/{user.uid}",
+             "DBUS_SESSION_BUS_ADDRESS": f"unix:path=/run/user/{user.uid}/bus",
+             "PATH": "/usr/bin", "LANG": "C.UTF-8"},
+        user=user.uid, group=user.gid, check=True,
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=15,
+    )
+
+
 def start_computer_service(
-    space_name: str, user: DesktopUser
-) -> tuple[PortalProxy, DesktopBind]:
-    """Expose a private KWin peer, never the unrestricted host session bus."""
+    space_name: str, user: DesktopUser, plan: DesktopPlan,
+) -> tuple[ComputerLease, DesktopBind]:
+    """Prepare a private guest listener without starting the SCU engine."""
+    destination = plan.environment.get("WAYLAND_DISPLAY")
+    wayland = next((item.source for item in plan.binds
+                    if item.destination == destination), None)
+    if wayland is None:
+        raise DesktopSetupError(_("SCU requires a validated host Wayland socket."))
     socket_path = _prepare_portal_directory(space_name, user, component="computer")
-    executable = Path(COMPUTER_SERVICE).stat()
-    ready_read, ready_write = os.pipe2(os.O_CLOEXEC | os.O_NONBLOCK)
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM | socket.SOCK_CLOEXEC)
     try:
-        process = subprocess.Popen(
-            [COMPUTER_SERVICE, "--host-service", str(socket_path), str(ready_write)],
-            env={
-                "DBUS_SESSION_BUS_ADDRESS": f"unix:path=/run/user/{user.uid}/bus",
-                "XDG_RUNTIME_DIR": f"/run/user/{user.uid}",
-                "PATH": "/usr/bin",
-                "LANG": "C.UTF-8",
-            },
-            user=user.uid, group=user.gid, pass_fds=(ready_write,),
-            stdout=subprocess.DEVNULL, stderr=None,
-        )
-    except Exception:
-        os.close(ready_read)
-        raise
-    finally:
-        os.close(ready_write)
-    service = PortalProxy(process, ready_read, socket_path)
-    service.executable_identity = (executable.st_dev, executable.st_ino)
-    try:
-        poller = select.poll()
-        poller.register(ready_read, select.POLLIN | select.POLLHUP | select.POLLERR)
-        if (not poller.poll(round(PORTAL_READY_TIMEOUT * 1000))
-                or not os.read(ready_read, 1) or process.poll() is not None):
-            raise core.SpacesError(_("Timed out starting the host computer-use service."))
+        listener.bind(str(socket_path))
+        os.chown(socket_path, user.uid, user.gid)
+        os.chmod(socket_path, 0o600)
+        os.fchown(listener.fileno(), user.uid, user.gid)
+        # SO_PEERCRED records the UID at listen(), before a guest connects.
+        # This short setup helper exits immediately; no engine is initialized.
+        subprocess.run([COMPUTER_SERVICE, "--listen", str(listener.fileno())],
+                       user=user.uid, group=user.gid, pass_fds=(listener.fileno(),),
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                       timeout=PORTAL_READY_TIMEOUT)
+        service = ComputerLease(listener, socket_path, user, plan.session_id, str(wayland))
         metadata = socket_path.lstat()
-        if (not stat.S_ISSOCK(metadata.st_mode) or metadata.st_uid != user.uid
-                or metadata.st_mode & 0o077):
-            raise core.SpacesError(_("Unsafe host computer-use socket."))
         return service, DesktopBind(
             str(DESKTOP_ROOT / str(user.uid) / "computer" / "bus"),
             socket_path, metadata.st_dev, metadata.st_ino,
         )
     except Exception:
-        service.close()
+        listener.close()
         socket_path.unlink(missing_ok=True)
         raise
 
@@ -2575,6 +2672,16 @@ class DesktopController:
                 self._repair_accessibility(user, current)
                 self._repair_computer(user, current)
 
+    def computer_descriptors(self) -> tuple[int, ...]:
+        """Wake reconciliation when a dormant socket or its lease is ready."""
+        return tuple(
+            descriptor
+            for current in self.active.values()
+            if current.computer is not None
+            for descriptor in [(current.computer.control or current.computer.listener).fileno()]
+            if descriptor >= 0
+        )
+
     def abandon(self) -> None:
         """Forget state after the machine has already removed its namespaces."""
 
@@ -2846,7 +2953,7 @@ class DesktopController:
 
     def _revoke_computer(self, user: DesktopUser, current: _ActiveDesktop) -> None:
         if current.computer is not None:
-            # Termination closes every KWin EIS context, including guest-held FDs.
+            # Revoke only this Space, waiting for active work to be neutralized.
             current.computer.close()
             current.computer.socket_path.unlink(missing_ok=True)
             current.computer = None
@@ -2866,7 +2973,7 @@ class DesktopController:
             return
         service = current.computer
         binding = current.computer_binding
-        if service is not None and binding is not None and service.process.poll() is None:
+        if service is not None and binding is not None and service.alive():
             try:
                 metadata = service.socket_path.lstat()
                 executable = Path(COMPUTER_SERVICE).stat() if service.executable_identity else None
@@ -2881,7 +2988,7 @@ class DesktopController:
         self._revoke_computer(user, current)
         service = None
         try:
-            service, binding = start_computer_service(self.space_name, user)
+            service, binding = start_computer_service(self.space_name, user, current.plan)
             self._mount(user.uid, binding)
             current.computer = service
             current.computer_binding = binding

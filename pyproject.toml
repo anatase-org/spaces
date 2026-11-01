@@ -60,7 +60,11 @@ spaces = ["overlay/*.png"]
   "data/local-fs-spaces-proc.conf",
 ]
 "lib/systemd/system" = ["data/spaces@.service"]
-"lib/systemd/user" = ["data/systemd/user/spaces@.service"]
+"lib/systemd/user" = [
+  "data/systemd/user/spaces@.service",
+  "data/systemd/user/spaces-scu-host.service",
+  "data/systemd/user/spaces-scu-host.socket",
+]
 "share/spaces/portal/dbus-1/services" = [
   "data/portal/dbus-1/services/org.freedesktop.FileManager1.service",
   "data/portal/dbus-1/services/org.freedesktop.Notifications.service",

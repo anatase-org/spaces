@@ -1,0 +1,8 @@
+[Unit]
+Description=Spaces shared computer-use control socket
+
+[Socket]
+ListenStream=%t/spaces-scu/control
+SocketMode=0600
+DirectoryMode=0700
+RemoveOnStop=yes

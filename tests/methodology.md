@@ -513,24 +513,51 @@ and disabled spaces receive a configuration error with `spaces configure
 <space>`. MCP initialization and schema discovery remain available without the
 permission or optional libraries. Preset defaults are unchanged.
 
-The desktop controller starts `/usr/lib/spaces/scu-host --host-service` as the
-selected host user, independently of portal and AT-SPI readiness. It forwards
-only the private peer socket at `/run/spaces/desktop/<uid>/computer/bus`.
-Directory/socket permissions and D-Bus authentication restrict it to that UID.
-The same C source builds the guest executable and host service; the installed
-hidden desktop identity authorizes ScreenShot2 on KWin versions that require
-it. No screenshot permission dialog is involved.
+The desktop controller prepares a private listener without starting the SCU
+engine. A short `scu-host --listen` setup command calls `listen()` as the host
+user, establishes the peer credentials guests authenticate, and exits without
+initializing the engine. The controller's existing wait loop watches dormant
+listeners. A pending guest connection makes it register the listener through
+the control socket, activating `spaces-scu-host.service` in the host user's
+systemd manager. All active Spaces for that UID share one
+`scu-host --user-service`, outside individual Spaces' cgroups. Guests receive only their own
+`/run/spaces/desktop/<uid>/computer/bus`; the host control socket, session bus,
+logind connection and KWin authorization remain private.
 
-The host service provides only geometry, capture, EIS connection and clipboard
-text methods. A fixed embedded read-only KWin script supplies window/output
-geometry. Neither agent-authored scripts nor arbitrary host D-Bus calls, paths,
-shell commands or process operations are exposed. EIS cookies belong to the
-host service and are disconnected when clients leave. Downgrade, logout,
-session replacement and shutdown terminate the service before removing its
-socket mount, invalidating existing guest-held input descriptors. Reconciliation
-restarts a failed service without disrupting ordinary desktop integration. It
-also retires services whose installed executable was replaced, because KWin
-authorization follows the running executable identity.
+Each controller retains its listening descriptor and holds a registration lease
+while its clients use the host. Revocation closes only that Space's
+listener and clients, discards its queued work, cancels its active request and
+acknowledges neutralization before unmounting. The host releases idle leases and
+exits two seconds after its final client disconnects; this brief grace period
+avoids repeated startup when clients reconnect quickly. A later connection activates it again
+through the same mounted socket, without remounting or another watcher process.
+Logind session loss also retires it; reconciliation prepares a listener again
+when the selected desktop returns. Executable replacement restarts the common
+service when needed, disconnecting clients without replaying actions.
+
+One event loop executes complete MCP requests sequentially while continuing to
+receive cancellation and disconnect notifications. EIS, geometry, the current
+full-overview capture and accessibility handles are shared. JSON-RPC request IDs
+are scoped to their originating connection. A later overview supersedes the
+current capture for every client. The existing restartable AT-SPI helper and its
+private pipe protocol are unchanged.
+
+Before screenshots or EIS input, the host checks the selected session through
+logind, requests `Unlock()` when needed and waits for both logind and the screen
+locker. The unlock wait is bounded to five seconds and the request deadline.
+It leaves the desktop unlocked afterward. Accessibility-only steps with
+`observe:false` and pure delays do not unlock the desktop; window observations
+include screenshots and therefore require unlocking.
+
+While MCP clients are connected, `kscreen-doctor` supplies the output inventory.
+If none is usable, the host supervises one `krfb-virtualmonitor` at 1280x720,
+scale 1. It passes no password, which makes KRfb create the output without
+starting a VNC listener. ScreenShot2 still supplies SCU images. The fallback is
+removed when the final client disconnects or a physical output returns. The KDE
+helpers are RPM recommendations, so Spaces remains installable without KDE.
+KScreen omits `enabled` for outputs that cannot be disabled; those connected
+outputs count as usable. The host does not change their enablement, position,
+scale or priority through KScreen.
 
 `status({})` captures the full desktop and returns one inline PNG together with:
 
@@ -859,3 +886,77 @@ passed; affected session, accessibility, launch, broker and packaging checks ran
 190 tests with 2 skips. `make -C native check-guest-abi` passed. This fix was
 tested locally with private fixtures and mocked machine operations; it has not
 been deployed or live-tested on win5. No host GUI was controlled.
+
+Shared SCU host verification, 2026-11-01: the SCU, controller, packaging,
+session, accessibility and native ABI suites ran **169 tests with 7 skips**.
+Private logind, screen-locker and display helpers cover visual-only unlocking,
+unlock denial and timeout, accessibility while locked, session retirement,
+independent registration revocation, connection-scoped cancellation IDs and
+fallback ownership. After removing the unnecessary virtual-output configuration
+branch, three targeted display tests and `make -C native check-guest-abi` passed
+again. The missing-`enabled` regression remains covered.
+
+The separate live probes are reproducible with:
+
+```sh
+./sync.sh win5
+venv/bin/python tests/manual_scu_session_probe.py headless --artifacts .build/scu-win5-headless
+venv/bin/python tests/manual_scu_session_probe.py lock --artifacts .build/scu-win5-lock
+```
+
+Both probes passed on win5 with SELinux enforcing, using the Fedora Space.
+Each probe checked that concurrent clients shared one host process.
+The headless probe saves KScreen configuration,
+temporarily forces the built-in DRM connector off and triggers a card change.
+KWin refuses disabling its last output through KScreen configuration, so the
+connector override exercises actual output loss. One scale-1 1280x720 fallback
+appeared; ScreenShot2 captured it and EIS text matched the fixture's independently
+read JSON. The fallback survived one of two clients disconnecting, disappeared
+after the final client, returned for a new client and disappeared when the
+physical output returned. Its helper had no listening VNC socket.
+
+The lock probe ran after restoring the panel. It kept eDP-1 enabled and powered
+on, left the lock screen visible for five seconds, and confirmed an accessibility
+button action changed the fixture while logind remained locked. A screenshot
+then unlocked the session. A separate lock and five-second visible wait preceded
+an EIS text action, which unlocked and delivered the exact expected fixture text.
+Each artifact directory contains PNG captures, response metadata, independent
+fixture state, output configurations and timestamped lock/output transitions.
+The probes restore the original display configuration, unlock the session and
+remove their owned fixtures in cleanup. Recent AVC checks reported no matches;
+no SELinux policy was deployed or changed.
+
+Socket-demand activation update, 2026-11-01: granting computer-use access now
+prepares the private socket without starting the engine. The existing login
+monitor wakes on socket readiness, registers a pending listener and lets the
+systemd control socket activate the host. The host returns idle registrations
+after two seconds, retaining no SCU process when clients stop using it. The
+controller keeps the same listening descriptor and mounted inode for subsequent
+activation. No extra watcher process or per-client engine is involved.
+
+The affected SCU, controller, packaging, session, accessibility, ABI and launch
+suites ran **263 tests with 7 skips**. Two focused tests additionally verified
+socket wakeups and retry after a failed activation. After adding the idle grace
+period, the **64-test SCU/native ABI suite** and
+`make -C native check-guest-abi` passed again. The lifecycle fixture verifies two
+Spaces share one host, one Space's idle lease leaves the other's client usable,
+the last client stops the host, a new connection reuses the mounted socket and
+explicit revocation still disconnects its client.
+
+Ordinary `./sync.sh win5` deployed the update. Before use, the Fedora Space was
+active while SCU reported `ActiveState=inactive` and `MainPID=0`. The separate
+headless and visible-lock probes passed again, saving artifacts under
+`.build/scu-win5-demand-headless` and `.build/scu-win5-demand-lock`. During the
+headless probe, host PID 79414 served both clients; closing the final client
+stopped it and removed the fallback. The next connection activated PID 80604
+through the existing socket and recreated the fallback. Physical-output return
+removed it again. The lock probe independently verified the accessibility
+button while locked, screenshot unlocking and EIS unlocking after separate
+five-second visible lock periods, with eDP-1 enabled and powered on.
+
+Both saved before/after display configurations match: eDP-1 enabled, mode 1,
+scale 1.65, position 0,0. Final checks show the session unlocked, SCU inactive
+with `MainPID=0`, SELinux enforcing and no recent AVC matches. Owned fixtures
+were removed. The PNGs, fixture JSON, output snapshots and timestamped events
+remain in the artifact directories; the AVC query is recorded in
+`.build/scu-win5-demand-avc.log`.

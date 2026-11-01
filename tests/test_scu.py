@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import array
 import io
 import json
 import os
@@ -88,6 +89,8 @@ class ScuTests(unittest.TestCase):
         cls.backend = cls.directory / "backend"
         common = ["cc", "-O1", "-g", "-std=gnu11", "-Wall", "-Wextra", "-Werror",
             "-DYYJSON_READER_DEPTH_LIMIT=64",
+            f'-DSCU_SCREEN_QUERY="{ROOT / "tests/scu_display_fixture.py"}"',
+            f'-DSCU_VIRTUAL_MONITOR="{ROOT / "tests/scu_display_fixture.py"}"',
             f'-DSCU_COMPUTER_SOCKET="{cls.computer_path}"']
         libraries = shlex.split(subprocess.check_output(["pkg-config", "--libs", "gio-unix-2.0"], text=True))
         for source, binary in ((ROOT / "native/scu.c", cls.binary), (ROOT / "native/scu_host.c", cls.host_binary),
@@ -117,6 +120,8 @@ class ScuTests(unittest.TestCase):
         self.control = self.directory / "kwin-control.json"
         self.config = {"atspi_address": f"unix:path={self.socket_path}"}
         self.control.write_text(json.dumps(self.config))
+        self.display_state = self.directory / "display-state.json"
+        self.display_state.unlink(missing_ok=True)
 
     def child(self, command, **kwargs):
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **kwargs)
@@ -151,7 +156,9 @@ class ScuTests(unittest.TestCase):
 
     def configure(self, **values):
         self.config.update(values)
-        self.control.write_text(json.dumps(self.config))
+        temporary = self.control.with_suffix(".next")
+        temporary.write_text(json.dumps(self.config))
+        temporary.replace(self.control)
 
     def start_accessibility(self, two_windows=False, duplicates=False, selection=False, unstable=False, unavailable=False):
         self.atspi_bus, address = self.bus(self.socket_path)
@@ -197,6 +204,318 @@ class ScuTests(unittest.TestCase):
         client = Client(self.binary, self.environment)
         self.addCleanup(client.close)
         return client
+
+    def start_shared(self, **config):
+        self.start_host(**config)
+        self.stop(self.host)
+        self.login_state = self.directory / "login-state.json"
+        self.login = self.child(["/usr/bin/python3", str(ROOT / "tests/scu_login_fixture.py"),
+                                 self.address, str(self.control), str(self.login_state)])
+        self.ready(self.login)
+        path = self.directory / "shared-control"
+        path.unlink(missing_ok=True)
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(str(path))
+        listener.listen(32)
+        self.addCleanup(listener.close)
+        self.shared_listener = listener
+        self.space_listeners = {}
+        self.shared_shim = """import os, sys
+fd = int(sys.argv[2])
+os.dup2(fd, 3, inheritable=True)
+if fd != 3: os.close(fd)
+os.environ.update(LISTEN_PID=str(os.getpid()), LISTEN_FDS='1')
+os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
+"""
+        self.shared_environment = {**self.environment, "DBUS_SESSION_BUS_ADDRESS": self.address,
+                       "DBUS_SYSTEM_BUS_ADDRESS": self.address,
+                       "SCU_FIXTURE_CONTROL": str(self.control), "SCU_DISPLAY_STATE": str(self.display_state)}
+        self.shared_path = path
+        self.start_shared_service()
+        self.lease = self.register_space(self.computer_path)
+
+    def start_shared_service(self):
+        listener = self.shared_listener
+        self.host = self.child(["/usr/bin/python3", "-c", self.shared_shim,
+                               str(self.host_binary), str(listener.fileno())],
+                               pass_fds=(listener.fileno(),), env=self.shared_environment)
+
+    def register_space(self, path):
+        listener = self.space_listeners.get(path)
+        if listener is None:
+            path.unlink(missing_ok=True)
+            listener = socket.socket(socket.AF_UNIX)
+            listener.bind(str(path))
+            path.chmod(0o600)
+            listener.listen(32)
+            self.space_listeners[path] = listener
+            self.addCleanup(listener.close)
+        control = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(control.close)
+        control.settimeout(5)
+        control.connect(str(self.shared_path))
+        control.sendmsg([json.dumps({"session": "fixture", "wayland": "fixture-wayland"}).encode() + b"\n"],
+                        [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", [listener.fileno()]))])
+        result = json.loads(control.recv(8192))
+        self.assertTrue(result.get("ready"), result)
+        self.assertEqual(result["pid"], self.host.pid)
+        return control
+
+    def login_call(self, method, *arguments):
+        command = ["gdbus", "call", "--address", self.address, "--dest", "org.freedesktop.login1",
+                   "--object-path", "/org/freedesktop/login1/session/fixture",
+                   "--method", "org.freedesktop.login1.Session." + method, *arguments]
+        subprocess.run(command, check=True, capture_output=True, timeout=5)
+
+    def wait_until(self, predicate, timeout=5):
+        until = time.monotonic() + timeout
+        while time.monotonic() < until:
+            if predicate():
+                return
+            time.sleep(.02)
+        self.fail("shared host state did not converge")
+
+    def test_shared_registration_revokes_only_its_space_and_exits_after_last(self):
+        self.start_shared()
+        other_path = self.directory / "other-space"
+        other = self.register_space(other_path)
+        first = self.client()
+        self.status(first)
+        peer = socket.socket(socket.AF_UNIX)
+        self.addCleanup(peer.close)
+        peer.settimeout(5)
+        peer.connect(str(other_path))
+        request = {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "status", "arguments": {}}}
+        peer.sendall(json.dumps(request).encode() + b"\n")
+        response = b""
+        while not response.endswith(b"\n"):
+            response += peer.recv(65536)
+        self.assertFalse(json.loads(response)["result"]["isError"])
+        self.lease.sendall(b"R")
+        self.assertTrue(json.loads(self.lease.recv(8192))["released"])
+        self.assertTrue(first.tool("status")["isError"])
+        peer.sendall(json.dumps(request).encode() + b"\n")
+        response = b""
+        while not response.endswith(b"\n"):
+            response += peer.recv(65536)
+        self.assertFalse(json.loads(response)["result"]["isError"])
+        self.assertEqual(json.loads(self.state.read_text())["connections"], 1)
+        other.sendall(b"R")
+        self.assertTrue(json.loads(other.recv(8192))["released"])
+        self.host.wait(timeout=5)
+
+    def test_shared_unlock_is_visual_only_and_accessibility_stays_locked(self):
+        self.start_shared()
+        client = self.client()
+        tree = self.snapshot(client)
+        button = next(row for row in tree["elements"] if row["label"] == "Fixture button")
+        self.login_call("SetLocked", "true")
+        result = client.tool("computer", steps=[{"tool": "click", "args": {
+            "element_token": button["element_token"]}}], observe=False)
+        self.assertFalse(result["isError"], result)
+        self.assertTrue(json.loads(self.login_state.read_text())["locked"])
+        self.assertEqual(json.loads(self.login_state.read_text())["unlocks"], 0)
+        self.status(client)
+        self.assertFalse(json.loads(self.login_state.read_text())["locked"])
+        self.login_call("SetLocked", "true")
+        result = client.tool("computer", steps=[{"tool": "press_key", "args": {"key": "a"}}], observe=False)
+        self.assertFalse(result["isError"], result)
+        self.assertEqual(json.loads(self.login_state.read_text())["unlocks"], 2)
+
+    def test_shared_duplicate_ids_cancel_only_the_originating_connection(self):
+        self.start_shared()
+        peers = [socket.socket(socket.AF_UNIX) for _ in range(2)]
+        for peer in peers:
+            self.addCleanup(peer.close)
+            peer.settimeout(5)
+            peer.connect(str(self.computer_path))
+        request = {"jsonrpc": "2.0", "id": 77, "method": "tools/call", "params": {
+            "name": "computer", "arguments": {"steps": [{"tool": "delay_ms", "args": {"ms": 600}}], "observe": False}}}
+        peers[0].sendall(json.dumps(request).encode() + b"\n")
+        time.sleep(.05)
+        peers[1].sendall(json.dumps(request).encode() + b"\n")
+        peers[1].sendall(json.dumps({"jsonrpc": "2.0", "method": "notifications/cancelled",
+                                    "params": {"requestId": 77}}).encode() + b"\n")
+        response = b""
+        while not response.endswith(b"\n"):
+            response += peers[0].recv(65536)
+        result = json.loads(response)
+        self.assertEqual(result["id"], 77)
+        self.assertFalse(result["result"]["isError"], result)
+        self.assertFalse(select.select([peers[1]], [], [], .3)[0], "another client's ID was cancelled or responded late")
+
+    def test_controller_registers_a_listener_and_closes_only_its_lease(self):
+        from types import SimpleNamespace
+        from unittest import mock
+        from spaces import session
+        self.start_shared()
+        user = SimpleNamespace(uid=os.getuid(), gid=os.getgid())
+        plan = session.DesktopPlan("fixture", (
+            session.DesktopBind("/guest/wayland", Path("fixture-wayland"), 1, 2),),
+            {"WAYLAND_DISPLAY": "/guest/wayland"})
+        connect = socket.socket.connect
+        def redirected(sock, address):
+            if address == f"/run/user/{user.uid}/spaces-scu/control":
+                address = str(self.shared_path)
+            return connect(sock, address)
+        with mock.patch.object(session, "RUNTIME_ROOT", self.directory / "registration"), \
+             mock.patch.object(session, "COMPUTER_SERVICE", str(self.host_binary)), \
+             mock.patch.object(session, "_computer_unit") as unit, \
+             mock.patch.object(socket.socket, "connect", redirected):
+            lease, binding = session.start_computer_service("other", user, plan)
+            self.addCleanup(lease.close)
+            self.assertTrue(lease.alive())
+            self.assertTrue(binding.source.is_socket())
+            self.assertEqual(binding.source.stat().st_mode & 0o777, 0o600)
+            self.assertIsNone(lease.control)
+            unit.assert_not_called()
+            lease.close()
+            self.assertFalse(lease.alive())
+            self.assertIsNone(self.host.poll())
+            self.status(self.client())
+
+    def test_shared_unlock_denial_and_timeout_submit_no_input(self):
+        self.start_shared(locked=True, deny_unlock=True)
+        client = self.client()
+        result = client.tool("computer", steps=[{"tool": "press_key", "args": {"key": "a"}}], observe=False)
+        self.assertTrue(result["isError"], result)
+        self.assertEqual(result["structuredContent"]["failed"]["code"], "desktop_unlock_failed")
+        self.assertEqual(json.loads(self.state.read_text())["connections"], 0)
+        self.configure(deny_unlock=False, hold_unlock=True)
+        start = time.monotonic()
+        result = client.tool("status")
+        self.assertTrue(result["isError"], result)
+        self.assertLess(time.monotonic() - start, 6)
+        self.assertEqual(json.loads(self.state.read_text())["captures"], 0)
+
+    def test_socket_demand_starts_one_host_and_reactivates_without_remounting(self):
+        from types import SimpleNamespace
+        from unittest import mock
+        from spaces import session
+        self.start_shared()
+        self.lease.sendall(b"R")
+        self.assertTrue(json.loads(self.lease.recv(8192))["released"])
+        self.host.wait(timeout=5)
+        user = SimpleNamespace(uid=os.getuid(), gid=os.getgid())
+        plan = session.DesktopPlan("fixture", (
+            session.DesktopBind("/guest/wayland", Path("fixture-wayland"), 1, 2),),
+            {"WAYLAND_DISPLAY": "/guest/wayland"})
+        connect = socket.socket.connect
+        def redirected(sock, address):
+            if address == f"/run/user/{user.uid}/spaces-scu/control":
+                address = str(self.shared_path)
+            return connect(sock, address)
+        starts = []
+        def start_unit(_user, action, unit):
+            self.assertEqual((action, unit), ("start", "spaces-scu-host.socket"))
+            if self.host.poll() is not None:
+                self.start_shared_service()
+                starts.append(self.host.pid)
+        def peer(path):
+            result = socket.socket(socket.AF_UNIX)
+            result.settimeout(5)
+            self.addCleanup(result.close)
+            result.connect(str(path))
+            return result
+        request = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                              "params": {"name": "status", "arguments": {}}}).encode() + b"\n"
+        def receive(sock):
+            data = b""
+            while not data.endswith(b"\n"):
+                part = sock.recv(65536)
+                self.assertTrue(part, "host disconnected before responding")
+                data += part
+            self.assertFalse(json.loads(data)["result"]["isError"])
+        with mock.patch.object(session, "RUNTIME_ROOT", self.directory / "demand"), \
+             mock.patch.object(session, "COMPUTER_SERVICE", str(self.host_binary)), \
+             mock.patch.object(session, "_computer_unit", side_effect=start_unit) as unit, \
+             mock.patch.object(socket.socket, "connect", redirected):
+            leases = [session.start_computer_service(name, user, plan)[0] for name in ("one", "two")]
+            for lease in leases:
+                self.addCleanup(lease.close)
+                self.assertTrue(lease.alive())
+                self.assertIsNone(lease.control)
+            unit.assert_not_called()
+            identity = leases[0].socket_path.stat().st_ino
+            peers = [peer(lease.socket_path) for lease in leases]
+            unit.side_effect = RuntimeError("temporary activation failure")
+            with self.assertLogs(session.logger, level="WARNING"):
+                self.assertTrue(leases[0].alive())
+            self.assertIsNone(leases[0].control)
+            self.assertEqual(leases[0].socket_path.stat().st_ino, identity)
+            unit.side_effect = start_unit
+            for connection, lease in zip(peers, leases):
+                connection.sendall(request)
+                self.assertTrue(lease.alive())
+                receive(connection)
+            self.assertEqual(len(starts), 1, "each Space started its own host")
+            peers[0].close()
+            self.wait_until(lambda: bool(select.select([leases[0].control], [], [], 0)[0]))
+            self.assertTrue(leases[0].alive())
+            self.assertIsNone(leases[0].control)
+            self.assertIsNone(self.host.poll(), "an idle Space stopped another Space's client")
+            peers[1].sendall(request)
+            receive(peers[1])
+            peers[1].close()
+            self.host.wait(timeout=5)
+            self.assertTrue(leases[1].alive())
+            self.assertIsNone(leases[1].control)
+            self.assertEqual(leases[0].socket_path.stat().st_ino, identity)
+            fresh = peer(leases[0].socket_path)
+            fresh.sendall(request)
+            self.assertTrue(leases[0].alive())
+            receive(fresh)
+            self.assertEqual(len(starts), 2)
+            self.assertEqual(leases[0].socket_path.stat().st_ino, identity)
+            leases[0].close()
+            self.assertEqual(fresh.recv(1), b"", "revocation left a live client")
+            self.assertFalse(leases[0].alive())
+
+    def test_shared_session_end_retires_all_registrations(self):
+        self.start_shared()
+        self.status(self.client())
+        self.login_call("Deactivate")
+        self.host.wait(timeout=5)
+
+    def test_shared_headless_helper_has_client_lifetime_and_returns_to_physical(self):
+        self.start_shared(headless=True)
+        first, second = self.client(), self.client()
+        result = self.status(first)
+        self.assertEqual(self.image(result).size, (1280, 720))
+        helper = json.loads(self.display_state.read_text())["pid"]
+        self.status(second)
+        self.assertEqual(json.loads(self.display_state.read_text())["pid"], helper)
+        first.close()
+        self.assertTrue(self.display_state.exists())
+        second.close()
+        self.wait_until(lambda: not self.display_state.exists())
+        self.host.wait(timeout=5)
+        self.start_shared_service()
+        self.lease = self.register_space(self.computer_path)
+        third = self.client()
+        self.status(third)
+        self.configure(headless=False)
+        self.wait_until(lambda: not self.display_state.exists())
+        self.status(third)
+
+    def test_shared_failing_display_helper_does_not_block_accessibility(self):
+        self.start_shared()
+        client = self.client()
+        tree = self.snapshot(client)
+        button = next(row for row in tree["elements"] if row["label"] == "Fixture button")
+        self.configure(headless=True, helper_fail=True)
+        result = client.tool("status")
+        self.assertTrue(result["isError"], result)
+        result = client.tool("computer", steps=[{"tool": "click", "args": {
+            "element_token": button["element_token"]}}], observe=False)
+        self.assertFalse(result["isError"], result)
+
+    def test_shared_virtual_output_without_enabled_property_is_usable(self):
+        self.start_shared(headless=True, omit_enabled=True)
+        client = self.client()
+        result = self.status(client)
+        self.assertEqual(self.image(result).size, (1280, 720))
+        self.assertTrue(self.display_state.exists())
 
     def status(self, client):
         result = client.tool("status")
@@ -245,32 +564,27 @@ class ScuTests(unittest.TestCase):
         self.assertFalse(result["isError"], result)
         self.assertEqual(json.loads(self.atspi_state.read_text())["clicks"], 1)
 
-    def test_workers_isolate_handles_and_survive_another_workers_crash(self):
+    def test_clients_share_engine_handles_and_one_accessibility_helper(self):
         self.start_host()
-        children = Path(f"/proc/{self.host.pid}/task/{self.host.pid}/children")
-        first = self.client()
+        first, second = self.client(), self.client()
         one = self.status(first)["structuredContent"]
-        first_pid = int(children.read_text().split()[0])
-        semantic_children = Path(f"/proc/{first_pid}/task/{first_pid}/children")
-        semantic_pid = int(semantic_children.read_text().split()[0])
-        second = self.client()
-        two = self.status(second)["structuredContent"]
-        self.assertNotEqual(one["canvas"]["id"], two["canvas"]["id"])
-        foreign = second.tool("computer", id=one["canvas"]["id"],
+        # The same current capture is valid from another Space/client.
+        result = second.tool("computer", id=one["canvas"]["id"],
             steps=[{"tool": "click", "args": {"x": 40, "y": 40}}], observe=False)
-        self.assertTrue(foreign["isError"], foreign)
-        os.kill(first_pid, 9)
-        deadline = time.monotonic() + 2
-        while Path(f"/proc/{semantic_pid}").exists() and time.monotonic() < deadline:
-            time.sleep(.01)
-        self.assertFalse(Path(f"/proc/{semantic_pid}").exists(), "semantic child was not reaped")
-        self.assertTrue(first.tool("status")["isError"])
+        self.assertFalse(result["isError"], result)
+        tree = self.snapshot(first)
+        button = next(row for row in tree["elements"] if row["label"] == "Fixture button")
+        result = second.tool("computer", steps=[{"tool": "click", "args": {
+            "element_token": button["element_token"]}}], observe=False)
+        self.assertFalse(result["isError"], result)
+        children = Path(f"/proc/{self.host.pid}/task/{self.host.pid}/children")
+        self.assertEqual(len(children.read_text().split()), 1, "only the existing AT-SPI helper should be a child")
+        first.close()
         self.status(second)
-        fresh = self.status(first)["structuredContent"]
-        self.assertNotEqual(one["canvas"]["id"], fresh["canvas"]["id"])
+        self.assertEqual(json.loads(self.state.read_text())["connections"], 1)
         self.assertIsNone(self.host.poll())
 
-    def test_host_connection_limit_and_revocation_reap_workers(self):
+    def test_host_connection_limit_and_shutdown_close_clients(self):
         self.start_host()
         peers = []
         for _ in range(33):
@@ -279,14 +593,12 @@ class ScuTests(unittest.TestCase):
             peer.settimeout(3)
             peer.connect(str(self.computer_path))
             peers.append(peer)
-        # The last connection exceeds the existing 32-client limit.
         self.assertEqual(peers[-1].recv(1), b"")
         children = Path(f"/proc/{self.host.pid}/task/{self.host.pid}/children")
-        workers = [int(pid) for pid in children.read_text().split()]
-        self.assertEqual(len(workers), 32)
+        self.assertEqual(children.read_text().strip(), "", "clients must not launch host workers")
         self.stop(self.host)
-        for pid in workers:
-            self.assertFalse(Path(f"/proc/{pid}").exists(), "host worker survived revocation")
+        for peer in peers:
+            self.assertEqual(peer.recv(1), b"")
         self.assertFalse(self.computer_path.exists())
 
     def test_large_image_crosses_relay_buffers(self):

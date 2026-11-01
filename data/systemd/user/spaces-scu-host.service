@@ -1,0 +1,9 @@
+[Unit]
+Description=Spaces shared computer-use host
+Requires=spaces-scu-host.socket
+After=spaces-scu-host.socket
+
+[Service]
+ExecStart=/usr/lib/spaces/scu-host --user-service
+KillMode=control-group
+TimeoutStopSec=5
