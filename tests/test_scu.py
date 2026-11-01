@@ -167,7 +167,7 @@ class ScuTests(unittest.TestCase):
                             deep=0, wide=0, delayed_window=False, title_after_attributes=False,
                             geometry_after_attributes=False, numeric=False, numeric_keyboard=False,
                             numeric_readonly=False, numeric_delay=False, browser=False,
-                            offscreen=False, tooltips=False, placeholders=0):
+                            offscreen=False, tooltips=False, placeholders=0, long_labels=False):
         self.atspi_bus, address = self.bus(self.socket_path)
         self.atspi_state = self.directory / "atspi-state.json"
         command = ["/usr/bin/python3", str(ROOT / "tests/scu_atspi_fixture.py"), address, str(self.atspi_state)]
@@ -207,6 +207,8 @@ class ScuTests(unittest.TestCase):
             command.append(f"--deep={deep}")
         if wide:
             command.append(f"--wide={wide}")
+        if long_labels:
+            command.append("--long-labels")
         if delayed_window:
             command.append("--delayed-window")
         if title_after_attributes:
@@ -1142,16 +1144,32 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertEqual(result["structuredContent"]["status"], "ok", result)
 
     def test_large_tree_is_bounded_and_reports_complexity(self):
-        self.start_accessibility(wide=1000)
+        self.start_accessibility(wide=2000, long_labels=True)
         self.start_host()
         client = self.client()
         tree = self.snapshot(client)
         self.assertTrue(tree["truncated"])
         self.assertEqual(tree["accessibility_error"]["code"], "accessibility_tree_too_complex")
-        self.assertLessEqual(len(json.dumps(tree, separators=(",", ":")).encode()), 20 * 1024)
+        size = len(json.dumps(tree, separators=(",", ":")).encode())
+        self.assertGreater(size, 500 * 1024)
+        self.assertLessEqual(size, 512 * 1024)
         self.assertNotIn("tree_markdown", tree)
         button = next(row for row in tree["elements"] if row["role"] == "button")
         result = client.tool("computer", steps=[{"tool": "click", "args": {"element_token": button["element_token"]}}])
+        self.assertEqual(result["structuredContent"]["status"], "ok", result)
+
+    def test_large_tree_is_not_cut_off_by_previous_byte_or_row_limits(self):
+        self.start_accessibility(wide=1000)
+        self.start_host()
+        client = self.client()
+        tree = self.snapshot(client)
+        self.assertFalse(tree["truncated"], tree)
+        self.assertEqual(len(tree["elements"]), 1001)
+        self.assertGreater(len(json.dumps(tree, separators=(",", ":")).encode()), 18 * 1024)
+        button = tree["elements"][-1]
+        self.assertEqual(button["label"], "Repeated button 999")
+        result = client.tool("computer", steps=[{"tool": "click", "args": {
+            "element_token": button["element_token"]}}], observe=False)
         self.assertEqual(result["structuredContent"]["status"], "ok", result)
 
     def test_excessive_depth_is_complex_not_unavailable(self):

@@ -127,6 +127,7 @@ def main():
     placeholders = next((int(arg.split("=", 1)[1]) for arg in sys.argv[3:] if arg.startswith("--placeholders=")), 0)
     deep = next((int(arg.split("=", 1)[1]) for arg in sys.argv[3:] if arg.startswith("--deep=")), 0)
     wide = next((int(arg.split("=", 1)[1]) for arg in sys.argv[3:] if arg.startswith("--wide=")), 0)
+    long_labels = "--long-labels" in sys.argv[3:]
     delayed_window = "--delayed-window" in sys.argv[3:]
     title_after_attributes = "--title-after-attributes" in sys.argv[3:]
     geometry_after_attributes = "--geometry-after-attributes" in sys.argv[3:]
@@ -405,7 +406,8 @@ def main():
                 if title_file.exists(): return GLib.Variant("s", title_file.read_text())
             if path.startswith(PANEL + "/"): return GLib.Variant("s", "")
             if path.startswith(BUTTON + "/empty_"): return GLib.Variant("s", "")
-            if path.startswith(BUTTON + "/"): return GLib.Variant("s", "Repeated button " + path.rsplit("/", 1)[1])
+            if path.startswith(BUTTON + "/"):
+                return GLib.Variant("s", "Repeated button " + path.rsplit("/", 1)[1] + (" x" * 110 if long_labels else ""))
             return GLib.Variant("s", {ROOT: "scu fixture", WINDOW: "scu test window", WINDOW_TWO: "scu test window" if duplicate_windows else "scu second window",
                 BUTTON: "Fixture button", ENTRY: "Fixture entry", PASSWORD: "Fixture password", PANEL: "Hidden container", SLIDER: "Fixture volume",
                 DOCUMENT: "Fixture document", TOOLTIP: "tooltip"}[path])

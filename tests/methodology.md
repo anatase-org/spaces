@@ -700,9 +700,11 @@ its native parent under a compositor-provided display scale before converting
 that document and its descendants to logical coordinates. Already aligned
 documents keep their coordinates. No scale is inferred from page width alone.
 
-Internal limits bound traversal to 4096 raw nodes, 96 raw levels, five seconds,
-and 160 emitted rows. Rows have a 16 KiB budget; the converted tree is checked
-again against 18 KiB. Complexity produces a usable partial tree with
+Internal limits bound traversal to 4096 raw nodes, 96 raw levels and five seconds.
+Traversal has no separate row or byte cutoff. The final window observation JSON,
+including coordinates and screenshot metadata, is limited to 512 KiB after
+formatting. Oversized results retain a prefix of complete rows. Complexity
+produces a usable partial tree with
 `truncated:true` and `accessibility_error.code:"accessibility_tree_too_complex"`,
 with usable returned elements and guidance to use screenshot input for omitted
 controls. Complexity is not reported as accessibility being unavailable. A
@@ -1167,7 +1169,17 @@ reactivation passed. Final state was `IsEnabled=false`, no registered events,
 `MainPID=0`, and SELinux enforcing. Artifacts are in
 `.build/scu-value-browser-final`.
 
-A separate read-only check of the existing YouTube window returned Search and
+A separate isolated YouTube profile also passed numeric `set_value` on
+2026-11-01. After rejecting the consent dialog and hovering the mute button to
+reveal its volume slider, one `set_value` with `value:"50"` changed Volume from
+100 to 50. The returned tree reported value 50, range 0–100 and confirmed focus;
+the window screenshot showed the slider at its midpoint. Artifacts are in
+`.build/scu-value-youtube-interactive`. The temporary instance used
+`--mute-audio` to avoid test audio, with no accessibility overrides. Its profile
+was removed afterward; the existing browser session was preserved.
+
+Under the previous 16 KiB limit, a separate read-only check of the existing
+YouTube window returned Search and
 Volume controls with corrected coordinates. The document width was about 1922
 pixels within a 1921-pixel screenshot, instead of the previous 3170 pixels.
 Volume exposed value 50 with range 0–100. The 62-row result was explicitly
@@ -1181,3 +1193,12 @@ The final SCU, computer-integration, launch and native ABI suite passed all 218
 tests, and `make -C native check-guest-abi` passed. Fixtures cover offscreen
 controls, controls without visibility states, placeholder compaction, dormant
 tooltips, mixed document scales, playback-title association and ambiguity.
+
+With the 512 KiB final-output limit, the same YouTube window returned 310
+elements in 78,521 compact JSON bytes without truncation, including recommended
+video headings and links. The tree-only request took about 1.16 seconds and
+preserved the page and playback state. Artifacts are in `.build/scu-youtube-512k`;
+the `/tmp/scu-youtube-tree.txt` and `.json` copies were refreshed. Five focused
+tests passed, covering an untruncated 1,001-row tree, a result near the 512 KiB
+limit, usable tokens, depth limits and screenshot metadata. Native ABI checks
+also passed.

@@ -613,11 +613,10 @@ static JsonResult *list_apps(void)
  * of the compact hierarchy so toolkit wrappers cannot hide useful controls. */
 #define TREE_NODES 4096
 #define TREE_DEPTH 96
-#define TREE_BYTES (16 * 1024)
-#define TREE_ROWS 160
+#define TREE_BYTES (512 * 1024)
 
 typedef struct {
-    guint count, visited, bytes;
+    guint count, visited;
     gint64 until;
     gboolean truncated;
     Window *window;
@@ -633,6 +632,39 @@ static void mark_tree_complex(JsonResult *tree)
     result_string(limitation, "code", "accessibility_tree_too_complex");
     result_string(limitation, "hint", "This window exceeds the accessibility response budget. The partial tree's elements remain usable; use screenshot input for omitted controls.");
     result_member(tree, "accessibility_error", limitation);
+}
+
+/* Budget the final representation, including observation metadata, rather
+ * than stopping discovery on intermediate coordinates or an arbitrary row. */
+static void limit_tree_output(JsonResult *tree)
+{
+    JsonResult *rows = yyjson_mut_obj_get(tree, "elements");
+    if (!rows) return;
+    size_t bytes = 0;
+    char *encoded = yyjson_mut_val_write(tree, 0, &bytes);
+    free(encoded);
+    if (bytes <= TREE_BYTES) return;
+
+    mark_tree_complex(tree);
+    JsonResult *metadata = result_object(), *key, *value;
+    size_t i, n;
+    yyjson_mut_obj_foreach(tree, i, n, key, value) {
+        const char *name = yyjson_mut_get_str(key);
+        result_member(metadata, name, !strcmp(name, "elements") ? result_array()
+            : yyjson_mut_val_mut_copy(scu.doc, value));
+    }
+    encoded = yyjson_mut_val_write(metadata, 0, &bytes);
+    free(encoded);
+    size_t keep = 0;
+    yyjson_mut_arr_foreach(rows, i, n, value) {
+        size_t row_bytes = 0;
+        encoded = yyjson_mut_val_write(value, 0, &row_bytes);
+        free(encoded);
+        if (bytes + row_bytes + (keep != 0) > TREE_BYTES) break;
+        bytes += row_bytes + (keep != 0);
+        keep++;
+    }
+    yyjson_mut_arr_remove_range(rows, keep, yyjson_mut_arr_size(rows) - keep);
 }
 
 /* Toolkit action names describe the same semantic click. Never select an
@@ -722,7 +754,6 @@ static void append_accessible(Walk *state, AtspiAccessible *node,
     double scale, JsonResult *parent_frame)
 {
     if (state->visited >= TREE_NODES || level > TREE_DEPTH ||
-        state->count >= TREE_ROWS || state->bytes >= TREE_BYTES ||
         g_get_monotonic_time() >= state->until) {
         state->truncated = TRUE;
         return;
@@ -829,32 +860,21 @@ static void append_accessible(Walk *state, AtspiAccessible *node,
             g_clear_error(&error);
         }
         if (yyjson_mut_arr_size(actions)) result_member(row, "actions", actions);
-        size_t bytes = 0;
-        char *encoded = yyjson_mut_val_write(row, 0, &bytes);
-        free(encoded);
-        if (state->bytes + bytes > TREE_BYTES) {
-            state->truncated = TRUE;
-            state->bytes = TREE_BYTES;
-            emit = FALSE;
-        } else {
-            Element *element = g_new0(Element, 1);
-            element->accessible = g_object_ref(node);
-            element->window = state->window->id;
-            element->pid = state->window->pid;
-            g_hash_table_insert(elements, g_strdup(token), element);
-            result_append(state->rows, row);
-            state->count++;
-            state->bytes += bytes;
-            parent = (gint)index;
-            depth++;
-        }
+        Element *element = g_new0(Element, 1);
+        element->accessible = g_object_ref(node);
+        element->window = state->window->id;
+        element->pid = state->window->pid;
+        g_hash_table_insert(elements, g_strdup(token), element);
+        result_append(state->rows, row);
+        state->count++;
+        parent = (gint)index;
+        depth++;
         g_free(token);
         g_free(role);
     }
     if (children > 2048) state->truncated = TRUE;
     for (gint i = 0; i < MIN(children, 2048) && !scu.code; i++) {
-        if (state->visited >= TREE_NODES || state->count >= TREE_ROWS ||
-            state->bytes >= TREE_BYTES || g_get_monotonic_time() >= state->until) {
+        if (state->visited >= TREE_NODES || g_get_monotonic_time() >= state->until) {
             state->truncated = TRUE;
             break;
         }
@@ -3036,16 +3056,6 @@ static JsonResult *window_tree(JsonValue *args, JsonValue *window)
         }
         yyjson_doc_free(raw);
     }
-    /* Recheck after coordinate conversion so the complete textual observation
-     * stays bounded even with large desktop scales or long toolkit labels. */
-    for (;;) {
-        size_t bytes = 0;
-        char *encoded = yyjson_mut_val_write(tree, 0, &bytes);
-        free(encoded);
-        if (bytes <= 18 * 1024 || yyjson_mut_arr_size(rows) <= 1) break;
-        yyjson_mut_arr_remove_last(rows);
-        mark_tree_complex(tree);
-    }
     return tree;
 }
 
@@ -3162,6 +3172,7 @@ static JsonResult *observe_window(JsonValue *args)
     }
     result_integer(result, "window_id", json_number(args, "window_id", 0));
     result_integer(result, "id", visual.canvas.id);
+    limit_tree_output(result);
 done:
     free(signature);
     if (!result) {
