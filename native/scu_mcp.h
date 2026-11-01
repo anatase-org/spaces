@@ -188,7 +188,7 @@ static const Argument drag_arguments[] = {
 };
 static const Argument scroll_arguments[] = {
     {.name = "direction", .type = ARG_STRING, .choices = scroll_directions},
-    {.name = "amount", .type = ARG_INTEGER, .minimum = 1, .maximum = 50},
+    {.name = "amount", .type = ARG_INTEGER, .minimum = 1, .maximum = 700},
     {NULL},
 };
 static const Argument text_arguments[] = {
