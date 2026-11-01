@@ -6,6 +6,7 @@
 #include <dlfcn.h>
 #include <gdk-pixbuf/gdk-pixbuf.h>
 #include <gio/gunixfdlist.h>
+#include <glib-unix.h>
 #include <libei.h>
 #include <linux/input-event-codes.h>
 #include <stdint.h>
@@ -139,6 +140,12 @@ typedef struct {
     __typeof__(&atspi_exit) exit;
     __typeof__(&atspi_set_timeout) set_timeout;
     __typeof__(&atspi_get_desktop) get_desktop;
+    __typeof__(&atspi_event_listener_new) event_listener_new;
+    __typeof__(&atspi_event_listener_register) event_listener_register;
+    __typeof__(&atspi_event_listener_deregister) event_listener_deregister;
+    __typeof__(&atspi_event_get_type) event_get_type;
+    __typeof__(&atspi_accessible_get_attributes) accessible_get_attributes;
+    __typeof__(&atspi_accessible_clear_cache) accessible_clear_cache;
     __typeof__(&atspi_accessible_get_child_count) accessible_get_child_count;
     __typeof__(&atspi_accessible_get_child_at_index) accessible_get_child_at_index;
     __typeof__(&atspi_accessible_get_name) accessible_get_name;
@@ -172,6 +179,8 @@ typedef struct {
 
 static AtspiLibrary atspi;
 static gboolean library_loaded, atspi_initialized;
+static AtspiEventListener *atspi_listener;
+static const char atspi_event[] = "object:children-changed";
 typedef struct {
     guint id, pid;
     AtspiAccessible *accessible;
@@ -235,6 +244,12 @@ static gboolean load_atspi(void)
     LOAD_ATSPI(exit);
     LOAD_ATSPI(set_timeout);
     LOAD_ATSPI(get_desktop);
+    LOAD_ATSPI(event_listener_new);
+    LOAD_ATSPI(event_listener_register);
+    LOAD_ATSPI(event_listener_deregister);
+    LOAD_ATSPI(event_get_type);
+    LOAD_ATSPI(accessible_get_attributes);
+    LOAD_ATSPI(accessible_clear_cache);
     LOAD_ATSPI(accessible_get_child_count);
     LOAD_ATSPI(accessible_get_child_at_index);
     LOAD_ATSPI(accessible_get_name);
@@ -284,9 +299,21 @@ static void scu_atspi_close(void)
         g_ptr_array_set_size(windows, 0);
     }
     if (atspi_initialized) {
+        if (atspi_listener) {
+            atspi.event_listener_deregister(atspi_listener, atspi_event, NULL);
+            g_clear_object(&atspi_listener);
+        }
         atspi.exit();
         atspi_initialized = FALSE;
     }
+}
+
+/* Registering a consumer lets the host launcher enable accessibility. Events
+ * also keep libatspi's cache current; snapshots remain the observation oracle. */
+static void atspi_changed(AtspiEvent *event, void *unused)
+{
+    (void)unused;
+    g_boxed_free(atspi.event_get_type(), event);
 }
 
 static gboolean ensure_atspi(void)
@@ -326,6 +353,15 @@ static gboolean ensure_atspi(void)
         return FALSE;
     }
     atspi_initialized = TRUE;
+    atspi_listener = atspi.event_listener_new(atspi_changed, NULL, NULL);
+    if (!atspi_listener ||
+        !atspi.event_listener_register(atspi_listener, atspi_event, &error) || error) {
+        scu_fail("accessibility_unavailable", error ? error->message :
+            "Could not register the host accessibility consumer.");
+        g_clear_error(&error);
+        scu_atspi_close();
+        return FALSE;
+    }
     if (!windows) {
         windows = g_ptr_array_new_with_free_func(free_window);
     }
@@ -632,6 +668,40 @@ static void append_accessible(
     }
 }
 
+/* Chromium enables its full tree when a consumer requests frame attributes.
+ * Do this through the standard toolkit API, then allow asynchronous children
+ * to arrive. A reported child count alone can describe null placeholders. */
+static gboolean prepare_accessible_window(AtspiAccessible *window)
+{
+    atspi.accessible_clear_cache(window);
+    GError *error = NULL;
+    GHashTable *attributes = atspi.accessible_get_attributes(window, &error);
+    gboolean supported = attributes != NULL && error == NULL;
+    if (attributes) g_hash_table_unref(attributes);
+    g_clear_error(&error);
+    if (!supported) return scu_tick();
+
+    gint64 until = g_get_monotonic_time() + 2 * G_USEC_PER_SEC;
+    if (scu.deadline) until = MIN(until, scu.deadline);
+    do {
+        if (!scu_tick()) return FALSE;
+        atspi.accessible_clear_cache(window);
+        gint count = MIN(atspi.accessible_get_child_count(window, NULL), 128);
+        for (gint i = 0; i < count && g_get_monotonic_time() < until; i++) {
+            if (!scu_tick()) return FALSE;
+            AtspiAccessible *child = atspi.accessible_get_child_at_index(window, i, NULL);
+            if (child) {
+                g_object_unref(child);
+                return TRUE;
+            }
+        }
+        gint64 remaining = until - g_get_monotonic_time();
+        if (remaining <= 0) break;
+        if (!scu_pause((unsigned)MIN(50, (remaining + 999) / 1000))) return FALSE;
+    } while (g_get_monotonic_time() < until);
+    return scu_tick();
+}
+
 /* Snapshot IDs distinguish row indices from different reads. Never resolve a
  * stale token by label: a similarly named control may have a different effect. */
 static JsonResult *read_window_state(JsonValue *args)
@@ -653,6 +723,7 @@ static JsonResult *read_window_state(JsonValue *args)
             "Window is absent or belongs to a different process. Call status "
             "again.");
     }
+    if (!prepare_accessible_window(w->accessible)) return NULL;
     GHashTableIter it;
     gpointer v;
     g_hash_table_iter_init(&it, elements);
@@ -1164,15 +1235,63 @@ static JsonResult *atspi_worker_call(const char *tool, JsonValue *args)
     return result;
 }
 
+typedef struct {
+    GString *input;
+    GQueue lines;
+    guint source;
+    gboolean closed;
+} AtspiInput;
+
+/* Nested libatspi calls dispatch this context too. Only frame requests here;
+ * the outer worker loop alone executes them. The parent sends one at a time. */
+static gboolean atspi_read_input(gint fd, GIOCondition condition, gpointer data)
+{
+    AtspiInput *input = data;
+    char buffer[8192];
+    for (guint turn = 0; turn < 16; turn++) {
+        ssize_t count = read(fd, buffer, sizeof(buffer));
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0 && errno == EAGAIN) break;
+        if (count <= 0) { input->closed = TRUE; break; }
+        for (ssize_t i = 0; i < count; i++) {
+            if (buffer[i] == '\n') {
+                if (g_queue_get_length(&input->lines) >= 4) {
+                    input->closed = TRUE;
+                    break;
+                }
+                g_queue_push_tail(&input->lines, g_strdup(input->input->str));
+                g_string_truncate(input->input, 0);
+            } else if (input->input->len < 2u * 1024u * 1024u) {
+                g_string_append_c(input->input, buffer[i]);
+            } else {
+                input->closed = TRUE;
+                break;
+            }
+        }
+        if (input->closed) break;
+    }
+    if (condition & (G_IO_ERR | G_IO_NVAL)) input->closed = TRUE;
+    if (!input->closed) return G_SOURCE_CONTINUE;
+    input->source = 0;
+    return G_SOURCE_REMOVE;
+}
+
 static int run_atspi_worker(guint base)
 {
     inside_atspi_worker = TRUE;
     next_window = snapshot = base;
     signal(SIGPIPE, SIG_IGN);
-    char *line = NULL;
-    size_t capacity = 0;
-    while (getline(&line, &capacity, stdin) > 0) {
+    AtspiInput input = {.input = g_string_new(NULL), .lines = G_QUEUE_INIT};
+    fcntl(STDIN_FILENO, F_SETFL, fcntl(STDIN_FILENO, F_GETFL) | O_NONBLOCK);
+    input.source = g_unix_fd_add(STDIN_FILENO, G_IO_IN | G_IO_HUP | G_IO_ERR,
+        atspi_read_input, &input);
+    for (;;) {
+        while (g_queue_is_empty(&input.lines) && !input.closed)
+            g_main_context_iteration(NULL, TRUE);
+        char *line = g_queue_pop_head(&input.lines);
+        if (!line) break;
         yyjson_doc *document = yyjson_read(line, strlen(line), 0);
+        g_free(line);
         JsonValue *request = document != NULL ? yyjson_doc_get_root(document) : NULL;
         const char *tool = json_string(request, "tool");
         if (tool == NULL) {
@@ -1209,7 +1328,9 @@ static int run_atspi_worker(guint base)
             break;
         }
     }
-    free(line);
+    if (input.source) g_source_remove(input.source);
+    g_queue_clear_full(&input.lines, g_free);
+    g_string_free(input.input, TRUE);
     scu_atspi_close();
     return 0;
 }

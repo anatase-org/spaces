@@ -960,3 +960,80 @@ with `MainPID=0`, SELinux enforcing and no recent AVC matches. Owned fixtures
 were removed. The PNGs, fixture JSON, output snapshots and timestamped events
 remain in the artifact directories; the AVC query is recorded in
 `.build/scu-win5-demand-avc.log`.
+
+### Browser accessibility activation
+
+SCU actively registers one `object:children-changed` consumer in its shared
+AT-SPI helper on the first accessibility operation. Preparing a dormant socket,
+MCP initialization and schema discovery do not register a consumer. Active
+clients share the registration; revoking one Space retains it while another
+client remains. The helper is discarded when the last client disconnects, and
+the common host retains its existing two-second idle grace period. This differs
+from passive accessibility-tier bus forwarding described above: on AT-SPI 2.62,
+consumer registration lets the host bus launcher activate `IsEnabled`. SCU does
+not directly write that property or GSettings.
+
+Before a window snapshot, SCU requests the selected frame's attributes through
+the standard AT-SPI API. Chromium uses this query as a signal to enable its full
+tree. SCU dispatches events and refreshes the frame cache for up to two seconds
+if no readable children exist, including nonzero counts with null child objects.
+Unsupported attribute queries are nonfatal. Snapshot tokens are allocated after
+preparation, and normal cancellation, window matching and geometry checks apply.
+
+The private-bus tests cover consumer reuse, idle event dispatch, explicit
+deregistration on helper EOF, owner-disconnect cleanup, independent Space
+revocation, helper reactivation, initialization recovery, delayed children,
+unsupported attributes, empty frames and cancellation during preparation:
+
+```sh
+PYTHONPATH=src venv/bin/python -m unittest \
+  tests.test_scu tests.test_computer_integration tests.test_launch tests.test_native_abi -v
+make -C native check-guest-abi
+```
+
+Run the live browser diagnostic with an active graphical desktop and the
+Fedora Space configured for computer use. It starts two isolated browser
+profiles, one before and one after consumer activation, and records full SCU
+observations plus independent host activation/registry/service state. It never
+uses `ACCESSIBILITY_ENABLED` or force-renderer flags, and removes only its own
+browser instances and profiles. The initial state must show no other active
+SCU client to establish cold activation and last-client cleanup.
+
+```sh
+./sync.sh win5
+venv/bin/python tests/manual_scu_browser_probe.py \
+  --artifacts .build/scu-win5-browser-baseline
+```
+
+If automatic activation fails, compare the same launch with temporary access
+to the session-bus activation service. This argument affects only the test
+launches; it does not install a Flatpak override:
+
+```sh
+venv/bin/python tests/manual_scu_browser_probe.py --talk-a11y \
+  --artifacts .build/scu-win5-browser-permission
+```
+
+Live validation on 2026-11-01, win5/win5f, SELinux enforcing: ordinary sync
+deployed the SCU changes without deploying SELinux policy. Consumer registration
+changed `IsEnabled` from false to true. With the existing browser declaration,
+the dedicated AT-SPI bus and `GetRegisteredEvents` worked, but the sandbox's
+`toolkit-accessibility` remained false and its session-bus `IsEnabled` query
+returned `ServiceUnknown`. Neither browser launch exposed a tree. Those results
+are recorded in `.build/scu-win5-browser-activation`.
+
+Adding only the temporary `--talk-name=org.a11y.Bus` permission restored the
+activation query. The browser launched after SCU activation exposed 202 elements,
+including the synthetic page's heading, button and input. The browser launched
+while activation was false remained unavailable: restart that browser while a
+SCU consumer is active. A second client retained the same registration and page
+tree after the first disconnected. Closing the last client removed the
+registration and stopped the host; a fresh client started another host and read
+the same page controls. Final checks showed `IsEnabled=false`, no registered
+events and `MainPID=0`. The reproducible probe passed again with artifacts in
+`.build/scu-win5-browser-final`; audit checks found no recent AVC denials.
+
+This comparison justifies adding `--talk-name=org.a11y.Bus` to Anatase Browser's
+Flatpak declaration. The declaration must be rebuilt/deployed to ship that
+permission; live validation used its equivalent temporary launch argument.
+Browser semantic text replacement is not covered by this change.

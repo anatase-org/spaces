@@ -69,7 +69,7 @@ XML = """<node>
 </interface>
 <interface name='org.a11y.atspi.Registry'>
  <method name='RegisterEvent'><arg type='s' direction='in'/><arg type='as' direction='in'/><arg type='s' direction='in'/></method>
- <method name='DeregisterEvent'><arg type='s' direction='in'/></method>
+ <method name='DeregisterEvent'><arg type='s' direction='in'/><arg type='s' direction='in'/></method>
  <method name='GetRegisteredEvents'><arg type='a(ss)' direction='out'/></method>
 </interface>
 </node>"""
@@ -88,7 +88,15 @@ def main():
                       GLib.Variant("(su)", ("org.a11y.atspi.Registry", 0)),
                       None, Gio.DBusCallFlags.NONE, 3000, None)
     node = Gio.DBusNodeInfo.new_for_xml(XML)
-    state = {"clicks": 0, "action_times": [], "text": "", "password_reads": 0}
+    state = {"clicks": 0, "action_times": [], "text": "", "password_reads": 0,
+             "registrations": 0, "deregistrations": 0, "listeners": {},
+             "attribute_queries": 0, "idle_pings": 0, "events": 0}
+    activation = next((int(arg.split("=", 1)[1]) for arg in sys.argv[3:]
+                       if arg.startswith("--activation-delay=")), None)
+    exposed = activation is None
+    activation_pending = False
+    empty = "--empty-window" in sys.argv[3:]
+    unsupported = "--unsupported-attributes" in sys.argv[3:]
     selected_fixture = "--selection" in sys.argv[3:] or "--selection-unstable" in sys.argv[3:]
     unstable_selection = "--selection-unstable" in sys.argv[3:]
     selection_queries = 0
@@ -97,11 +105,54 @@ def main():
 
     def save():
         from pathlib import Path
-        Path(state_path).write_text(json.dumps(state))
+        path = Path(state_path)
+        temporary = path.with_suffix(".next")
+        temporary.write_text(json.dumps(state))
+        temporary.replace(path)
+
+    def owner_changed(connection, sender, path, interface, signal, parameters, unused):
+        name, old, new = parameters.unpack()
+        if old and not new and name in state["listeners"]:
+            del state["listeners"][name]
+            save()
+
+    registry.signal_subscribe("org.freedesktop.DBus", "org.freedesktop.DBus",
+                              "NameOwnerChanged", "/org/freedesktop/DBus", None,
+                              Gio.DBusSignalFlags.NONE, owner_changed, None)
+
+    def emit_children():
+        state["events"] += 1
+        app.emit_signal(None, WINDOW, "org.a11y.atspi.Event.Object", "ChildrenChanged",
+                        GLib.Variant("(siiv(so))", ("add", 0, 0,
+                            GLib.Variant("(so)", (app.get_unique_name(), BUTTON)),
+                            (app.get_unique_name(), ROOT))))
+        save()
+
+    def activate():
+        nonlocal exposed
+        exposed = True
+        emit_children()
+        return GLib.SOURCE_REMOVE
+
+    def idle_probe(sender):
+        emit_children()
+        def finished(connection, result, unused):
+            try:
+                connection.call_finish(result)
+            except GLib.Error:
+                return
+            state["idle_pings"] += 1
+            save()
+        registry.call(sender, "/", "org.freedesktop.DBus.Peer", "Ping", None,
+                      None, Gio.DBusCallFlags.NONE, 1500, None, finished, None)
+        return GLib.SOURCE_REMOVE
 
     def children(connection, path):
         if connection == registry:
             return [(app.get_unique_name(), ROOT)]
+        if path == WINDOW and (not exposed or empty):
+            # Chromium can advertise a child while it still returns null.
+            return [("", "/org/a11y/atspi/null")] if not empty else []
         return {ROOT: [(app.get_unique_name(), path) for path in window_paths],
                 WINDOW: [(app.get_unique_name(), p) for p in (BUTTON, ENTRY, PASSWORD)]}.get(path, [])
 
@@ -118,7 +169,7 @@ def main():
         return values
 
     def method(connection, sender, path, interface, name, parameters, invocation):
-        nonlocal selection_queries
+        nonlocal selection_queries, activation_pending
         args = parameters.unpack()
         if name == "GetExtents":
             # Deliberately wrong SCREEN values expose any accidental raw-coordinate leak.
@@ -149,7 +200,16 @@ def main():
             reply = GLib.Variant("(au)", ([bits & 0xffffffff, bits >> 32],))
         elif name == "GetApplication":
             reply = GLib.Variant("((so))", ((app.get_unique_name(), ROOT),))
-        elif name == "GetAttributes": reply = GLib.Variant("(a{ss})", ({},))
+        elif name == "GetAttributes":
+            if unsupported:
+                invocation.return_dbus_error("org.freedesktop.DBus.Error.UnknownMethod", name)
+                return
+            state["attribute_queries"] += 1
+            save()
+            if path == WINDOW and activation is not None and not activation_pending:
+                activation_pending = True
+                GLib.timeout_add(activation, activate)
+            reply = GLib.Variant("(a{ss})", ({},))
         elif name == "GetIndexInParent": reply = GLib.Variant("(i)", (0,))
         elif name == "GetLocale": reply = GLib.Variant("(s)", ("en_US.UTF-8",))
         elif name == "GetApplicationBusAddress": reply = GLib.Variant("(s)", ("",))
@@ -187,8 +247,22 @@ def main():
             state["selection_restores"] += 1
             save()
             reply = GLib.Variant("(b)", (True,))
-        elif name == "GetRegisteredEvents": reply = GLib.Variant("(a(ss))", ([],))
-        elif name in ("RegisterEvent", "DeregisterEvent"): reply = GLib.Variant("()", ())
+        elif name == "GetRegisteredEvents":
+            reply = GLib.Variant("(a(ss))", ([(owner, event) for owner, events
+                in state["listeners"].items() for event in events],))
+        elif name == "RegisterEvent":
+            state["registrations"] += 1
+            state["listeners"].setdefault(sender, []).append(args[0])
+            save()
+            GLib.timeout_add(400, idle_probe, sender)
+            reply = GLib.Variant("()", ())
+        elif name == "DeregisterEvent":
+            state["deregistrations"] += 1
+            events = state["listeners"].get(sender, [])
+            if args[0] in events: events.remove(args[0])
+            if not events: state["listeners"].pop(sender, None)
+            save()
+            reply = GLib.Variant("()", ())
         else:
             invocation.return_dbus_error("org.freedesktop.DBus.Error.UnknownMethod", name)
             return
@@ -212,6 +286,9 @@ def main():
         for path in paths:
             for info in node.interfaces:
                 connection.register_object(path, info, method, property_get, None)
+    if "--registry-unavailable" not in sys.argv[3:]:
+        registry.register_object("/org/a11y/atspi/registry",
+            node.lookup_interface("org.a11y.atspi.Registry"), method, None, None)
     save()
     print("ready", flush=True)
     GLib.MainLoop().run()

@@ -160,7 +160,8 @@ class ScuTests(unittest.TestCase):
         temporary.write_text(json.dumps(self.config))
         temporary.replace(self.control)
 
-    def start_accessibility(self, two_windows=False, duplicates=False, selection=False, unstable=False, unavailable=False):
+    def start_accessibility(self, two_windows=False, duplicates=False, selection=False, unstable=False,
+                            unavailable=False, activation=None, unsupported=False, empty=False):
         self.atspi_bus, address = self.bus(self.socket_path)
         self.atspi_state = self.directory / "atspi-state.json"
         command = ["/usr/bin/python3", str(ROOT / "tests/scu_atspi_fixture.py"), address, str(self.atspi_state)]
@@ -174,6 +175,12 @@ class ScuTests(unittest.TestCase):
             command.append("--selection-unstable")
         if unavailable:
             command.append("--registry-unavailable")
+        if activation is not None:
+            command.append(f"--activation-delay={activation}")
+        if unsupported:
+            command.append("--unsupported-attributes")
+        if empty:
+            command.append("--empty-window")
         self.atspi = self.child(command)
         self.ready(self.atspi)
         self.configure(app_pid=self.atspi.pid, two_windows=two_windows, atspi_address=address)
@@ -300,9 +307,13 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
             response += peer.recv(65536)
         self.assertFalse(json.loads(response)["result"]["isError"])
         self.assertEqual(json.loads(self.state.read_text())["connections"], 1)
+        atspi = json.loads(self.atspi_state.read_text())
+        self.assertEqual(atspi["registrations"], 1)
+        self.assertEqual(len(atspi["listeners"]), 1)
         other.sendall(b"R")
         self.assertTrue(json.loads(other.recv(8192))["released"])
         self.host.wait(timeout=5)
+        self.wait_until(lambda: not json.loads(self.atspi_state.read_text())["listeners"])
 
     def test_shared_unlock_is_visual_only_and_accessibility_stays_locked(self):
         self.start_shared()
@@ -449,15 +460,18 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
                 self.assertTrue(lease.alive())
                 receive(connection)
             self.assertEqual(len(starts), 1, "each Space started its own host")
+            self.assertEqual(json.loads(self.atspi_state.read_text())["registrations"], 1)
             peers[0].close()
             self.wait_until(lambda: bool(select.select([leases[0].control], [], [], 0)[0]))
             self.assertTrue(leases[0].alive())
             self.assertIsNone(leases[0].control)
             self.assertIsNone(self.host.poll(), "an idle Space stopped another Space's client")
+            self.assertEqual(len(json.loads(self.atspi_state.read_text())["listeners"]), 1)
             peers[1].sendall(request)
             receive(peers[1])
             peers[1].close()
             self.host.wait(timeout=5)
+            self.wait_until(lambda: not json.loads(self.atspi_state.read_text())["listeners"])
             self.assertTrue(leases[1].alive())
             self.assertIsNone(leases[1].control)
             self.assertEqual(leases[0].socket_path.stat().st_ino, identity)
@@ -466,6 +480,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
             self.assertTrue(leases[0].alive())
             receive(fresh)
             self.assertEqual(len(starts), 2)
+            self.assertEqual(json.loads(self.atspi_state.read_text())["registrations"], 2)
             self.assertEqual(leases[0].socket_path.stat().st_ino, identity)
             leases[0].close()
             self.assertEqual(fresh.recv(1), b"", "revocation left a live client")
@@ -583,6 +598,94 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.status(second)
         self.assertEqual(json.loads(self.state.read_text())["connections"], 1)
         self.assertIsNone(self.host.poll())
+
+    def test_accessibility_consumer_has_shared_client_lifetime_and_dispatches_idle(self):
+        self.start_host()
+        first, second = self.client(), self.client()
+        state = lambda: json.loads(self.atspi_state.read_text())
+        self.assertEqual(state()["registrations"], 0, "schema discovery activated accessibility")
+        self.status(first)
+        self.status(second)
+        self.assertEqual(state()["registrations"], 1)
+        self.assertEqual(list(state()["listeners"].values()), [["object:children-changed"]])
+        # The fixture sends an event and a Peer.Ping while no request is running.
+        self.wait_until(lambda: state()["idle_pings"] == 1)
+        self.assertEqual(state()["events"], 1)
+        first.close()
+        self.status(second)
+        self.assertEqual(state()["registrations"], 1)
+        second.close()
+        self.wait_until(lambda: not state()["listeners"])
+        self.assertIsNone(self.host.poll(), "the test service should still accept clients")
+        third = self.client()
+        self.status(third)
+        self.assertEqual(state()["registrations"], 2)
+
+    def test_frame_attributes_activate_delayed_null_placeholder_children(self):
+        self.start_accessibility(activation=250)
+        self.start_host()
+        client = self.client()
+        started = time.monotonic()
+        tree = self.snapshot(client)
+        self.assertIn("Fixture button", [row["label"] for row in tree["elements"]])
+        self.assertLess(time.monotonic() - started, 3)
+        state = json.loads(self.atspi_state.read_text())
+        self.assertEqual(state["attribute_queries"], 1)
+        previous = tree["snapshot_id"]
+        self.assertNotEqual(self.snapshot(client)["snapshot_id"], previous)
+        self.assertEqual(json.loads(self.atspi_state.read_text())["attribute_queries"], 2)
+
+    def test_unsupported_frame_attributes_preserve_existing_tree(self):
+        self.start_accessibility(unsupported=True)
+        self.start_host()
+        started = time.monotonic()
+        tree = self.snapshot(self.client())
+        self.assertIn("Fixture button", [row["label"] for row in tree["elements"]])
+        self.assertLess(time.monotonic() - started, 1.5)
+
+    def test_empty_accessible_frame_has_bounded_preparation(self):
+        self.start_accessibility(empty=True)
+        self.start_host()
+        client = self.client()
+        self.status(client)
+        started = time.monotonic()
+        tree = self.snapshot(client)
+        self.assertEqual(len(tree["elements"]), 1)
+        self.assertGreaterEqual(time.monotonic() - started, 1.9)
+        self.assertLess(time.monotonic() - started, 3)
+
+    def test_frame_preparation_cancellation_retires_helper_and_recovers(self):
+        self.start_accessibility(activation=1500)
+        self.start_host()
+        client = self.client()
+        window = client.windows()[0]
+        client.serial += 1
+        client.process.stdin.write(json.dumps({"jsonrpc": "2.0", "id": client.serial,
+            "method": "tools/call", "params": {"name": "computer", "arguments": {
+                "observe": {"kind": "window", "pid": window["pid"],
+                            "window_id": window["window_id"], "tree_format": "elements"}}}}) + "\n")
+        client.process.stdin.flush()
+        self.wait_until(lambda: json.loads(self.atspi_state.read_text())["attribute_queries"] > 0)
+        client.process.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/cancelled",
+            "params": {"requestId": client.serial}}) + "\n")
+        client.process.stdin.flush()
+        self.wait_until(lambda: not json.loads(self.atspi_state.read_text())["listeners"])
+        self.assertFalse(select.select([client.process.stdout], [], [], .1)[0])
+        self.status(client)
+        self.assertEqual(json.loads(self.atspi_state.read_text())["registrations"], 2)
+
+    def test_accessibility_worker_eof_deregisters_consumer(self):
+        self.start_host()
+        worker = self.child([str(self.host_binary), "--atspi-worker", "1"],
+            stdin=subprocess.PIPE, env={**self.environment, "DBUS_SESSION_BUS_ADDRESS": self.address})
+        worker.stdin.write(json.dumps({"tool": "check_ready", "args": {}}) + "\n")
+        worker.stdin.flush()
+        self.assertTrue(select.select([worker.stdout], [], [], 5)[0])
+        self.assertIn("output", json.loads(worker.stdout.readline()))
+        worker.stdin.close()
+        worker.wait(timeout=5)
+        self.wait_until(lambda: not json.loads(self.atspi_state.read_text())["listeners"])
+        self.assertEqual(json.loads(self.atspi_state.read_text())["deregistrations"], 1)
 
     def test_host_connection_limit_and_shutdown_close_clients(self):
         self.start_host()
@@ -1277,6 +1380,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertEqual((state["captures"], state["connections"]), (0, 0))
         self.start_accessibility()
         self.status(client)  # The same MCP connection recovers once prerequisites work.
+        self.assertEqual(json.loads(self.atspi_state.read_text())["registrations"], 1)
 
     def test_broken_registry_socket_is_not_a_successful_status(self):
         self.start_accessibility(unavailable=True)
