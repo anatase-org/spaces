@@ -972,7 +972,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
     def test_toolkit_actions_advertise_and_invoke_semantic_actions(self):
         self.start_host()
         client = self.client()
-        for name in ("click", "jump", "open", "doDefault", "press", "clickAncestor", "check", "toggle"):
+        for name in ("click", "jump", "open", "doDefault", "press", "clickAncestor", "check", "toggle", "select"):
             with self.subTest(name=name):
                 self.atspi_state.with_suffix(".actions.json").write_text(json.dumps(["scroll", "showContextMenu", name]))
                 row = next(row for row in self.snapshot(client)["elements"] if row["label"] == "Fixture button")

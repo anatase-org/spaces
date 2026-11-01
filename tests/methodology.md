@@ -1228,3 +1228,29 @@ confirmed after Ctrl+Tab. Run with:
 venv/bin/python tests/manual_scu_browser_probe.py \
   --artifacts .build/scu-semantic-actions-browser
 ```
+
+On 2026-11-01, normal isolated Chromium launches on win5/win5f passed semantic
+button, link and offscreen activation. `open_context_menu` revealed the page's
+menu, and `activate` selected its item with independent page-state confirmation.
+Chromium exposes that item's default action as `select`, which maps explicitly
+to `activate`. Pixel double-click triggered the page handler; pixel middle-click
+opened `about:blank` in a new tab, confirmed after Ctrl+Tab. Text editing, native
+and ARIA numeric controls, address-bar editing and client reconnection passed.
+Artifacts are in `.build/scu-semantic-actions-browser-verified`.
+
+An existing external client remained connected throughout the accepted run:
+one AT-SPI consumer and the same shared helper remained after the probe closed.
+This verifies retention and reconnection, not global last-client teardown or
+cold activation. The earlier cold run still showed the known lack of a tree
+in a browser launched before consumer activation. Temporary probe profiles were
+removed, the existing browser session was preserved, and SELinux stayed
+enforcing. An intermediate run lost SSH when the Fedora Space restarted; another
+stopped keyboard editing correctly when a concurrent rollout took foreground
+focus. Neither interruption was retried inside SCU.
+
+The 221-test SCU, computer-integration, launch and native ABI suite passed.
+After adding the observed `select` mapping, eight targeted regression checks
+and native ABI checks passed again, including schema order, preflight rejection,
+unsupported actions, stale tokens, offscreen activation, locked-desktop behavior
+and physical button/count delivery. Private fixtures also cover last-client
+cleanup and fresh socket activation.

@@ -672,7 +672,7 @@ static void limit_tree_output(JsonResult *tree)
 static gboolean accessible_activate_name(const char *name)
 {
     const char *names[] = {"click", "press", "activate", "toggle", "jump", "open",
-        "doDefault", "clickAncestor", "check", "uncheck", NULL};
+        "doDefault", "clickAncestor", "check", "uncheck", "select", NULL};
     for (guint i = 0; names[i]; i++)
         if (!g_ascii_strcasecmp(name, names[i])) return TRUE;
     return FALSE;
