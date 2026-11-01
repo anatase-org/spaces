@@ -208,12 +208,7 @@ static const Argument value_arguments[] = {
     {NULL},
 };
 static const Argument key_arguments[] = {
-    {.name = "key", .type = ARG_STRING},
-    {.name = "modifiers", .type = ARG_STRING_ARRAY, .maximum = 4},
-    {NULL},
-};
-static const Argument hotkey_arguments[] = {
-    {.name = "keys", .type = ARG_STRING_ARRAY, .minimum = 2, .maximum = 5},
+    {.name = "keys", .type = ARG_STRING_ARRAY, .minimum = 1, .maximum = 5},
     {NULL},
 };
 static const Argument delay_arguments[] = {
@@ -236,7 +231,6 @@ static const char *const require_drag[] = {"from_x", "from_y", "to_x", "to_y", N
 static const char *const require_scroll[] = {"x", "y", "direction", NULL};
 static const char *const require_text[] = {"text", NULL};
 static const char *const require_value[] = {"element_token", "value", NULL};
-static const char *const require_key[] = {"key", NULL};
 static const char *const require_keys[] = {"keys", NULL};
 static const char *const require_delay[] = {"ms", NULL};
 
@@ -279,17 +273,9 @@ static const Tool tools[] = {
 /* Actions are steps of computer, never standalone MCP tools. */
 static const Tool action_tools[] = {
     {.name = "click",
-        "Invoke an accessible element or click desktop image coordinates.",
+        "Invoke an accessible element or click desktop image coordinates. Use button:right for a context menu and count:2 for a pixel double click.",
         ARGS_ACTION | ARGS_POINT,
         click_arguments,
-        .action = TRUE},
-    {.name = "double_click",
-        "Double click on desktop coordinates.",
-        ARGS_ACTION | ARGS_POINT,
-        .action = TRUE},
-    {.name = "right_click",
-        "Right click desktop coordinates or invoke an accessible context-menu action.",
-        ARGS_ACTION | ARGS_POINT,
         .action = TRUE},
     {.name = "move_cursor",
         "Move the foreground pointer in desktop image coordinates.",
@@ -309,27 +295,21 @@ static const Tool action_tools[] = {
         require_scroll,
         TRUE},
     {.name = "type_text",
-        "Insert UTF-8 without submitting.",
+        "Insert text at the caret without pressing Enter.",
         ARGS_ACTION,
         text_arguments,
         require_text,
         TRUE},
     {.name = "set_value",
-        "Replace an accessible text/numeric value and check it with readback.",
+        "Replace a text field's contents or set a numeric control's value.",
         ARGS_ACTION,
         value_arguments,
         require_value,
         TRUE},
-    {.name = "press_key",
-        "Press/release one key in the foreground application with optional modifiers.",
+    {.name = "press_keys",
+        "Press keys in listed order and release in reverse; put modifiers first. Use keys:[meta] for a single key or keys:[ctrl,a] for a chord.",
         ARGS_ACTION,
         key_arguments,
-        require_key,
-        TRUE},
-    {.name = "hotkey",
-        "Press modifiers and one key in the foreground application.",
-        ARGS_ACTION,
-        hotkey_arguments,
         require_keys,
         TRUE},
     {.name = "delay_ms",
@@ -615,8 +595,7 @@ static gboolean validate_arguments(const Tool *t, JsonValue *args)
     }
     gboolean semantic = json_string(args, "element_token") != NULL;
     gboolean pointer =
-        strcmp(t->name, "click") == 0 || strcmp(t->name, "double_click") == 0 ||
-        strcmp(t->name, "right_click") == 0 || strcmp(t->name, "move_cursor") == 0 ||
+        strcmp(t->name, "click") == 0 || strcmp(t->name, "move_cursor") == 0 ||
         strcmp(t->name, "scroll") == 0;
     if (pointer && !semantic &&
         (json_member(args, "x") == NULL || json_member(args, "y") == NULL)) {

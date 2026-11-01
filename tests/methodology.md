@@ -598,9 +598,11 @@ The same numeric ID appears in canvas, desktop/zoom and tree observations.
 An explicit pixel-step `id` overrides the batch ID; omission uses the latest
 valid overview. Strings and the old `capture_id` spelling are rejected.
 Steps are ordered `{tool,args}` objects, at most 64. The supported actions are
-`click`, `double_click`,
-`right_click`, `move_cursor`, `drag`, `scroll`, `type_text`, `set_value`,
-`press_key`, `hotkey`, and `delay_ms`. Whole-batch validation precedes effects; execution
+`click`, `move_cursor`, `drag`, `scroll`, `type_text`, `set_value`,
+`press_keys`, and `delay_ms`. Use `click` with `button:"right"` or `count:2`,
+and `press_keys` with `keys:["ctrl","a"]` for chords. A standalone Meta key is
+`press_keys` with `keys:["meta"]`. Keys are pressed in listed order and released
+in reverse, so modifier keys come first. Whole-batch validation precedes effects; execution
 stops at the first runtime failure without replay. Responses report
 `status:"ok"` or `status:"failed"`, the `completed` step count, one failure and
 any material warnings.
@@ -632,7 +634,7 @@ They are fixed timers and do not check whether an application has finished.
 ```json
 {
   "steps": [
-    {"tool":"press_key","args":{"key":"Enter"}},
+    {"tool":"press_keys","args":{"keys":["Enter"]}},
     {"tool":"delay_ms","args":{"ms":1500}}
   ]
 }
@@ -661,6 +663,27 @@ invalidates its old tokens. A window without a unique PID/title/client-geometry
 association to an AT-SPI window returns an explicit accessibility-window error.
 Unsupported individual element rectangles are null; they never expose another
 coordinate system. Semantic token actions do not need pixel coordinates.
+
+Both tree formats expose canonical supported actions. Element rows include
+`actions`, `click_buttons` and `text_input` (`accessibility`, `keyboard`, or
+`unavailable`). Toolkit click names such as Chromium's `jump`, `open`,
+`doDefault` and `clickAncestor` all use `click`; unknown actions never fall back
+to an arbitrary action index. Hidden nodes do not consume the element budget,
+but their exposed descendants remain reachable through flattened ancestry.
+Traversal also has independent node and recursion bounds.
+
+`type_text` inserts and `set_value` replaces. Native EditableText remains the
+preferred route. For an editable non-password text control without EditableText,
+the same actions request focus, verify its AT-SPI focused state and the uniquely
+matched active KWin window, then send keyboard input. These checks repeat before
+each input chunk. Text is read back afterward; failure stops without replay.
+An already focused control keeps its caret and selection. Replacement skips
+Ctrl+A for an empty or fully selected value; otherwise it waits for the control
+to confirm full selection before sending text, since keyboard and EIS text can
+arrive through separate compositor paths.
+This route requires the normal unlocked visual/input session and reports a
+keyboard warning. It counts as foreground input for automatic observation.
+Numeric `set_value` continues using the AT-SPI Value interface.
 
 ### One coordinate system
 
@@ -1036,4 +1059,41 @@ events and `MainPID=0`. The reproducible probe passed again with artifacts in
 This comparison justifies adding `--talk-name=org.a11y.Bus` to Anatase Browser's
 Flatpak declaration. The declaration must be rebuilt/deployed to ship that
 permission; live validation used its equivalent temporary launch argument.
-Browser semantic text replacement is not covered by this change.
+That activation-only run did not exercise browser text replacement; the checks
+below cover the current text-input implementation.
+
+### Browser actions and keyboard input
+
+The same browser probe now also checks actions and text input. Run it without
+`--talk-a11y` against the updated Browser declaration:
+
+```sh
+venv/bin/python tests/manual_scu_browser_probe.py \
+  --artifacts .build/scu-win5-browser-accepted
+```
+
+Live validation on 2026-11-01 with Chromium 156.0.8078.73 on win5/win5f passed
+without accessibility environment overrides or force-renderer flags. The page
+exposed 43 elements after hidden-node filtering. `click` invoked both the button
+and link, with independent page text confirming each action. `set_value` changed
+the input from empty to `hello`, then `changed`; `type_text` inserted ` world`
+without discarding the existing value, and `set_value` cleared it. The address
+bar accepted `set_value` with `value:"about:blank"` without navigation, and
+`press_keys` with `keys:["Escape"]` discarded the edit. Every targeted keyboard
+edit confirmed its value through AT-SPI readback.
+
+The check also reproduced cold consumer activation, retention of one
+registration after the first client disconnected, immediate helper cleanup
+after the last client, and fresh registration after socket reactivation. The
+dedicated Flatpak AT-SPI bus returned registered events independently of the
+successful session-bus `IsEnabled` query; GSettings remained false. A browser
+launched before consumer activation still required restarting. Only owned
+temporary browser profiles were closed and removed. Final state was no
+registered consumers, `IsEnabled=false`, `MainPID=0`, and SELinux enforcing;
+the recent AVC audit query returned no matches.
+
+The final SCU, computer-integration, launch and native ABI suite passed all 189
+tests, and `make -C native check-guest-abi` passed. The private fixtures exercise
+canonical action mapping, single-key/chord input, text readback, full-selection
+confirmation, refusal to type without focus or an active window, stopping after
+focus loss, and preservation of visible descendants under hidden containers.

@@ -186,6 +186,9 @@ typedef struct {
     GPtrArray *clients;
     GHashTable *bound_seats;
     struct eis_client *keys_client, *buttons_client;
+    struct xkb_state *keyboard;
+    GString *text;
+    gboolean selected;
 } InputOracle;
 
 static void add_pointer(struct eis_seat *seat, const char *mapping, gint x, gint y)
@@ -223,9 +226,13 @@ static gpointer serve_input(gpointer pointer)
                 memcpy(CMSG_DATA(c),&fd,sizeof(fd));
                 assert(sendmsg(oracle->control,&message,0)==1);close(fd);
             } else if(command=='S') {
-                char *json=g_strdup_printf("{\"keys_down\":%d,\"buttons_down\":%d,\"keys\":%d,\"clicks\":%d,\"scrolls\":%d,\"motions\":%d,\"dragged_motions\":%d,\"x\":%d,\"y\":%d}",
+                yyjson_mut_doc *document=yyjson_mut_doc_new(NULL);
+                yyjson_mut_val *encoded=yyjson_mut_str(document,oracle->text->str);
+                char *text=yyjson_mut_val_write(encoded,0,NULL);
+                char *json=g_strdup_printf("{\"keys_down\":%d,\"buttons_down\":%d,\"keys\":%d,\"clicks\":%d,\"scrolls\":%d,\"motions\":%d,\"dragged_motions\":%d,\"x\":%d,\"y\":%d,\"text\":%s,\"selected\":%s}",
                     oracle->keys_down,oracle->buttons_down,oracle->keys,oracle->clicks,oracle->scrolls,
-                    oracle->motions,oracle->dragged_motions,oracle->x,oracle->y);
+                    oracle->motions,oracle->dragged_motions,oracle->x,oracle->y,text,oracle->selected?"true":"false");
+                free(text);yyjson_mut_doc_free(document);
                 assert(send(oracle->control,json,strlen(json),0)>0);g_free(json);
             } else if(command=='D') {
                 for(guint i=0;i<oracle->clients->len;i++)eis_client_disconnect(g_ptr_array_index(oracle->clients,i));
@@ -322,6 +329,22 @@ static gpointer serve_input(gpointer pointer)
                 eis_device_resume(eis_event_get_device(event));
             } else if (type == EIS_EVENT_KEYBOARD_KEY) {
                 gboolean down = eis_event_keyboard_get_key_is_press(event);
+                xkb_keycode_t code=eis_event_keyboard_get_key(event)+8;
+                xkb_keysym_t symbol=xkb_state_key_get_one_sym(oracle->keyboard,code);
+                gboolean control=xkb_state_mod_name_is_active(oracle->keyboard,XKB_MOD_NAME_CTRL,XKB_STATE_MODS_EFFECTIVE)>0;
+                if(down && control && symbol==XKB_KEY_a)oracle->selected=TRUE;
+                else if(down && !control) {
+                    char text[8]={0};
+                    int length=xkb_state_key_get_utf8(oracle->keyboard,code,text,sizeof(text));
+                    if(symbol==XKB_KEY_BackSpace || (length>0 && (guchar)text[0]>=32)) {
+                        if(oracle->selected)g_string_truncate(oracle->text,0);
+                        else if(symbol==XKB_KEY_BackSpace && oracle->text->len)
+                            g_string_truncate(oracle->text,g_utf8_prev_char(oracle->text->str+oracle->text->len)-oracle->text->str);
+                        if(symbol!=XKB_KEY_BackSpace)g_string_append(oracle->text,text);
+                        oracle->selected=FALSE;
+                    }
+                }
+                xkb_state_update_key(oracle->keyboard,code,down?XKB_KEY_DOWN:XKB_KEY_UP);
                 g_atomic_int_add(&oracle->keys_down, down ? 1 : -1);
                 if (down) {
                     oracle->keys_client = eis_device_get_client(eis_event_get_device(event));
@@ -360,6 +383,11 @@ static void free_oracle_client(gpointer pointer)
 static int run_eis_server(int fd)
 {
     InputOracle oracle={.server=eis_new(NULL),.control=fd};
+    struct xkb_context *context=xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+    struct xkb_rule_names names={.layout="us"};
+    struct xkb_keymap *map=xkb_keymap_new_from_names(context,&names,XKB_KEYMAP_COMPILE_NO_FLAGS);
+    oracle.keyboard=xkb_state_new(map);
+    oracle.text=g_string_new("");
     oracle.clients=g_ptr_array_new_with_free_func(free_oracle_client);
     oracle.bound_seats=g_hash_table_new(g_direct_hash,g_direct_equal);
     eis_set_flag(oracle.server,EIS_FLAG_DEVICE_READY);
@@ -369,6 +397,10 @@ static int run_eis_server(int fd)
     g_ptr_array_unref(oracle.clients);
     g_hash_table_unref(oracle.bound_seats);
     eis_unref(oracle.server);
+    g_string_free(oracle.text,TRUE);
+    xkb_state_unref(oracle.keyboard);
+    xkb_keymap_unref(map);
+    xkb_context_unref(context);
     return 0;
 }
 int main(int argc,char **argv)

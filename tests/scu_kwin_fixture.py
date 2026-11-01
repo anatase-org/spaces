@@ -94,7 +94,7 @@ def geometry():
         outputs[1]["geometry"]["x"] = -60
     windows = [{"key": "window-1", "pid": config.get("app_pid", 123), "app_name": "scu fixture",
                 "title": config.get("window_title", "scu test window"), "frame": {"x": 10, "y": 10, "width": 40, "height": 30},
-                "client": {"x": 10, "y": 10, "width": 40, "height": 30}, "shown": True, "active": True}]
+                "client": {"x": 10, "y": 10, "width": 40, "height": 30}, "shown": True, "active": config.get("active", True)}]
     if config.get("two_windows"):
         windows.append({**windows[0], "key": "window-2", "title": "scu second window",
                         "frame": {"x": 15, "y": 15, "width": 40, "height": 30},

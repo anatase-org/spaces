@@ -2,6 +2,7 @@
 
 import json
 import sys
+from pathlib import Path
 
 import gi
 
@@ -11,8 +12,8 @@ from types import SimpleNamespace
 
 # Stable AT-SPI wire enum values; no libatspi client is used by the server.
 Atspi = SimpleNamespace(
-    Role=SimpleNamespace(APPLICATION=75, FRAME=23, PUSH_BUTTON=43, ENTRY=79, PASSWORD_TEXT=40),
-    StateType=SimpleNamespace(ENABLED=8, FOCUSED=12, SENSITIVE=24, SHOWING=25, VISIBLE=30),
+    Role=SimpleNamespace(APPLICATION=75, FRAME=23, PUSH_BUTTON=43, ENTRY=79, PASSWORD_TEXT=40, PANEL=39),
+    StateType=SimpleNamespace(EDITABLE=7, ENABLED=8, FOCUSED=12, SENSITIVE=24, SHOWING=25, VISIBLE=30),
 )
 
 ROOT = "/org/a11y/atspi/accessible/root"
@@ -21,6 +22,7 @@ WINDOW_TWO = "/org/a11y/atspi/accessible/window2"
 BUTTON = "/org/a11y/atspi/accessible/button"
 ENTRY = "/org/a11y/atspi/accessible/entry"
 PASSWORD = "/org/a11y/atspi/accessible/password"
+PANEL = "/org/a11y/atspi/accessible/panel"
 XML = """<node>
 <interface name='org.a11y.atspi.Accessible'>
  <property name='Name' type='s' access='read'/>
@@ -47,6 +49,7 @@ XML = """<node>
 </interface>
 <interface name='org.a11y.atspi.Component'>
  <method name='GetExtents'><arg type='u' direction='in'/><arg type='(iiii)' direction='out'/></method>
+ <method name='GrabFocus'><arg type='b' direction='out'/></method>
 </interface>
 <interface name='org.a11y.atspi.Action'>
  <property name='NActions' type='i' access='read'/>
@@ -88,7 +91,7 @@ def main():
                       GLib.Variant("(su)", ("org.a11y.atspi.Registry", 0)),
                       None, Gio.DBusCallFlags.NONE, 3000, None)
     node = Gio.DBusNodeInfo.new_for_xml(XML)
-    state = {"clicks": 0, "action_times": [], "text": "", "password_reads": 0,
+    state = {"clicks": 0, "action_times": [], "text": "", "password_reads": 0, "focus_requests": 0,
              "registrations": 0, "deregistrations": 0, "listeners": {},
              "attribute_queries": 0, "idle_pings": 0, "events": 0}
     activation = next((int(arg.split("=", 1)[1]) for arg in sys.argv[3:]
@@ -97,6 +100,13 @@ def main():
     activation_pending = False
     empty = "--empty-window" in sys.argv[3:]
     unsupported = "--unsupported-attributes" in sys.argv[3:]
+    keyboard = "--keyboard-entry" in sys.argv[3:]
+    refuse_focus = "--refuse-focus" in sys.argv[3:]
+    lose_focus = "--lose-focus" in sys.argv[3:]
+    readonly = "--readonly-entry" in sys.argv[3:]
+    hidden = "--hidden-button" in sys.argv[3:]
+    hidden_container = "--hidden-container" in sys.argv[3:]
+    focused = False
     selected_fixture = "--selection" in sys.argv[3:] or "--selection-unstable" in sys.argv[3:]
     unstable_selection = "--selection-unstable" in sys.argv[3:]
     selection_queries = 0
@@ -104,11 +114,26 @@ def main():
         state.update(text="selected seed", selection_restores=0)
 
     def save():
-        from pathlib import Path
         path = Path(state_path)
         temporary = path.with_suffix(".next")
         temporary.write_text(json.dumps(state))
         temporary.replace(path)
+
+    def actions():
+        path = Path(state_path).with_suffix(".actions.json")
+        return json.loads(path.read_text()) if path.exists() else ["click"]
+
+    def text_value():
+        # Read the independent EIS receiver, never the requested edit contents.
+        if keyboard and not readonly:
+            path = Path(state_path).with_name("kwin-state.json")
+            if path.exists():
+                return json.loads(path.read_text()).get("input", {}).get("text", "")
+        return state["text"]
+
+    def text_selected():
+        path = Path(state_path).with_name("kwin-state.json")
+        return path.exists() and json.loads(path.read_text()).get("input", {}).get("selected", False)
 
     def owner_changed(connection, sender, path, interface, signal, parameters, unused):
         name, old, new = parameters.unpack()
@@ -153,6 +178,9 @@ def main():
         if path == WINDOW and (not exposed or empty):
             # Chromium can advertise a child while it still returns null.
             return [("", "/org/a11y/atspi/null")] if not empty else []
+        if hidden_container and path in (WINDOW, PANEL):
+            paths = (PANEL, ENTRY, PASSWORD) if path == WINDOW else (BUTTON,)
+            return [(app.get_unique_name(), path) for path in paths]
         return {ROOT: [(app.get_unique_name(), path) for path in window_paths],
                 WINDOW: [(app.get_unique_name(), p) for p in (BUTTON, ENTRY, PASSWORD)]}.get(path, [])
 
@@ -165,11 +193,13 @@ def main():
         if path == BUTTON:
             values += ["org.a11y.atspi.Action"]
         if path in (ENTRY, PASSWORD):
-            values += ["org.a11y.atspi.Text", "org.a11y.atspi.EditableText"]
+            values += ["org.a11y.atspi.Text"]
+            if not keyboard or path == PASSWORD:
+                values += ["org.a11y.atspi.EditableText"]
         return values
 
     def method(connection, sender, path, interface, name, parameters, invocation):
-        nonlocal selection_queries, activation_pending
+        nonlocal selection_queries, activation_pending, focused
         args = parameters.unpack()
         if name == "GetExtents":
             # Deliberately wrong SCREEN values expose any accidental raw-coordinate leak.
@@ -177,6 +207,11 @@ def main():
                          {WINDOW:(0,0,40,30),WINDOW_TWO:(0,0,40,30),
                           BUTTON:(5,5,10,5),ENTRY:(5,12,20,5),PASSWORD:(5,20,20,5)}.get(path,(0,0,40,30)))
             reply = GLib.Variant("((iiii))", (rectangle,))
+        elif name == "GrabFocus":
+            focused = not refuse_focus
+            state["focus_requests"] += 1
+            save()
+            reply = GLib.Variant("(b)", (True,))
         elif name == "GetChildren":
             reply = GLib.Variant("(a(so))", (children(connection, path),))
         elif name == "GetChildAtIndex":
@@ -187,15 +222,24 @@ def main():
         elif name == "GetRole":
             role = {ROOT: Atspi.Role.APPLICATION, WINDOW: Atspi.Role.FRAME, WINDOW_TWO: Atspi.Role.FRAME,
                     BUTTON: Atspi.Role.PUSH_BUTTON, ENTRY: Atspi.Role.ENTRY,
-                    PASSWORD: Atspi.Role.PASSWORD_TEXT}[path]
+                    PASSWORD: Atspi.Role.PASSWORD_TEXT, PANEL: Atspi.Role.PANEL}[path]
             reply = GLib.Variant("(u)", (int(role),))
         elif name in ("GetRoleName", "GetLocalizedRoleName"):
             reply = GLib.Variant("(s)", ({ROOT: "application", WINDOW: "frame", WINDOW_TWO: "frame",
-                    BUTTON: "push button", ENTRY: "entry", PASSWORD: "password text"}[path],))
+                    BUTTON: "push button", ENTRY: "entry", PASSWORD: "password text", PANEL: "panel"}[path],))
         elif name == "GetState":
             bits = sum(1 << int(s) for s in (Atspi.StateType.ENABLED, Atspi.StateType.SENSITIVE,
                                              Atspi.StateType.VISIBLE, Atspi.StateType.SHOWING))
-            if path == ENTRY and selected_fixture:
+            if (path == BUTTON and hidden) or path == PANEL:
+                bits &= ~((1 << Atspi.StateType.VISIBLE) | (1 << Atspi.StateType.SHOWING))
+            if path == ENTRY:
+                bits |= 1 << Atspi.StateType.EDITABLE
+            still_focused = focused
+            if lose_focus:
+                oracle = Path(state_path).with_name("kwin-state.json")
+                if oracle.exists() and json.loads(oracle.read_text()).get("input", {}).get("keys", 0):
+                    still_focused = False
+            if path == ENTRY and (selected_fixture or still_focused):
                 bits |= 1 << Atspi.StateType.FOCUSED
             reply = GLib.Variant("(au)", ([bits & 0xffffffff, bits >> 32],))
         elif name == "GetApplication":
@@ -213,10 +257,11 @@ def main():
         elif name == "GetIndexInParent": reply = GLib.Variant("(i)", (0,))
         elif name == "GetLocale": reply = GLib.Variant("(s)", ("en_US.UTF-8",))
         elif name == "GetApplicationBusAddress": reply = GLib.Variant("(s)", ("",))
-        elif name == "GetName": reply = GLib.Variant("(s)", ("click",))
-        elif name == "GetActions": reply = GLib.Variant("(a(sss))", ([("click", "activate", "")],))
+        elif name == "GetName": reply = GLib.Variant("(s)", (actions()[args[0]],))
+        elif name == "GetActions": reply = GLib.Variant("(a(sss))", ([(action, "", "") for action in actions()],))
         elif name == "DoAction":
             state["clicks"] += 1
+            state["last_action"] = actions()[args[0]]
             state["action_times"].append(GLib.get_monotonic_time() / 1_000_000)
             save()
             reply = GLib.Variant("(b)", (True,))
@@ -234,14 +279,17 @@ def main():
                 state["password_reads"] += 1
                 save()
             start, end = args
-            reply = GLib.Variant("(s)", (state["text"][start:None if end < 0 else end],))
+            reply = GLib.Variant("(s)", (text_value()[start:None if end < 0 else end],))
         elif name == "GetNSelections":
             selection_queries += 1
+            if keyboard:
+                invocation.return_value(GLib.Variant("(i)", (int(bool(text_value()) and text_selected()),)))
+                return
             # Simulate losing PRIMARY between saving and restoring selection.
             reply = GLib.Variant("(i)", (int(selected_fixture and (selection_queries == 1 or
                 (state["selection_restores"] > 0 and not unstable_selection))),))
         elif name == "GetSelection":
-            reply = GLib.Variant("(ii)", (0, len(state["text"])))
+            reply = GLib.Variant("(ii)", (0, len(text_value())))
         elif name in ("AddSelection", "SetSelection"):
             assert args[-2:] == (0, len(state["text"]))
             state["selection_restores"] += 1
@@ -271,16 +319,16 @@ def main():
     def property_get(connection, sender, path, interface, name):
         if name == "Name":
             return GLib.Variant("s", {ROOT: "scu fixture", WINDOW: "scu test window", WINDOW_TWO: "scu test window" if duplicate_windows else "scu second window",
-                BUTTON: "Fixture button", ENTRY: "Fixture entry", PASSWORD: "Fixture password"}[path])
+                BUTTON: "Fixture button", ENTRY: "Fixture entry", PASSWORD: "Fixture password", PANEL: "Hidden container"}[path])
         if name in ("Description", "ToolkitName", "Version"): return GLib.Variant("s", "fixture")
         if name == "ChildCount": return GLib.Variant("i", len(children(connection, path)))
         if name == "Parent": return GLib.Variant("(so)", (app.get_unique_name(), ROOT if path in window_paths else WINDOW))
-        if name == "NActions": return GLib.Variant("i", 1)
-        if name == "CharacterCount": return GLib.Variant("i", len(state["text"]))
-        if name == "CaretOffset": return GLib.Variant("i", len(state["text"]))
+        if name == "NActions": return GLib.Variant("i", len(actions()))
+        if name == "CharacterCount": return GLib.Variant("i", len(text_value()))
+        if name == "CaretOffset": return GLib.Variant("i", len(text_value()))
         if name == "Id": return GLib.Variant("i", 1)
 
-    for connection, paths in ((registry, [ROOT]), (app, [ROOT, *window_paths, BUTTON, ENTRY, PASSWORD])):
+    for connection, paths in ((registry, [ROOT]), (app, [ROOT, *window_paths, BUTTON, ENTRY, PASSWORD, PANEL])):
         if connection == registry and "--registry-unavailable" in sys.argv[3:]:
             continue  # Own the name, but expose no working registry object.
         for path in paths:

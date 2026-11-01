@@ -64,7 +64,10 @@ def main():
             "prefix='scu-browser-probe-',dir=os.path.expanduser('~/.var/app/org.anatase.Browser/cache')))")
         title = label + "-" + uuid.uuid4().hex[:8]
         page = (f"data:text/html,<title>{title}</title><h1>SCU browser probe</h1>"
-                '<button>Probe button</button><input aria-label="Probe field">')
+                '<button onclick="document.getElementById(\'result\').textContent=\'Button clicked\'">Probe button</button>'
+                '<input aria-label="Probe field">'
+                '<a href="about:blank" onclick="event.preventDefault();document.getElementById(\'result\').textContent=\'Link clicked\'">Probe link</a>'
+                '<p id="result">Ready</p>')
         log = (args.artifacts / f"{label}-browser.log").open("w")
         command = [*graphical, "flatpak", "run", *permission, "org.anatase.Browser",
                    "--user-data-dir=" + profile, "--ozone-platform=wayland", "--no-first-run",
@@ -87,6 +90,51 @@ def main():
                error=observation.get("accessibility_error"), complete=found == wanted)
         return found == wanted
 
+    def exercise(probe, title):
+        status = probe.tool("status")
+        target = next({"pid": app["pid"], "window_id": window["window_id"]}
+                      for app in status["apps"] for window in app["windows"] if title in window["title"])
+
+        def snapshot():
+            return probe.tool("computer", observe={"kind": "window", **target,
+                "tree_format": "both", "max_elements": 1000, "max_depth": 24})["observation"]
+
+        for label, text in (("Probe button", "Button clicked"), ("Probe link", "Link clicked")):
+            tree = snapshot()
+            row = next(row for row in tree["elements"] if row["label"] == label)
+            result = probe.tool("computer", steps=[{"tool": "click", "args": {"element_token": row["element_token"]}}],
+                observe={"kind": "window", **target, "tree_format": "both", "max_elements": 1000, "max_depth": 24})
+            assert result["status"] == "ok", result
+            assert text in result["observation"]["tree_markdown"], result
+            record("click", target=label, actions=row["actions"], status=result["status"])
+
+        for tool, field, text, expected in (("set_value", "value", "hello", "hello"),
+                                             ("set_value", "value", "changed", "changed"),
+                                             ("type_text", "text", " world", "changed world"),
+                                             ("set_value", "value", "", "")):
+            tree = snapshot()
+            row = next(row for row in tree["elements"] if row["label"] == "Probe field")
+            result = probe.tool("computer", steps=[{"tool": tool, "args": {
+                "element_token": row["element_token"], field: text}}],
+                observe={"kind": "window", **target, "tree_format": "both", "max_elements": 1000, "max_depth": 24})
+            assert result["status"] == "ok", result
+            actual = next(row for row in result["observation"]["elements"] if row["label"] == "Probe field")
+            assert actual.get("value", "") == expected, actual
+            record("text", tool=tool, route=row["text_input"], value=actual.get("value"), warnings=result.get("warnings"))
+
+        tree = snapshot()
+        row = next(row for row in tree["elements"] if row["label"] == "Address and search bar")
+        result = probe.tool("computer", steps=[{"tool": "set_value", "args": {
+            "element_token": row["element_token"], "value": "about:blank"}}],
+            observe={"kind": "window", **target, "tree_format": "both", "max_elements": 1000, "max_depth": 24})
+        assert result["status"] == "ok", result
+        address = next(row for row in result["observation"]["elements"] if row["label"] == "Address and search bar")
+        assert address.get("value") == "about:blank", address
+        # Discard the address edit in our isolated profile without navigating.
+        dismissed = probe.tool("computer", steps=[{"tool": "press_keys", "args": {"keys": ["Escape"]}}])
+        assert dismissed["status"] == "ok", dismissed
+        record("address-bar", tool="set_value", route=row["text_input"], value=address["value"], dismissed=True)
+
     # Kill only instances using our unique profile, including Flatpak sub-sandboxes.
     cleanup = """import subprocess,sys,shutil
 profile=sys.argv[1]
@@ -108,6 +156,8 @@ shutil.rmtree(profile,ignore_errors=True)
         observe(first, before, "browser-started-before-activation")
         after = launch("after")
         complete = observe(first, after, "browser-started-after-activation")
+        if complete:
+            exercise(first, after)
         diagnostics = ('gsettings get org.gnome.desktop.interface toolkit-accessibility; '
             'gdbus call --address "$AT_SPI_BUS_ADDRESS" --dest org.a11y.atspi.Registry '
             '--object-path /org/a11y/atspi/registry --method org.a11y.atspi.Registry.GetRegisteredEvents; '

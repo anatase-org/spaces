@@ -89,10 +89,10 @@ def main():
                     {"tool": "set_value", "args": {"element_token": rows["Spaces fixture entry"]["element_token"], "value": ""}},
                     {"tool": "click", "args": {"id": image["id"], "x": x, "y": y}},
                     {"tool": "type_text", "args": {"text": "replace me"}},
-                    {"tool": "hotkey", "args": {"keys": ["ctrl", "a"]}},
+                    {"tool": "press_keys", "args": {"keys": ["ctrl", "a"]}},
                     {"tool": "type_text", "args": {"text": "Visual "}},
                     {"tool": "type_text", "args": {"text": "Unicode 世界 " + args.token}},
-                    {"tool": "press_key", "args": {"key": "End"}},
+                    {"tool": "press_keys", "args": {"keys": ["End"]}},
                     {"tool": "type_text", "args": {"text": "!"}},
                 ])
                 # Automatic overview replaces the global pixel capture. Request
