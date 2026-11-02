@@ -240,8 +240,6 @@ static const char scu_text_canvas_memory_limit[] =
     "Canvas exceeds the image memory limits.";
 static const char scu_text_capture_geometry_changed[] =
     "KWin geometry changed during capture. Request a new overview.";
-static const char scu_text_library_functions_missing[] =
-    "The installed computer-use libraries are missing required functions. Update the host libraries.";
 static const char scu_text_status_geometry_changed[] =
     "Desktop geometry changed during status. Take a new full overview.";
 

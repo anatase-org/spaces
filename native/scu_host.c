@@ -59,7 +59,7 @@ static gboolean verify_target_input(void);
 static JsonResult *type_target_value(const char *tool, JsonValue *args, gboolean numeric);
 static JsonValue *target_input_arguments, *target_input_window;
 
-static const char *libs[] = {"libatspi.so.0", "libei.so.1",
+static const char *visual_libs[] = {"libei.so.1",
     "libxkbcommon.so.0", "libgdk_pixbuf-2.0.so.0", NULL};
 static GDBusConnection *session_bus;
 static void disconnect_input(void);
@@ -2576,9 +2576,9 @@ static gboolean ensure_visual_session(void)
     if (visual.input) {
         return TRUE;
     }
-    for (guint i = 1; libs[i]; i++) {
-        if (!scu_library(libs[i])) {
-            char *hint = g_strdup_printf(scu_text_library_missing, libs[i]);
+    for (guint i = 0; visual_libs[i]; i++) {
+        if (!scu_library(visual_libs[i])) {
+            char *hint = g_strdup_printf(scu_text_library_missing, visual_libs[i]);
             scu_fail("missing_dependency", hint);
             g_free(hint);
             return FALSE;
@@ -3089,31 +3089,9 @@ static JsonResult *kwin_apps(void)
     return apps;
 }
 
-/* Validate both adapters before capturing or starting a batch. Discovery of
- * MCP schemas remains available, but there is no reduced-functionality mode. */
-static gboolean require_computer_ready(void)
-{
-    if (!require_computer_access()) {
-        return FALSE;
-    }
-    for (guint i = 0; libs[i]; i++) {
-        if (!scu_library(libs[i])) {
-            char *hint = g_strdup_printf(scu_text_library_missing, libs[i]);
-            scu_fail("missing_dependency", hint);
-            g_free(hint);
-            return FALSE;
-        }
-    }
-    if (!load_atspi() || !load_visual_libraries()) {
-        scu_fail("missing_dependency", scu_text_library_functions_missing);
-        return FALSE;
-    }
-    return atspi_worker_call("check_ready", NULL) != NULL;
-}
-
 static JsonResult *kwin_status(void)
 {
-    if (!require_computer_ready() || !ensure_visual_session()) {
+    if (!ensure_visual_session()) {
         return NULL;
     }
     if (!capture_desktop()) {
@@ -3293,8 +3271,9 @@ static JsonResult *window_tree(JsonValue *args, gboolean read_text)
     yyjson_doc_free(listing);
     JsonResult *tree = atspi_worker_call("window_state", yyjson_doc_get_root(parameters));
     yyjson_doc_free(parameters);
-    if (!tree) {
-        return NULL;
+    /* Tree-only observations omit frames and need no screenshot coordinates. */
+    if (!tree || read_text) {
+        return tree;
     }
     JsonResult *rows = yyjson_mut_obj_get(tree, "elements"), *row;
     yyjson_mut_arr_foreach(rows, i, n, row) {
@@ -3374,8 +3353,7 @@ static JsonResult *window_image(JsonValue *window)
 
 static JsonResult *observe_window(JsonValue *args, gboolean screenshot)
 {
-    if (!validate_canvas()) {
-        if (!screenshot) return NULL;
+    if (screenshot && !validate_canvas()) {
         clear_tool_error();
         guint images = yyjson_mut_arr_size(scu.images);
         if (!capture_desktop()) {
@@ -3394,7 +3372,8 @@ static JsonResult *observe_window(JsonValue *args, gboolean screenshot)
         if (!screenshot || (g_strcmp0(scu.code, "accessibility_window_unmatched") &&
             g_strcmp0(scu.code, "accessibility_window_ambiguous") &&
             g_strcmp0(scu.code, "accessibility_geometry_mismatch") &&
-            g_strcmp0(scu.code, "accessibility_unavailable"))) {
+            g_strcmp0(scu.code, "accessibility_unavailable") &&
+            g_strcmp0(scu.code, "missing_dependency"))) {
             goto done;
         }
         tree_error = error_payload();
@@ -3944,9 +3923,14 @@ static gboolean paste_text(struct ei_device *device, KeyboardMap *map, const cha
             ? target_input_arguments : yyjson_doc_get_root(parameters));
         yyjson_doc_free(parameters);
         if (!guard) {
-            return FALSE;
+            if (target_input_arguments ||
+                (g_strcmp0(scu.code, "accessibility_unavailable") &&
+                 g_strcmp0(scu.code, "missing_dependency"))) return FALSE;
+            /* Foreground paste can proceed without an accessibility bridge. */
+            clear_tool_error();
+        } else {
+            saved_selection = yyjson_mut_is_true(yyjson_mut_obj_get(guard, "saved"));
         }
-        saved_selection = yyjson_mut_is_true(yyjson_mut_obj_get(guard, "saved"));
     } else {
         /* A missing AT-SPI bridge does not forbid foreground paste. The
          * clipboard/PRIMARY replacement warning still describes its effects. */
@@ -4301,7 +4285,8 @@ static JsonResult *run_batch(const Tool *batch, JsonValue *args)
         scu.vision_request = TRUE;
         if (!desktop_input_allowed()) goto done;
     }
-    if (!require_computer_ready()) {
+    /* Each action initializes its own backend; optional observations do too. */
+    if (!require_computer_access()) {
         goto done;
     }
     valid = TRUE;
