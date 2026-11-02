@@ -174,7 +174,7 @@ class ScuTests(unittest.TestCase):
                             geometry_after_attributes=False, numeric=False, numeric_keyboard=False,
                             numeric_readonly=False, numeric_delay=False, browser=False,
                             offscreen=False, tooltips=False, placeholders=0, long_labels=False, element_ids=False, reading_text=False,
-                            decorations=False):
+                            decorations=False, settle_after_action=False):
         self.atspi_bus, address = self.bus(self.socket_path)
         self.atspi_state = self.directory / "atspi-state.json"
         command = ["/usr/bin/python3", str(ROOT / "tests/scu_atspi_fixture.py"), address, str(self.atspi_state)]
@@ -212,6 +212,8 @@ class ScuTests(unittest.TestCase):
             command.append("--reading-text")
         if decorations:
             command.append("--decorations")
+        if settle_after_action:
+            command.append("--settle-after-action")
         if placeholders:
             command.append(f"--placeholders={placeholders}")
         if deep:
@@ -1435,6 +1437,27 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertTrue(failed["isError"], failed)
         self.assertIn("elements", read_result(failed)["observations"][0])
 
+    def test_accessibility_observation_waits_for_action_rendering(self):
+        self.start_accessibility(settle_after_action=True)
+        self.start_host()
+        client = self.client()
+        tree = self.snapshot(client)
+        button = next(row for row in tree["elements"] if row["label"] == "Fixture button")
+        before = json.loads(self.state.read_text())["captures"]
+        for delay in (None, 200):
+            with self.subTest(delay=delay):
+                steps = [{"tool": "activate", "args": {"element_id": button["element_id"]}}]
+                if delay is not None:
+                    steps.append({"tool": "delay_ms", "args": {"ms": delay}})
+                result = client.tool("accessibility", steps=steps,
+                                     observations={"window": tree["window_id"], "refresh": True})
+                self.assertFalse(result["isError"], result)
+                rows = read_result(result)["observations"][0]["elements"]
+                entry = next(row for row in rows if row["label"] == "Fixture entry")
+                self.assertEqual(entry["value"], "Settled after action")
+        self.assertEqual(json.loads(self.atspi_state.read_text())["clicks"], 2)
+        self.assertEqual(json.loads(self.state.read_text())["captures"], before)
+
     def test_split_batch_preflight_rejects_cross_tool_actions_and_observation_options(self):
         self.start_host()
         client = self.client()
@@ -2126,6 +2149,38 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         tree = self.snapshot(self.client())
         self.assertNotIn("accessibility_error", tree)
         self.assertEqual(tree["elements"][0]["label"], "scu test window")
+
+    def test_transient_window_ambiguity_retries_until_titles_settle(self):
+        self.start_accessibility(two_windows=True)
+        self.start_host()
+        client = self.client()
+        window = client.windows()[0]["window_id"]
+        for duplicate in (False, True):
+            with self.subTest(duplicate_compositor_window=duplicate):
+                requests = json.loads(self.state.read_text())["geometry_requests"]
+                self.configure(window_title="Loading", duplicate_identity=duplicate,
+                               duplicate_pid=self.atspi.pid,
+                               settled_title_after_request=requests + 4,
+                               settled_title="scu test window")
+                result = client.tool("accessibility", observations={"window": window, "refresh": True})
+                self.assertFalse(result["isError"], result)
+                tree = read_result(result)["observations"][0]
+                self.assertEqual(tree["elements"][0]["label"], "scu test window")
+
+    def test_literal_punctuation_keys_and_chords(self):
+        self.start_host()
+        client = self.client()
+        steps = [{"tool": "press_keys", "args": {"keys": keys}} for keys in
+                 (["-"], ["+"], ["="], ["A"], ["MINUS"],
+                  ["CTRL", "-"], ["CTRL", "+"], ["CTRL", "="])]
+        result = client.tool("vision", steps=steps, observations=False)
+        self.assertFalse(result["isError"], result)
+        self.assertEqual(read_result(result)["completed"], len(steps))
+        # The independent EIS receiver decodes the compositor keymap, including
+        # implicit Shift for '+', and confirms all chord keys were released.
+        received = json.loads(self.state.read_text())["input"]
+        self.assertEqual(received["text"], "-+=a-")
+        self.assertEqual(received["keys_down"], 0)
 
     def test_observations_refresh_metadata_without_another_status_call(self):
         self.start_host()

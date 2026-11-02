@@ -98,6 +98,8 @@ def geometry():
     windows = [{"key": "window-1", "pid": config.get("app_pid", 123), "app_name": "scu fixture",
                 "title": config.get("window_title", "scu test window"), "frame": {"x": 10, "y": 10, "width": 40, "height": 30},
                 "client": {"x": 10, "y": 10, "width": 40, "height": 30}, "shown": True, "active": config.get("active", True)}]
+    if state["geometry_requests"] >= config.get("settled_title_after_request", math.inf):
+        windows[0]["title"] = config["settled_title"]
     if config.get("image_cap"):
         windows[0]["frame"] = {"x": 0, "y": 0, "width": 4096, "height": 64}
     if "window_x" in config:

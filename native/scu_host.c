@@ -3243,10 +3243,12 @@ static JsonResult *window_tree(JsonValue *args, gboolean read_text)
                 }
             }
         }
-        if (matches || ambiguous || g_get_monotonic_time() >= until) break;
+        /* Navigation can briefly leave several equally sized frames with old
+         * titles. Let both inventories settle before rejecting ambiguity. */
+        if ((matches == 1 && !ambiguous) || g_get_monotonic_time() >= until) break;
         if (!scu_pause(50)) { yyjson_doc_free(listing); return NULL; }
     } while (TRUE);
-    if (matches != 1) {
+    if (matches != 1 || ambiguous) {
         const char *code = matches > 1 || ambiguous ? "accessibility_window_ambiguous"
             : titles && !sizes ? "accessibility_geometry_mismatch" : "accessibility_window_unmatched";
         char *hint = g_strdup_printf(scu_text_window_association_failed, frames, titles, sizes);
@@ -3793,7 +3795,10 @@ static xkb_keysym_t named_keysym(const char *name)
             return xkb.keysym_from_name(aliases[index].symbol, XKB_KEYSYM_NO_FLAGS);
         }
     }
-    return xkb.keysym_from_name(name, XKB_KEYSYM_CASE_INSENSITIVE);
+    xkb_keysym_t symbol = xkb.keysym_from_name(name, XKB_KEYSYM_CASE_INSENSITIVE);
+    if (symbol == XKB_KEY_NoSymbol && g_utf8_validate(name, -1, NULL) && g_utf8_strlen(name, -1) == 1)
+        symbol = xkb.utf32_to_keysym(g_utf8_get_char(name));
+    return symbol;
 }
 
 static gboolean device_resumed(struct ei_device *raw)
@@ -4367,7 +4372,10 @@ static JsonResult *run_batch(const Tool *batch, JsonValue *args)
     }
     if (yyjson_is_obj(requested)) {
         gint64 id = yyjson_get_sint(json_member(requested, "window"));
-        if (!scu_tick() || !require_computer_access() || !desktop_refresh_lock()) {
+        /* Semantic actions also trigger asynchronous rendering. A completed
+         * trailing delay supplies this gap; observation-only calls need none. */
+        if ((accessibility && completed && !previous_delay && !wait_for_delay(300)) ||
+            !scu_tick() || !require_computer_access() || !desktop_refresh_lock()) {
             JsonResult *item = result_object();
             result_integer(item, "window_id", id);
             result_member(item, "error", error_payload());

@@ -118,6 +118,7 @@ def main():
                        if arg.startswith("--activation-delay=")), None)
     exposed = activation is None
     activation_pending = False
+    settle_after_action = "--settle-after-action" in sys.argv[3:]
     empty = "--empty-window" in sys.argv[3:]
     unsupported = "--unsupported-attributes" in sys.argv[3:]
     keyboard = "--keyboard-entry" in sys.argv[3:]
@@ -489,6 +490,13 @@ def main():
             state["last_action"] = actions()[args[0]]
             state["last_action_path"] = original_path
             state["action_times"].append(GLib.get_monotonic_time() / 1_000_000)
+            if settle_after_action:
+                state["text"] = ""
+                def settle():
+                    state["text"] = "Settled after action"
+                    save()
+                    return GLib.SOURCE_REMOVE
+                GLib.timeout_add(150, settle)
             save()
             reply = GLib.Variant("(b)", (True,))
         elif name == "SetTextContents":
