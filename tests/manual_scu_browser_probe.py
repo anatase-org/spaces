@@ -15,7 +15,7 @@ import time
 import uuid
 
 from manual_scu_session_probe import Probe
-from scu_tree import read_trees
+from scu_tree import read_result
 
 
 def main():
@@ -219,7 +219,7 @@ def main():
         disabled = hidden.call("tools/list", {"_meta": metadata})["tools"]
         assert [tool["name"] for tool in disabled] == ["status", "accessibility"], disabled
         rejected = hidden.call("tools/call", {"name": "vision", "arguments": {}})
-        assert rejected["isError"] and rejected["structuredContent"]["code"] == "unknown_tool", rejected
+        assert rejected["isError"] and read_result(rejected)["code"] == "unknown_tool", rejected
         status = probe.tool("status")
         window = next(window["window_id"] for app in status["apps"] for window in app["windows"]
                       if title in window["title"])
@@ -235,13 +235,13 @@ def main():
         # fallback itself must return no automatic screenshot or tree observation.
         status = hidden.call("tools/call", {"name": "status", "arguments": {}})
         assert not status["isError"] and not any(block["type"] == "image" for block in status["content"]), status
-        windows = [window for app in status["structuredContent"]["apps"] for window in app["windows"]]
+        windows = [window for app in read_result(status)["apps"] for window in app["windows"]]
         window = next(window["window_id"] for window in windows if title in window["title"])
         missing = max(item["window_id"] for item in windows) + 99999
         trees = hidden.call("tools/call", {"name": "accessibility", "arguments": {
             "observations": [missing, window, window]}})
         assert trees["isError"], trees
-        observations = read_trees(trees["structuredContent"])["observations"]
+        observations = read_result(trees)["observations"]
         assert [item["window_id"] for item in observations] == [missing, window], observations
         assert observations[0]["error"]["code"] == "window_unavailable", observations
         entry = next(row for row in observations[1]["elements"] if row["label"] == "Address and search bar")

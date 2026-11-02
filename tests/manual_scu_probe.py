@@ -12,7 +12,7 @@ from pathlib import Path
 import select
 import subprocess
 
-from scu_tree import read_trees
+from scu_tree import read_result
 
 
 def main():
@@ -48,14 +48,14 @@ def main():
 
     def tool(name, **arguments):
         response = call("tools/call", {"name": name, "arguments": arguments})
-        metadata = response.get("structuredContent", {})
-        (args.artifacts / f"{serial:02d}-{name}.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2))
+        metadata = read_result(response)
+        (args.artifacts / f"{serial:02d}-{name}.json").write_text(json.dumps(response, ensure_ascii=False, indent=2))
         for index, block in enumerate(response.get("content", [])):
             if block["type"] == "image":
                 (args.artifacts / f"{serial:02d}-{index}.png").write_bytes(base64.b64decode(block["data"]))
         assert not response.get("isError"), metadata
         print(name, json.dumps(metadata, ensure_ascii=False)[:350], flush=True)
-        return read_trees(metadata)
+        return metadata
 
     try:
         call("initialize", {"protocolVersion": "2025-11-25"})

@@ -20,7 +20,7 @@ import unittest
 
 from PIL import Image
 
-from tests.scu_tree import read_trees
+from tests.scu_tree import read_result
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGES = ("gio-unix-2.0", "atspi-2", "libei-1.0", "xkbcommon", "gdk-pixbuf-2.0", "libeis-1.0")
@@ -45,25 +45,25 @@ class Client:
             raise AssertionError(self.process.stderr.read())
         result = json.loads(line)
         assert result["id"] == self.serial, result
+        if method == "tools/call" and "result" in result:
+            fields = set(result["result"])
+            assert {"content", "isError"} <= fields <= {"content", "isError", "_meta", "resultType"}, result
         return result
 
     def tool(self, name, **arguments):
         result = self.call("tools/call", {"name": name, "arguments": arguments})["result"]
-        # Functional assertions decode the public compact tree. Wire-format
-        # assertions call tools/call directly and inspect the unmodified result.
-        result["structuredContent"] = read_trees(result["structuredContent"])
         return result
 
     def windows(self):
         response = self.tool("status")
         assert not response["isError"], response
         return [{**window, "app_name": app["app_name"]}
-                for app in response["structuredContent"]["apps"] for window in app["windows"]]
+                for app in read_result(response)["apps"] for window in app["windows"]]
 
     def window_state(self, **arguments):
         response = self.tool("vision", observations=[arguments.pop("window_id")], **arguments)
         assert not response["isError"], response
-        return response["structuredContent"]["observations"][0]
+        return read_result(response)["observations"][0]
 
     def close(self):
         if not self.process.stdin.closed:
@@ -372,7 +372,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
 
     def assert_locked_status(self, client):
         result = self.status(client)
-        data = result["structuredContent"]
+        data = read_result(result)
         self.assertEqual(set(data), {"canvas", "apps", "locked"})
         self.assertTrue(data["locked"])
         self.assertGreater(data["canvas"]["id"], 0)
@@ -402,21 +402,21 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
                 {"tool": "type_text", "args": {"element_id": entry["element_id"], "text": "!"}},
                 {"tool": "delay_ms", "args": {"ms": 10}}], observations=[window])
             self.assertFalse(result["isError"], result)
-            self.assertEqual([r["element_id"] for r in result["structuredContent"]["observations"][0]["elements"]],
+            self.assertEqual([r["element_id"] for r in read_result(result)["observations"][0]["elements"]],
                              [r["element_id"] for r in tree["elements"]])
         registrations = json.loads(self.atspi_state.read_text())["registrations"]
         self.login_call("SetLocked", "false")
         for client, tree in zip(clients, trees):
-            self.assertFalse(self.status(client)["structuredContent"]["locked"])
+            self.assertFalse(read_result(self.status(client))["locked"])
             result = client.tool("accessibility", observations=[window])
-            self.assertEqual([r["element_id"] for r in result["structuredContent"]["observations"][0]["elements"]],
+            self.assertEqual([r["element_id"] for r in read_result(result)["observations"][0]["elements"]],
                              [r["element_id"] for r in tree["elements"]])
         self.assertEqual(json.loads(self.atspi_state.read_text())["registrations"], registrations)
         self.assertEqual(json.loads(self.login_state.read_text())["unlocks"], 0)
 
     def snapshot_accessibility(self, client, window):
         self.status(client)
-        return client.tool("accessibility", observations=[window])["structuredContent"]["observations"][0]
+        return read_result(client.tool("accessibility", observations=[window]))["observations"][0]
 
     def test_shared_duplicate_ids_cancel_only_the_originating_connection(self):
         self.start_shared()
@@ -478,7 +478,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
             window = data["apps"][0]["windows"][0]["window_id"]
             result = client.tool("accessibility", observations=[window])
             self.assertFalse(result["isError"], result)
-            self.assertIn("elements", result["structuredContent"]["observations"][0])
+            self.assertIn("elements", read_result(result)["observations"][0])
         self.assertEqual(json.loads(self.state.read_text())["captures"], 2)
         self.assertEqual(json.loads(self.login_state.read_text())["unlocks"], 0)
 
@@ -493,9 +493,9 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
                 with self.subTest(form=form, steps=steps):
                     result = client.tool("vision", steps=steps, **form)
                     self.assertTrue(result["isError"], result)
-                    self.assertEqual(set(result["structuredContent"]), {"code", "hint"})
-                    self.assertEqual(result["structuredContent"]["code"], "desktop_locked")
-                    self.assertTrue(result["structuredContent"]["hint"].startswith(
+                    self.assertEqual(set(read_result(result)), {"code", "hint"})
+                    self.assertEqual(read_result(result)["code"], "desktop_locked")
+                    self.assertTrue(read_result(result)["hint"].startswith(
                         "The screen is locked. Vision tools are unavailable."))
                     self.assertFalse(any(b["type"] == "image" for b in result["content"]))
         state = json.loads(self.state.read_text())
@@ -516,7 +516,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         for name, extra in (("type_text", {"text": "blocked"}), ("set_value", {"value": "blocked"})):
             result = client.tool("accessibility", steps=[{"tool": name, "args": {
                 "element_id": entry["element_id"], **extra}}])
-            self.assertEqual(result["structuredContent"]["failed"]["code"], "desktop_locked", result)
+            self.assertEqual(read_result(result)["failed"]["code"], "desktop_locked", result)
             self.assertFalse(any(b["type"] == "image" for b in result["content"]))
         after = json.loads(self.atspi_state.read_text())
         self.assertEqual(after["focus_requests"], before["focus_requests"])
@@ -535,16 +535,16 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
             self.login_call(method, "true")
             self.assert_locked_status(client)
             result = client.tool("vision", observations=False)
-            self.assertEqual(result["structuredContent"]["code"], "desktop_locked")
+            self.assertEqual(read_result(result)["code"], "desktop_locked")
             self.login_call(method, "false")
-            self.assertFalse(self.status(client)["structuredContent"]["locked"])
+            self.assertFalse(read_result(self.status(client))["locked"])
         self.configure(lock_query_error=True)
         for name in ("status", "vision", "accessibility"):
             result = client.tool(name)
-            self.assertEqual(result["structuredContent"]["code"], "desktop_session_unavailable", result)
+            self.assertEqual(read_result(result)["code"], "desktop_session_unavailable", result)
             self.assertFalse(any(b["type"] == "image" for b in result["content"]))
         self.configure(lock_query_error=False)
-        self.assertFalse(self.status(client)["structuredContent"]["locked"])
+        self.assertFalse(read_result(self.status(client))["locked"])
         self.assertEqual(json.loads(self.login_state.read_text())["unlocks"], 0)
 
     def test_lock_during_vision_delay_preserves_completed_and_stops_batch(self):
@@ -559,7 +559,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
             time.sleep(.4)
             self.login_call("SetLocked", "true")
             result = pending.result(timeout=5)
-        data = result["structuredContent"]
+        data = read_result(result)
         self.assertEqual((data["completed"], data["failed"]["code"]), (1, "desktop_locked"), result)
         self.assertEqual(json.loads(self.state.read_text())["input"]["text"], "")
         self.assertFalse(any(b["type"] == "image" for b in result["content"]))
@@ -576,7 +576,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
             self.wait_until(lambda: json.loads(self.state.read_text())["captures"] == captures + 2)
             self.login_call("SetScreenLocked", "true")
             result = pending.result(timeout=5)
-        data = result["structuredContent"]
+        data = read_result(result)
         self.assertEqual((data["status"], data["completed"], data["failed"]["code"]), ("failed", 0, "desktop_locked"), result)
         self.assertEqual(len(data["observations"]), 2)
         self.assertFalse(any(b["type"] == "image" for b in result["content"]))
@@ -600,7 +600,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertTrue(result["isError"], result)
         self.assertFalse(any(b["type"] == "image" for b in result["content"]))
         for client, tree in zip(clients, trees):
-            new = client.tool("accessibility", observations=[window])["structuredContent"]["observations"][0]
+            new = read_result(client.tool("accessibility", observations=[window]))["observations"][0]
             self.assertEqual([r["element_id"] for r in new["elements"]], [r["element_id"] for r in tree["elements"]])
             button = next(r for r in tree["elements"] if r["label"] == "Fixture button")
             self.assertFalse(client.tool("accessibility", steps=[{"tool": "activate", "args": {
@@ -619,8 +619,8 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
             time.sleep(.3)
             self.login_call("SetLocked", "true")
             result = pending.result(timeout=5)
-        self.assertEqual(result["structuredContent"]["failed"]["code"], "desktop_locked", result)
-        self.assertEqual(result["structuredContent"]["completed"], 0)
+        self.assertEqual(read_result(result)["failed"]["code"], "desktop_locked", result)
+        self.assertEqual(read_result(result)["completed"], 0)
         self.assert_locked_status(client)  # refresh the independent input oracle
         state = json.loads(self.state.read_text())["input"]
         self.assertEqual((state["buttons_down"], state["keys_down"], state["text"]), (0, 0, ""))
@@ -764,7 +764,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         return result
 
     def snapshot(self, client):
-        status = self.status(client)["structuredContent"]
+        status = read_result(self.status(client))
         app = status["apps"][0]
         window = app["windows"][0]
         return client.window_state(window_id=window["window_id"])
@@ -808,7 +808,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
     def test_clients_share_capture_but_have_private_element_ids_and_one_helper(self):
         self.start_host()
         first, second = self.client(), self.client()
-        one = self.status(first)["structuredContent"]
+        one = read_result(self.status(first))
         # The same current capture is valid from another Space/client.
         result = second.tool("vision", id=one["canvas"]["id"],
             steps=[{"tool": "click", "args": {"x": 40, "y": 40}}], observations=False)
@@ -817,7 +817,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         button = next(row for row in tree["elements"] if row["label"] == "Fixture button")
         result = second.tool("accessibility", steps=[{"tool": "activate", "args": {
             "element_id": button["element_id"]}}])
-        self.assertEqual(result["structuredContent"]["failed"]["code"], "stale_element")
+        self.assertEqual(read_result(result)["failed"]["code"], "stale_element")
         own_tree = self.snapshot(second)
         self.assertEqual([row["element_id"] for row in own_tree["elements"]], list(range(4)))
         result = first.tool("accessibility", steps=[{"tool": "activate", "args": {
@@ -859,7 +859,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         temporary.replace(path)
         result = client.tool("accessibility", observations=[window])
         self.assertFalse(result["isError"], result)
-        tree = result["structuredContent"]["observations"][0]
+        tree = read_result(result)["observations"][0]
         self.assertFalse(tree["truncated"], tree)
         return tree["elements"]
 
@@ -875,7 +875,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertEqual([row["element_id"] for row in changed], [0, 2, 1])
         self.assertEqual([row["element_index"] for row in changed], [0, 1, 2])
         self.assertEqual(changed[-1]["label"], "Renamed button")
-        other = first.tool("accessibility", observations=[two])["structuredContent"]["observations"][0]
+        other = read_result(first.tool("accessibility", observations=[two]))["observations"][0]
         self.assertEqual([row["element_id"] for row in other["elements"]], [3, 4])
         own = self.element_tree(second, two, one=["entry"], two=["button/other"])
         self.assertEqual([row["element_id"] for row in own], [0, 1])
@@ -956,12 +956,12 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
                     result = client.tool("accessibility", steps=[
                         {"tool": "activate", "args": {"element_id": button["element_id"]}},
                         {"tool": tool, "args": args}])
-                    self.assertEqual(result["structuredContent"]["code"], "invalid_arguments", result)
+                    self.assertEqual(read_result(result)["code"], "invalid_arguments", result)
         self.assertEqual(json.loads(self.atspi_state.read_text())["clicks"], 0)
         self.assertEqual(json.loads(self.atspi_state.read_text())["text"], "")
         for element_id in (4, 19999):
             result = client.tool("accessibility", steps=[{"tool": "activate", "args": {"element_id": element_id}}])
-            self.assertEqual(result["structuredContent"]["failed"]["code"], "stale_element")
+            self.assertEqual(read_result(result)["failed"]["code"], "stale_element")
 
     def test_defunct_element_id_fails_without_retargeting(self):
         self.start_accessibility(element_ids=True)
@@ -972,7 +972,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         element_id = rows[-1]["element_id"]
         self.element_tree(client, window, one=["button"], defunct=["button"])
         result = client.tool("accessibility", steps=[{"tool": "activate", "args": {"element_id": element_id}}])
-        self.assertEqual(result["structuredContent"]["failed"]["code"], "stale_element")
+        self.assertEqual(read_result(result)["failed"]["code"], "stale_element")
         self.assertEqual(json.loads(self.atspi_state.read_text())["clicks"], 0)
 
     def test_worker_discards_disconnected_clients_element_tables(self):
@@ -1010,10 +1010,10 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         worker = int(child_file.read_text().strip())
         os.kill(worker, signal.SIGKILL)
         result = client.tool("accessibility", steps=[{"tool": "activate", "args": {"element_id": 1}}])
-        self.assertEqual(result["structuredContent"]["code"], "accessibility_unavailable", result)
+        self.assertEqual(read_result(result)["code"], "accessibility_unavailable", result)
         result = client.tool("accessibility", steps=[{"tool": "activate", "args": {"element_id": 1}}])
-        self.assertEqual(result["structuredContent"]["failed"]["code"], "stale_element")
-        rows = client.tool("accessibility", observations=[tree["window_id"]])["structuredContent"]["observations"][0]["elements"]
+        self.assertEqual(read_result(result)["failed"]["code"], "stale_element")
+        rows = read_result(client.tool("accessibility", observations=[tree["window_id"]]))["observations"][0]["elements"]
         self.assertEqual([row["element_id"] for row in rows], list(range(4)))
         self.assertNotEqual(int(child_file.read_text().strip()), worker)
         self.assertFalse(client.tool("accessibility", steps=[{"tool": "activate", "args": {"element_id": 1}}])["isError"])
@@ -1114,7 +1114,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.start_host()
         self.computer_path.chmod(0o666)
         client = self.client()
-        self.assertEqual(client.tool("status")["structuredContent"]["code"], "accessibility_permission_required")
+        self.assertEqual(read_result(client.tool("status"))["code"], "accessibility_permission_required")
         self.assertIn("result", client.call("ping", {}))
         self.computer_path.chmod(0o600)
         self.status(client)
@@ -1131,8 +1131,8 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
             instructions = client.call("initialize", {"protocolVersion": "2025-11-25"})["result"]["instructions"]
             self.assertEqual("no vision support" in instructions, disabled)
             if disabled:
-                self.assertEqual(client.tool("vision")["structuredContent"]["code"], "unknown_tool")
-            self.assertEqual(client.tool("computer")["structuredContent"]["code"], "unknown_tool")
+                self.assertEqual(read_result(client.tool("vision"))["code"], "unknown_tool")
+            self.assertEqual(read_result(client.tool("computer"))["code"], "unknown_tool")
         self.assertEqual(json.loads(self.state.read_text())["geometry_requests"], 0)
         self.assertEqual(json.loads(self.atspi_state.read_text())["registrations"], 0)
 
@@ -1141,7 +1141,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         for no_vision in (False, True):
             client = self.client(no_vision=no_vision)
             response = client.call("tools/call", {"name": "status", "arguments": {}})["result"]
-            data = response["structuredContent"]
+            data = read_result(response)
             text = response["content"][0]["text"]
             window = data["apps"][0]["windows"][0]
             self.assertIn("Screen: unlocked", text)
@@ -1157,8 +1157,8 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
             with self.subTest(x=x):
                 self.configure(window_x=x)
                 response = client.call("tools/call", {"name": "status", "arguments": {}})["result"]
-                window = response["structuredContent"]["apps"][0]["windows"][0]
-                self.assertEqual(window["bounds"]["x"], x * 2)
+                window = read_result(response)["apps"][0]["windows"][0]
+                self.assertEqual(window["bounds"]["x"], rounded)
                 self.assertIn(f"bounds=[{rounded},20,80,60]", response["content"][0]["text"])
                 tree = client.window_state(window_id=window["window_id"])
                 button = next(row for row in tree["elements"] if row["label"] == "Fixture button")
@@ -1175,8 +1175,9 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
             for tool in (("vision", "accessibility") if not no_vision else ("accessibility",)):
                 response = client.call("tools/call", {"name": tool, "arguments": {"observations": [window]}})["result"]
                 self.assertFalse(response["isError"], response)
-                tree = response["structuredContent"]["observations"][0]
-                self.assertNotIn("elements", tree)
+                self.assertEqual(json.dumps(response).count("Fixture button"), 1)
+                tree = read_result(response)["observations"][0]
+                self.assertNotIn('"elements"', json.dumps(response))
                 text = tree["tree_markdown"]
                 self.assertTrue(text.startswith('[0] frame "scu test window"'), text)
                 self.assertIn('  [1] button "Fixture button"', text)
@@ -1189,7 +1190,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
                     image = tree["screenshot"]
                     self.assertIn(f"Screenshot: {image['width']} x {image['height']}; bounds=", response["content"][0]["text"])
                 self.assertNotIn('"element_index"', json.dumps(response))
-                rows = read_trees(response["structuredContent"])["observations"][0]["elements"]
+                rows = read_result(response)["observations"][0]["elements"]
                 button = next(row for row in rows if row["label"] == "Fixture button")
                 if tool == "vision":
                     self.assertEqual(button["frame"]["y"], 620)
@@ -1206,9 +1207,9 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
                 "steps": [{"tool": "set_value", "args": {"element_id": entry["element_id"], "value": expected}}],
                 "observations": [window]}})["result"]
             self.assertFalse(response["isError"], response)
-            tree = response["structuredContent"]["observations"][0]
+            tree = read_result(response)["observations"][0]
             self.assertEqual(len(tree["tree_markdown"].splitlines()), len(rows))
-            actual = read_trees(response["structuredContent"])["observations"][0]["elements"]
+            actual = read_result(response)["observations"][0]["elements"]
             self.assertEqual(next(row["value"] for row in actual if row["label"] == "Fixture entry"), expected)
 
     def test_accessibility_reads_noninteractive_text_without_coordinates(self):
@@ -1218,10 +1219,10 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         client = self.client()
         window = client.windows()[0]["window_id"]
         before = client.call("tools/call", {"name": "vision", "arguments": {"observations": [window]}})["result"]
-        before_tree = before["structuredContent"]["observations"][0]["tree_markdown"]
+        before_tree = read_result(before)["observations"][0]["tree_markdown"]
         self.assertNotIn("Read-only paragraph text", before_tree)
         self.assertFalse(any(row["role"] in ("static", "paragraph", "heading", "text")
-                             for row in read_trees(before["structuredContent"])["observations"][0]["elements"]))
+                             for row in read_result(before)["observations"][0]["elements"]))
         self.assertEqual(json.loads(self.atspi_state.read_text())["reading_text_reads"], 0)
         self.login_call("SetLocked", "true")
         for current in (client, self.client(no_vision=True)):
@@ -1231,14 +1232,14 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
             self.assertFalse(response["isError"], response)
             self.assertNotIn("frame=", json.dumps(response))
             self.assertNotIn('"bounds"', json.dumps(response))
-            tree = response["structuredContent"]["observations"][0]["tree_markdown"]
+            tree = read_result(response)["observations"][0]["tree_markdown"]
             self.assertIn("Read-only paragraph text, with a nested caption.", tree)
             self.assertIn("The complete caption text is not its accessible name.", tree)
             self.assertEqual(tree.count("The complete caption text is not its accessible name."), 1)
             self.assertIn("Article heading", tree)
             self.assertNotIn("Paragraph metadata", tree)
             self.assertNotIn("Article paragraph", tree)
-            rows = read_trees(response["structuredContent"])["observations"][0]["elements"]
+            rows = read_result(response)["observations"][0]["elements"]
             self.assertFalse(any(row["role"] in ("paragraph", "static", "heading") for row in rows))
             text_rows = [row for row in rows if row["role"] == "text"]
             self.assertTrue(text_rows)
@@ -1271,7 +1272,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
             ids = [row["element_id"] for row in rows if "element_id" in row]
             self.assertEqual(sorted(ids), list(range(5)))
             missing = current.tool("accessibility", steps=[{"tool": "activate", "args": {"element_id": 5}}])
-            self.assertEqual(missing["structuredContent"]["failed"]["code"], "stale_element")
+            self.assertEqual(read_result(missing)["failed"]["code"], "stale_element")
             link = [row for row in rows if row["label"] == "Article link"]
             self.assertEqual(len(link), 1, link)
             self.assertEqual(link[0]["role"], "link")
@@ -1288,7 +1289,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertEqual(json.loads(self.login_state.read_text())["unlocks"], 0)
         self.login_call("SetLocked", "false")
         after = client.call("tools/call", {"name": "vision", "arguments": {"observations": [window]}})["result"]
-        self.assertEqual(after["structuredContent"]["observations"][0]["tree_markdown"], before_tree)
+        self.assertEqual(read_result(after)["observations"][0]["tree_markdown"], before_tree)
         self.assertTrue(any(block["type"] == "image" for block in after["content"]))
 
     def test_readable_batch_keeps_window_errors_and_completed_actions(self):
@@ -1299,7 +1300,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
             "steps": [{"tool": "delay_ms", "args": {"ms": 0}}],
             "observations": [window + 99, window]}})["result"]
         self.assertTrue(response["isError"], response)
-        self.assertEqual(response["structuredContent"]["completed"], 1)
+        self.assertEqual(read_result(response)["completed"], 1)
         text = response["content"][0]["text"]
         self.assertIn("Status: failed; completed: 1", text)
         self.assertIn(f"Window {window + 99}", text)
@@ -1314,7 +1315,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         response = hidden.tool("status")
         self.assertFalse(response["isError"], response)
         self.assertEqual([block["type"] for block in response["content"]], ["text"])
-        data = response["structuredContent"]
+        data = read_result(response)
         self.assertIn("Screen: unlocked", response["content"][0]["text"])
         self.assertIn("Windows:", response["content"][0]["text"])
         self.assertIn(f"id: {data['canvas']['id']}", response["content"][0]["text"])
@@ -1323,11 +1324,11 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         window = data["apps"][0]["windows"][0]["window_id"]
         tree = hidden.tool("accessibility", observations=[window])
         self.assertFalse(tree["isError"], tree)
-        self.assertIn("elements", tree["structuredContent"]["observations"][0])
+        self.assertIn("elements", read_result(tree)["observations"][0])
         self.assertFalse(any(block["type"] == "image" for block in tree["content"]))
         self.assertTrue(any(block["type"] == "image" for block in normal.tool("status")["content"]))
         self.assertFalse(normal.tool("vision")["isError"])
-        self.assertEqual(hidden.tool("vision")["structuredContent"]["code"], "unknown_tool")
+        self.assertEqual(read_result(hidden.tool("vision"))["code"], "unknown_tool")
         hidden.close()
         self.assertFalse(normal.tool("vision")["isError"])
 
@@ -1335,7 +1336,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.start_host()
         client = self.client()
         unavailable = client.tool("accessibility", observations=[1])
-        self.assertEqual(unavailable["structuredContent"]["observations"][0]["error"]["code"], "stale_capture")
+        self.assertEqual(read_result(unavailable)["observations"][0]["error"]["code"], "stale_capture")
         self.assertEqual(json.loads(self.state.read_text())["captures"], 0)
         tree = self.snapshot(client)  # Vision supplies IDs directly to accessibility.
         button = next(row for row in tree["elements"] if row["label"] == "Fixture button")
@@ -1345,12 +1346,12 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
             result = client.tool("accessibility", steps=[{"tool": "activate", "args": {
                 "element_id": element_id}}], **observations)
             self.assertFalse(result["isError"], result)
-            self.assertEqual(result["structuredContent"]["observations"], [])
+            self.assertEqual(read_result(result)["observations"], [])
         result = client.tool("accessibility", steps=[{"tool": "activate", "args": {
             "element_id": element_id}}], observations=[tree["window_id"]])
         self.assertFalse(result["isError"], result)
         self.assertEqual(json.loads(self.atspi_state.read_text())["clicks"], 3)
-        self.assertIn("elements", result["structuredContent"]["observations"][0])
+        self.assertIn("elements", read_result(result)["observations"][0])
         reused = client.tool("accessibility", steps=[{"tool": "activate", "args": {"element_id": element_id}}])
         self.assertFalse(reused["isError"], reused)
         self.assertEqual(json.loads(self.atspi_state.read_text())["clicks"], 4)
@@ -1365,7 +1366,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         missing = max(one, two) + 99999
         result = client.tool("accessibility", observations=[two, missing, one, two, one])
         self.assertTrue(result["isError"], result)
-        data = result["structuredContent"]
+        data = read_result(result)
         self.assertEqual(data["status"], "failed")
         self.assertEqual(data["completed"], 0)
         self.assertEqual([item["window_id"] for item in data["observations"]], [two, missing, one])
@@ -1381,8 +1382,8 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         failed = client.tool("accessibility", steps=[{"tool": "activate", "args": {
             "element_id": 19999}}], observations=[one, two])
         self.assertTrue(failed["isError"], failed)
-        self.assertEqual(len(failed["structuredContent"]["observations"]), 2)
-        self.assertTrue(all("elements" in item for item in failed["structuredContent"]["observations"]))
+        self.assertEqual(len(read_result(failed)["observations"]), 2)
+        self.assertTrue(all("elements" in item for item in read_result(failed)["observations"]))
 
     def test_split_batch_preflight_rejects_cross_tool_actions_and_observation_options(self):
         self.start_host()
@@ -1403,20 +1404,20 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         ):
             with self.subTest(name=name, arguments=arguments):
                 result = client.tool(name, **arguments)
-                self.assertEqual(result["structuredContent"]["code"], "invalid_arguments", result)
+                self.assertEqual(read_result(result)["code"], "invalid_arguments", result)
         for observations in ([tree["window_id"]] * 65, [True], [1.5], ["1"], {}, True, [None]):
             for name, action in (("accessibility", activate), ("vision", click)):
                 result = client.tool(name, steps=[action], observations=observations)
-                self.assertEqual(result["structuredContent"]["code"], "invalid_arguments", result)
+                self.assertEqual(read_result(result)["code"], "invalid_arguments", result)
         for name in ("vision", "accessibility"):
             result = client.tool(name, steps=[{"tool": "delay_ms", "args": {"ms": 0}}] * 65)
-            self.assertEqual(result["structuredContent"]["code"], "invalid_arguments", result)
+            self.assertEqual(read_result(result)["code"], "invalid_arguments", result)
         self.assertEqual(json.loads(self.state.read_text())["input"]["clicks"], 0)
         self.assertEqual(json.loads(self.atspi_state.read_text())["clicks"], 0)
         accepted = client.tool("accessibility", steps=[{"tool": "delay_ms", "args": {"ms": 0}}] * 64,
                                observations=[tree["window_id"]] * 64)
         self.assertFalse(accepted["isError"], accepted)
-        self.assertEqual(len(accepted["structuredContent"]["observations"]), 1)
+        self.assertEqual(len(read_result(accepted)["observations"]), 1)
 
     def test_vision_observations_deduplicate_and_preserve_images_around_window_errors(self):
         self.start_accessibility(two_windows=True)
@@ -1426,7 +1427,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         missing = max(one, two) + 99999
         result = client.tool("vision", observations=[two, missing, one, two, one])
         self.assertTrue(result["isError"], result)
-        data = result["structuredContent"]
+        data = read_result(result)
         self.assertEqual((data["status"], data["completed"]), ("failed", 0))
         self.assertEqual([item["window_id"] for item in data["observations"]], [two, missing, one])
         self.assertEqual(data["observations"][1]["error"]["code"], "window_unavailable")
@@ -1438,7 +1439,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         for observations in ({}, {"observations": []}):
             result = client.tool("vision", **observations)
             self.assertFalse(result["isError"], result)
-            self.assertEqual(len(result["structuredContent"]["observations"]), 1)
+            self.assertEqual(len(read_result(result)["observations"]), 1)
             self.assertEqual(self.image(result).size, (160, 120))
 
     def test_accessibility_keyboard_fallback_never_captures(self):
@@ -1446,7 +1447,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.start_host()
         client = self.client(no_vision=True)
         window = client.windows()[0]["window_id"]
-        tree = client.tool("accessibility", observations=[window])["structuredContent"]["observations"][0]
+        tree = read_result(client.tool("accessibility", observations=[window]))["observations"][0]
         entry = next(row for row in tree["elements"] if row["label"] == "Fixture entry")
         captures = json.loads(self.state.read_text())["captures"]
         self.configure(hold_capture=True)
@@ -1454,7 +1455,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
             "element_id": entry["element_id"], "text": "hello"}}], observations=[window])
         self.assertFalse(response["isError"], response)
         self.assertFalse(any(block["type"] == "image" for block in response["content"]))
-        actual = next(row for row in response["structuredContent"]["observations"][0]["elements"]
+        actual = next(row for row in read_result(response)["observations"][0]["elements"]
                       if row["label"] == "Fixture entry")
         self.assertEqual(actual["value"], "hello")
         self.assertEqual(json.loads(self.state.read_text())["captures"], captures)
@@ -1505,13 +1506,13 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
                            ("vision", {"steps": [{"tool": "press_keys", "args": {"keys": ["a"]}}]})):
             result = client.tool(name, **args)
             self.assertTrue(result["isError"], result)
-            self.assertEqual(result["structuredContent"]["code"], "accessibility_permission_required")
-            self.assertIn("spaces configure <space>", result["structuredContent"]["hint"])
+            self.assertEqual(read_result(result)["code"], "accessibility_permission_required")
+            self.assertIn("spaces configure <space>", read_result(result)["hint"])
 
     def test_status_image_and_kwin_window_coordinates(self):
         self.start_host(two_windows=True)
         result = self.status(self.client())
-        data = result["structuredContent"]
+        data = read_result(result)
         self.assertEqual(set(data), {"canvas", "apps", "locked"})
         self.assertFalse(data["locked"])
         self.assertEqual(self.image(result).size, (160, 120))
@@ -1549,9 +1550,9 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
             {"tool": "delay_ms", "args": {"ms": 50}},
         ])
         self.assertFalse(result["isError"], result)
-        self.assertEqual(set(result["structuredContent"]), {"completed", "status", "observations"})
-        self.assertEqual(result["structuredContent"]["status"], "ok")
-        self.assertNotIn("observation", result["structuredContent"])
+        self.assertEqual(set(read_result(result)), {"completed", "status", "observations"})
+        self.assertEqual(read_result(result)["status"], "ok")
+        self.assertNotIn("observation", read_result(result))
         self.assertEqual(json.loads(self.state.read_text())["captures"], captures)
         state = json.loads(self.atspi_state.read_text())
         self.assertEqual(state["clicks"], 1)
@@ -1569,7 +1570,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertEqual((row["value"], row["minimum"], row["maximum"]), (80, 0, 100))
         result = client.tool("accessibility", steps=[{"tool": "set_value", "args": {
             "element_id": row["element_id"], "value": "50"}}])
-        self.assertEqual(result["structuredContent"]["status"], "ok", result)
+        self.assertEqual(read_result(result)["status"], "ok", result)
         self.assertEqual(json.loads(self.atspi_state.read_text())["value"], 50)
         self.assertEqual(json.loads(self.state.read_text())["input"]["keys"], 0)
 
@@ -1580,7 +1581,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         row = next(row for row in self.snapshot(client)["elements"] if row["label"] == "Fixture volume")
         result = client.tool("accessibility", steps=[{"tool": "set_value", "args": {
             "element_id": row["element_id"], "value": "50"}}])
-        self.assertEqual(result["structuredContent"]["status"], "ok", result)
+        self.assertEqual(read_result(result)["status"], "ok", result)
         self.assertEqual(json.loads(self.atspi_state.read_text())["value"], 50)
         self.assertEqual(json.loads(self.state.read_text())["input"]["keys"], 0)
 
@@ -1593,8 +1594,8 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         result = client.tool("accessibility", steps=[{"tool": "set_value", "args": {
             "element_id": row["element_id"], "value": "50"}}],
             observations=[tree["window_id"]])
-        self.assertEqual(result["structuredContent"]["status"], "ok", result)
-        actual = next(row for row in result["structuredContent"]["observations"][0]["elements"]
+        self.assertEqual(read_result(result)["status"], "ok", result)
+        actual = next(row for row in read_result(result)["observations"][0]["elements"]
                       if row["label"] == "Fixture volume")
         self.assertEqual(actual["value"], 50)
         self.assertEqual(json.loads(self.atspi_state.read_text())["value"], 80,
@@ -1606,9 +1607,9 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.start_host()
         client = self.client()
         row = next(row for row in self.snapshot(client)["elements"] if row["label"] == "Fixture volume")
-        result = client.tool("accessibility", steps=[
+        result = read_result(client.tool("accessibility", steps=[
             {"tool": "set_value", "args": {"element_id": row["element_id"], "value": "50"}},
-            {"tool": "set_value", "args": {"element_id": row["element_id"], "value": "60"}}])["structuredContent"]
+            {"tool": "set_value", "args": {"element_id": row["element_id"], "value": "60"}}]))
         self.assertEqual(result["status"], "failed", result)
         self.assertEqual(result["completed"], 0)
         self.assertEqual(result["failed"]["code"], "value_readback_failed")
@@ -1619,8 +1620,8 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.start_host()
         client = self.client()
         row = next(row for row in self.snapshot(client)["elements"] if row["label"] == "Fixture volume")
-        result = client.tool("accessibility", steps=[{"tool": "set_value", "args": {
-            "element_id": row["element_id"], "value": "50"}}])["structuredContent"]
+        result = read_result(client.tool("accessibility", steps=[{"tool": "set_value", "args": {
+            "element_id": row["element_id"], "value": "50"}}]))
         self.assertEqual(result["status"], "failed", result)
         self.assertEqual(json.loads(self.state.read_text())["input"]["keys"], 0)
 
@@ -1629,8 +1630,8 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.start_host()
         client = self.client()
         row = next(row for row in self.snapshot(client)["elements"] if row["label"] == "Fixture volume")
-        result = client.tool("accessibility", steps=[{"tool": "set_value", "args": {
-            "element_id": row["element_id"], "value": "50"}}])["structuredContent"]
+        result = read_result(client.tool("accessibility", steps=[{"tool": "set_value", "args": {
+            "element_id": row["element_id"], "value": "50"}}]))
         self.assertEqual(result["failed"]["code"], "value_focus_changed", result)
         self.assertEqual(json.loads(self.state.read_text())["input"]["keys"], 1)
 
@@ -1639,8 +1640,8 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.start_host(active=False)
         client = self.client()
         row = next(row for row in self.snapshot(client)["elements"] if row["label"] == "Fixture volume")
-        result = client.tool("accessibility", steps=[{"tool": "set_value", "args": {
-            "element_id": row["element_id"], "value": "50"}}])["structuredContent"]
+        result = read_result(client.tool("accessibility", steps=[{"tool": "set_value", "args": {
+            "element_id": row["element_id"], "value": "50"}}]))
         self.assertEqual(result["failed"]["code"], "value_focus_changed", result)
         self.assertEqual(json.loads(self.state.read_text())["input"]["keys"], 0)
 
@@ -1650,8 +1651,8 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         client = self.client()
         row = next(row for row in self.snapshot(client)["elements"] if row["label"] == "Fixture volume")
         for value in ("NaN", "infinity", "oops", "101", "-1", ""):
-            result = client.tool("accessibility", steps=[{"tool": "set_value", "args": {
-                "element_id": row["element_id"], "value": value}}])["structuredContent"]
+            result = read_result(client.tool("accessibility", steps=[{"tool": "set_value", "args": {
+                "element_id": row["element_id"], "value": value}}]))
             self.assertEqual(result["failed"]["code"], "invalid_arguments", result)
         self.assertEqual(json.loads(self.atspi_state.read_text())["value_writes"], 0)
         self.assertEqual(json.loads(self.state.read_text())["input"]["keys"], 0)
@@ -1661,8 +1662,8 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.start_host()
         client = self.client()
         row = next(row for row in self.snapshot(client)["elements"] if row["label"] == "Fixture entry")
-        result = client.tool("accessibility", steps=[{"tool": "set_value", "args": {
-            "element_id": row["element_id"], "value": "changed"}}])["structuredContent"]
+        result = read_result(client.tool("accessibility", steps=[{"tool": "set_value", "args": {
+            "element_id": row["element_id"], "value": "changed"}}]))
         self.assertEqual(result["failed"]["code"], "text_readback_failed", result)
         self.assertEqual(json.loads(self.atspi_state.read_text())["text"], "")
 
@@ -1676,8 +1677,8 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
                 self.assertNotIn("actions", row)
                 self.assertNotIn("click_buttons", row)
                 for tool, expected in (("activate", name), ("open_context_menu", "showContextMenu")):
-                    result = client.tool("accessibility", steps=[{"tool": tool, "args": {
-                        "element_id": row["element_id"]}}])["structuredContent"]
+                    result = read_result(client.tool("accessibility", steps=[{"tool": tool, "args": {
+                        "element_id": row["element_id"]}}]))
                     self.assertEqual(result["status"], "ok", result)
                     self.assertEqual(json.loads(self.atspi_state.read_text())["last_action"], expected)
         for names, unsupported in ((["scroll", "showContextMenu"], "activate"),
@@ -1689,8 +1690,8 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
                 self.assertNotIn("actions", row)
                 self.assertNotIn("click_buttons", row)
                 before = json.loads(self.atspi_state.read_text())["clicks"]
-                result = client.tool("accessibility", steps=[{"tool": unsupported, "args": {
-                    "element_id": row["element_id"]}}])["structuredContent"]
+                result = read_result(client.tool("accessibility", steps=[{"tool": unsupported, "args": {
+                    "element_id": row["element_id"]}}]))
                 self.assertEqual(result["failed"]["code"], "accessible_action_failed", result)
                 self.assertEqual(json.loads(self.atspi_state.read_text())["clicks"], before)
         self.status(client)
@@ -1717,7 +1718,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
                     steps=[first, {"tool": tool, "args": arguments}],
                     **({} if semantic else {"observations": []}))
                 self.assertTrue(result["isError"], result)
-                self.assertEqual(result["structuredContent"]["code"], "invalid_arguments", result)
+                self.assertEqual(read_result(result)["code"], "invalid_arguments", result)
         self.status(client)
         self.assertEqual(json.loads(self.state.read_text())["input"]["clicks"], 0)
         self.assertEqual(json.loads(self.atspi_state.read_text())["clicks"], 0)
@@ -1730,8 +1731,8 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         for button, count, code in (("middle", 1, 274), ("left", 2, 272),
                                     ("right", 3, 273), ("middle", 2, 274)):
             with self.subTest(button=button, count=count):
-                result = client.tool("vision", steps=[{"tool": "click", "args": {
-                    "x": 60, "y": 50, "button": button, "count": count}}])["structuredContent"]
+                result = read_result(client.tool("vision", steps=[{"tool": "click", "args": {
+                    "x": 60, "y": 50, "button": button, "count": count}}]))
                 self.assertEqual(result["status"], "ok", result)
                 clicks += count
                 received = json.loads(self.state.read_text())["input"]
@@ -1751,8 +1752,8 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
                                             ("set_value", "value", "Changed", "Changed"),
                                             ("set_value", "value", "", "")):
             with self.subTest(tool=tool, text=text):
-                result = client.tool("accessibility", steps=[{"tool": tool, "args": {
-                    "element_id": row["element_id"], field: text}}])["structuredContent"]
+                result = read_result(client.tool("accessibility", steps=[{"tool": tool, "args": {
+                    "element_id": row["element_id"], field: text}}]))
                 self.assertEqual(result["status"], "ok", result)
                 self.assertIn("keyboard", result["warnings"][0]["warning"])
                 self.assertEqual(result["observations"], [])
@@ -1764,8 +1765,8 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.start_host()
         client = self.client()
         row = next(row for row in self.snapshot(client)["elements"] if row["label"] == "Fixture entry")
-        result = client.tool("accessibility", steps=[{"tool": "type_text", "args": {
-            "element_id": row["element_id"], "text": "must not type"}}])["structuredContent"]
+        result = read_result(client.tool("accessibility", steps=[{"tool": "type_text", "args": {
+            "element_id": row["element_id"], "text": "must not type"}}]))
         self.assertEqual(result["failed"]["code"], "text_focus_changed", result)
         self.assertEqual(json.loads(self.state.read_text())["input"]["keys"], 0)
 
@@ -1777,7 +1778,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         button = next(row for row in tree["elements"] if row["label"] == "Fixture button")
         result = client.tool("accessibility", steps=[{"tool": "activate", "args": {
             "element_id": button["element_id"]}}])
-        self.assertEqual(result["structuredContent"]["status"], "ok", result)
+        self.assertEqual(read_result(result)["status"], "ok", result)
         self.assertEqual(json.loads(self.atspi_state.read_text())["clicks"], 1)
 
     def test_offscreen_controls_remain_actionable(self):
@@ -1789,7 +1790,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertEqual(button["frame"]["y"], 620)
         result = client.tool("accessibility", steps=[{"tool": "activate", "args": {
             "element_id": button["element_id"]}}])
-        self.assertEqual(result["structuredContent"]["status"], "ok", result)
+        self.assertEqual(read_result(result)["status"], "ok", result)
         self.assertEqual(json.loads(self.atspi_state.read_text())["clicks"], 1)
 
     def test_dormant_tooltips_do_not_consume_tree_rows(self):
@@ -1843,8 +1844,8 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.start_host(active=False)
         client = self.client()
         row = next(row for row in self.snapshot(client)["elements"] if row["label"] == "Fixture entry")
-        result = client.tool("accessibility", steps=[{"tool": "set_value", "args": {
-            "element_id": row["element_id"], "value": "must not type"}}])["structuredContent"]
+        result = read_result(client.tool("accessibility", steps=[{"tool": "set_value", "args": {
+            "element_id": row["element_id"], "value": "must not type"}}]))
         self.assertEqual(result["failed"]["code"], "text_focus_changed", result)
         self.assertEqual(json.loads(self.state.read_text())["input"]["keys"], 0)
 
@@ -1861,8 +1862,8 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.start_host()
         client = self.client()
         row = next(row for row in self.snapshot(client)["elements"] if row["label"] == "Fixture entry")
-        result = client.tool("accessibility", steps=[{"tool": "type_text", "args": {
-            "element_id": row["element_id"], "text": "abc"}}])["structuredContent"]
+        result = read_result(client.tool("accessibility", steps=[{"tool": "type_text", "args": {
+            "element_id": row["element_id"], "text": "abc"}}]))
         self.assertEqual(result["failed"]["code"], "text_focus_changed", result)
         self.assertEqual(json.loads(self.state.read_text())["input"]["keys"], 1)
 
@@ -1871,8 +1872,8 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.start_host()
         client = self.client()
         row = next(row for row in self.snapshot(client)["elements"] if row["label"] == "Fixture entry")
-        result = client.tool("accessibility", steps=[{"tool": "type_text", "args": {
-            "element_id": row["element_id"], "text": "abc"}}])["structuredContent"]
+        result = read_result(client.tool("accessibility", steps=[{"tool": "type_text", "args": {
+            "element_id": row["element_id"], "text": "abc"}}]))
         self.assertEqual(result["failed"]["code"], "text_readback_failed", result)
         self.assertEqual(json.loads(self.state.read_text())["input"]["text"], "abc")
 
@@ -1880,11 +1881,11 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.start_host()
         client = self.client()
         self.status(client)
-        result = client.tool("vision", steps=[
+        result = read_result(client.tool("vision", steps=[
             {"tool": "click", "args": {"x": 60, "y": 50, "count": 2}},
             {"tool": "click", "args": {"x": 60, "y": 50, "button": "right"}},
             {"tool": "press_keys", "args": {"keys": ["meta"]}},
-        ])["structuredContent"]
+        ]))
         self.assertEqual(result["status"], "ok", result)
         self.assertEqual(result["completed"], 3)
         self.assertEqual(json.loads(self.state.read_text())["input"]["clicks"], 3)
@@ -1899,7 +1900,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         button = next(row for row in tree["elements"] if row["label"] == "Fixture button")
         self.assertEqual((button["depth"], button["parent_index"]), (1, 0))
         result = client.tool("accessibility", steps=[{"tool": "activate", "args": {"element_id": button["element_id"]}}])
-        self.assertEqual(result["structuredContent"]["status"], "ok", result)
+        self.assertEqual(read_result(result)["status"], "ok", result)
 
     def test_large_tree_is_bounded_and_reports_complexity(self):
         self.start_accessibility(wide=2000, long_labels=True)
@@ -1914,7 +1915,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertIn("tree_markdown", tree)
         button = next(row for row in tree["elements"] if row["role"] == "button")
         result = client.tool("accessibility", steps=[{"tool": "activate", "args": {"element_id": button["element_id"]}}])
-        self.assertEqual(result["structuredContent"]["status"], "ok", result)
+        self.assertEqual(read_result(result)["status"], "ok", result)
 
     def test_large_tree_is_not_cut_off_by_previous_byte_or_row_limits(self):
         self.start_accessibility(wide=1000)
@@ -1928,7 +1929,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertEqual(button["label"], "Repeated button 999")
         result = client.tool("accessibility", steps=[{"tool": "activate", "args": {
             "element_id": button["element_id"]}}])
-        self.assertEqual(result["structuredContent"]["status"], "ok", result)
+        self.assertEqual(read_result(result)["status"], "ok", result)
 
     def test_excessive_depth_is_complex_not_unavailable(self):
         self.start_accessibility(deep=110)
@@ -1968,14 +1969,14 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         window = client.windows()[0]
         for field, value in (("max_depth", 12), ("max_elements", 120), ("tree_format", "both"), ("max_image_dimension", 100), ("pid", 123)):
             result = client.tool("vision", observations=[window["window_id"]], **{field: value})
-            self.assertEqual(result["structuredContent"]["code"], "invalid_arguments")
+            self.assertEqual(read_result(result)["code"], "invalid_arguments")
 
     def test_desktop_and_window_images_have_a_fixed_cap(self):
         self.start_host(image_cap=True)
         client = self.client()
         status = self.status(client)
         self.assertEqual(self.image(status).size, (2048, 32))
-        window = status["structuredContent"]["apps"][0]["windows"][0]
+        window = read_result(status)["apps"][0]["windows"][0]
         shot = client.tool("vision", observations=[window["window_id"]])
         self.assertEqual(self.image(shot).size, (2048, 32))
         full = client.tool("vision")
@@ -1985,30 +1986,30 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.start_accessibility()
         self.start_host(bad_client=True)
         client = self.client()
-        app = self.status(client)["structuredContent"]["apps"][0]
+        app = read_result(self.status(client))["apps"][0]
         result = client.tool("vision", observations=[app["windows"][0]["window_id"]])
         self.assertFalse(result["isError"], result)
-        self.assertEqual(result["structuredContent"]["observations"][0]["accessibility_error"]["code"], "accessibility_geometry_mismatch")
+        self.assertEqual(read_result(result)["observations"][0]["accessibility_error"]["code"], "accessibility_geometry_mismatch")
         self.assertEqual(self.image(result).size, (54, 60))
 
     def test_ambiguous_accessibility_window_is_not_selected_by_title(self):
         self.start_accessibility(duplicates=True)
         self.start_host()
         client = self.client()
-        app = self.status(client)["structuredContent"]["apps"][0]
+        app = read_result(self.status(client))["apps"][0]
         result = client.tool("vision", observations=[app["windows"][0]["window_id"]])
-        self.assertEqual(result["structuredContent"]["observations"][0]["accessibility_error"]["code"], "accessibility_window_ambiguous")
+        self.assertEqual(read_result(result)["observations"][0]["accessibility_error"]["code"], "accessibility_window_ambiguous")
         self.assertEqual(json.loads(self.atspi_state.read_text())["clicks"], 0)
 
     def test_window_image_is_automatic_and_preserves_overview_coordinates(self):
         self.start_host()
         client = self.client()
-        status = self.status(client)["structuredContent"]
+        status = read_result(self.status(client))
         app = status["apps"][0]
         target = {"kind": "window", "window_id": app["windows"][0]["window_id"]}
         result = client.tool("vision", observations=[target["window_id"]])
         self.assertFalse(result["isError"], result)
-        observation = result["structuredContent"]["observations"][0]
+        observation = read_result(result)["observations"][0]
         self.assertIn("elements", observation)
         self.assertEqual(observation["id"], status["canvas"]["id"])
         self.assertEqual(observation["screenshot"], {
@@ -2019,11 +2020,11 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertEqual(image.getpixel((0, 0)), (20, 20, 123))
         self.assertEqual(image.getpixel((79, 59)), (99, 79, 123))
         rejected = client.tool("vision", observations=[target["window_id"]], max_image_dimension=20)
-        self.assertEqual(rejected["structuredContent"]["code"], "invalid_arguments")
+        self.assertEqual(read_result(rejected)["code"], "invalid_arguments")
         self.assertEqual(json.loads(self.state.read_text())["window_captures"], ["window-1"])
         rejected = client.tool("vision", steps=[{"tool": "press_keys", "args": {"keys": ["a"]}}],
             observations=[target["window_id"]], include_screenshot=True)
-        self.assertEqual(rejected["structuredContent"]["code"], "invalid_arguments")
+        self.assertEqual(read_result(rejected)["code"], "invalid_arguments")
         self.assertEqual(json.loads(self.state.read_text())["input"]["keys"], 0)
 
     def test_window_without_accessibility_still_returns_an_image(self):
@@ -2033,19 +2034,19 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         result = client.tool("vision", observations=[window["window_id"]])
         self.assertFalse(result["isError"], result)
         self.assertEqual(self.image(result).size, (80, 60))
-        observation = result["structuredContent"]["observations"][0]
+        observation = read_result(result)["observations"][0]
         self.assertNotIn("elements", observation)
         self.assertEqual(observation["accessibility_error"]["code"], "accessibility_window_unmatched")
 
     def test_tree_only_window_omits_coordinates_and_can_act(self):
         self.start_host()
         client = self.client()
-        status = self.status(client)["structuredContent"]
+        status = read_result(self.status(client))
         target = {"window_id": status["apps"][0]["windows"][0]["window_id"]}
         before = json.loads(self.state.read_text())
         result = client.tool("accessibility", observations=[target["window_id"]])
-        self.assertEqual(result["structuredContent"]["status"], "ok", result)
-        tree = result["structuredContent"]["observations"][0]
+        self.assertEqual(read_result(result)["status"], "ok", result)
+        tree = read_result(result)["observations"][0]
         self.assertEqual(tree["id"], status["canvas"]["id"])
         self.assertNotIn("screenshot", tree)
         self.assertNotIn("screenshot_error", tree)
@@ -2055,21 +2056,21 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertNotIn("frame=", tree["tree_markdown"])
         result = client.tool("accessibility", steps=[{"tool": "activate", "args": {
             "element_id": button["element_id"]}}], observations=[target["window_id"]])
-        self.assertEqual(result["structuredContent"]["status"], "ok", result)
+        self.assertEqual(read_result(result)["status"], "ok", result)
         self.assertEqual(json.loads(self.atspi_state.read_text())["clicks"], 1)
         self.assertEqual(json.loads(self.state.read_text())["captures"], before["captures"])
         self.assertNotIn("window_captures", json.loads(self.state.read_text()))
         # Disabling screenshots never repairs an invalid overview by capturing.
         self.configure(resize=True)
         result = client.tool("accessibility", observations=[target["window_id"]])
-        self.assertEqual(result["structuredContent"]["observations"][0]["error"]["code"], "stale_capture")
+        self.assertEqual(read_result(result)["observations"][0]["error"]["code"], "stale_capture")
         self.assertEqual(json.loads(self.state.read_text())["captures"], before["captures"])
 
     def test_tree_only_window_requires_a_previous_overview(self):
         self.start_host()
         client = self.client()
         result = client.tool("accessibility", observations=[1])
-        self.assertEqual(result["structuredContent"]["observations"][0]["error"]["code"], "stale_capture")
+        self.assertEqual(read_result(result)["observations"][0]["error"]["code"], "stale_capture")
         state = json.loads(self.state.read_text())
         self.assertEqual(state["captures"], 0)
         self.assertEqual(state["connections"], 0)
@@ -2080,7 +2081,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         window = client.windows()[0]
         before = json.loads(self.state.read_text())["captures"]
         result = client.tool("accessibility", observations=[window["window_id"]])
-        self.assertEqual(result["structuredContent"]["observations"][0]["error"]["code"], "accessibility_window_unmatched")
+        self.assertEqual(read_result(result)["observations"][0]["error"]["code"], "accessibility_window_unmatched")
         self.assertFalse(any(block["type"] == "image" for block in result["content"]))
         self.assertEqual(json.loads(self.state.read_text())["captures"], before)
 
@@ -2089,12 +2090,12 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         client = self.client()
         window = client.windows()[0]["window_id"]
         result = client.tool("vision", observations=[window])
-        self.assertIn("screenshot", result["structuredContent"]["observations"][0])
+        self.assertIn("screenshot", read_result(result)["observations"][0])
         self.assertEqual(self.image(result).size, (80, 60))
         captures = json.loads(self.state.read_text())
         skipped = client.tool("vision", observations=False)
         self.assertFalse(skipped["isError"], skipped)
-        self.assertEqual(skipped["structuredContent"]["observations"], [])
+        self.assertEqual(read_result(skipped)["observations"], [])
         self.assertFalse(any(block["type"] == "image" for block in skipped["content"]))
         self.assertEqual(json.loads(self.state.read_text())["captures"], captures["captures"])
         self.assertEqual(json.loads(self.state.read_text())["window_captures"], captures["window_captures"])
@@ -2103,17 +2104,17 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
                           {"zoom": [0, 0, 20, 20]}):
             result = client.tool("vision", steps=[{"tool": "press_keys", "args": {"keys": ["a"]}}],
                                  observations=[window], **arguments)
-            self.assertEqual(result["structuredContent"]["code"], "invalid_arguments", result)
+            self.assertEqual(read_result(result)["code"], "invalid_arguments", result)
         self.assertEqual(json.loads(self.state.read_text())["input"]["keys"], 0)
 
     def test_window_capture_failure_preserves_available_tree(self):
         self.start_host()
         client = self.client()
-        app = self.status(client)["structuredContent"]["apps"][0]
+        app = read_result(self.status(client))["apps"][0]
         self.configure(refuse=True)
         result = client.tool("vision", observations=[app["windows"][0]["window_id"]])
         self.assertTrue(result["isError"], result)
-        observation = result["structuredContent"]["observations"][0]
+        observation = read_result(result)["observations"][0]
         self.assertIn("elements", observation)
         self.assertIn("screenshot_error", observation)
         self.assertFalse(any(block["type"] == "image" for block in result["content"]))
@@ -2123,7 +2124,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         client = self.client()
         window = client.windows()[0]
         result = client.tool("vision", observations=[window["window_id"]])
-        self.assertEqual(result["structuredContent"]["observations"][0]["error"]["code"], "stale_window_geometry")
+        self.assertEqual(read_result(result)["observations"][0]["error"]["code"], "stale_window_geometry")
         self.assertFalse(any(block["type"] == "image" for block in result["content"]))
 
     def test_window_title_change_during_capture_preserves_the_observation(self):
@@ -2131,8 +2132,8 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         client = self.client()
         window = client.windows()[0]
         result = client.tool("vision", observations=[window["window_id"]])
-        self.assertEqual(result["structuredContent"]["status"], "ok", result)
-        self.assertIn("elements", result["structuredContent"]["observations"][0])
+        self.assertEqual(read_result(result)["status"], "ok", result)
+        self.assertIn("elements", read_result(result)["observations"][0])
 
     def test_mismatched_pid_matches_only_a_unique_window_and_actions_work(self):
         self.start_accessibility()
@@ -2171,7 +2172,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         window = client.windows()[0]
         captures = json.loads(self.state.read_text())["captures"]
         result = client.tool("vision", observations=[window["window_id"] + 99999])
-        self.assertEqual(result["structuredContent"]["observations"][0]["error"]["code"], "window_unavailable")
+        self.assertEqual(read_result(result)["observations"][0]["error"]["code"], "window_unavailable")
         self.assertEqual(json.loads(self.state.read_text())["captures"], captures)
 
     def test_prevalidation_and_removed_arguments_send_no_input(self):
@@ -2183,22 +2184,22 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
             for args in ({name: value}, {"steps": [{"tool": "press_keys", "args": {"keys": ["a"]}},
                          {"tool": "click", "args": {"x": 1, "y": 1, name: value}}]}):
                 result = client.tool("vision", **args)
-                self.assertEqual(result["structuredContent"]["code"], "invalid_arguments")
+                self.assertEqual(read_result(result)["code"], "invalid_arguments")
         for invalid_id in (0, -1, 1.5, True, "1", "c1", 9007199254740992):
             for args in ({"id": invalid_id, "steps": [{"tool": "press_keys", "args": {"keys": ["a"]}}]},
                          {"steps": [{"tool": "press_keys", "args": {"keys": ["a"]}},
                                     {"tool": "click", "args": {"x": 1, "y": 1, "id": invalid_id}}]}):
                 result = client.tool("vision", **args)
-                self.assertEqual(result["structuredContent"]["code"], "invalid_arguments")
+                self.assertEqual(read_result(result)["code"], "invalid_arguments")
         for arguments in ({"keys": []}, {"keys": ["a"] * 6}, {"keys": "a"},
                           {"key": "a"}, {"keys": ["a"], "modifiers": ["ctrl"]}):
             result = client.tool("vision", steps=[
                 {"tool": "click", "args": {"x": 1, "y": 1}},
                 {"tool": "press_keys", "args": arguments}])
-            self.assertEqual(result["structuredContent"]["code"], "invalid_arguments")
+            self.assertEqual(read_result(result)["code"], "invalid_arguments")
         self.assertEqual(json.loads(self.state.read_text())["geometry_requests"], 0)
         for removed in ("computer", "run_steps", "act", "get_desktop_state", "get_window_state", "list_windows", "health_report", "click"):
-            self.assertEqual(client.tool(removed)["structuredContent"]["code"], "unknown_tool")
+            self.assertEqual(read_result(client.tool(removed))["code"], "unknown_tool")
 
     def test_automatic_delays_separate_actions_and_final_screenshot(self):
         self.start_accessibility()
@@ -2209,7 +2210,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         click = {"tool": "click", "args": {"x": 60, "y": 50}}
         result = client.tool("vision", steps=[click] * 3, observations=[])
         self.assertFalse(result["isError"], result)
-        self.assertEqual(result["structuredContent"]["completed"], 3)
+        self.assertEqual(read_result(result)["completed"], 3)
         times = json.loads(self.state.read_text())["input"]["action_times"]
         for earlier, later in zip(times, times[1:]):
             self.assertGreaterEqual(later - earlier, .15)
@@ -2227,7 +2228,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         result = client.tool("vision", steps=[click] * 6 + [
             {"tool": "delay_ms", "args": {"ms": 0}}], observations=[])
         self.assertFalse(result["isError"], result)
-        self.assertEqual(result["structuredContent"]["completed"], 7)
+        self.assertEqual(read_result(result)["completed"], 7)
         times = json.loads(self.state.read_text())["input"]["action_times"]
         for earlier, later in zip(times, times[1:]):
             self.assertGreaterEqual(later - earlier, .15)
@@ -2285,8 +2286,8 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
             {"tool": "click", "args": {"x": 99999, "y": 50}},
             {"tool": "delay_ms", "args": {"ms": 0}},
         ], observations=[])
-        self.assertEqual(result["structuredContent"]["completed"], 2)
-        self.assertEqual(result["structuredContent"]["status"], "failed")
+        self.assertEqual(read_result(result)["completed"], 2)
+        self.assertEqual(read_result(result)["status"], "failed")
         last_action = json.loads(self.state.read_text())["input"]["action_times"][-1]
         self.assertGreaterEqual(json.loads(self.state.read_text())["capture_times"][-1] - last_action, .3)
 
@@ -2318,7 +2319,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.computer_path.unlink()
         self.assertTrue(select.select([client.process.stdout], [], [], 2)[0])
         result = json.loads(client.process.stdout.readline())["result"]
-        data = result["structuredContent"]
+        data = read_result(result)
         self.assertTrue(result["isError"], result)
         self.assertEqual(data["code"], "computer_use_disconnected")
         self.assertEqual(json.loads(self.atspi_state.read_text())["clicks"], 1)
@@ -2336,7 +2337,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
             {"tool": "delay_ms", "args": {"ms": 250}},
         ])
         self.assertFalse(result["isError"], result)
-        self.assertEqual(result["structuredContent"]["completed"], 4)
+        self.assertEqual(read_result(result)["completed"], 4)
         self.assertEqual(sum(block["type"] == "image" for block in result["content"]), 1)
         state = json.loads(self.state.read_text())
         self.assertEqual(state["captures"], before + 1)
@@ -2348,7 +2349,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         client = self.client()
         result = client.tool("vision", steps=[{"tool": "delay_ms", "args": {"ms": 0}}], observations=False)
         self.assertFalse(result["isError"], result)
-        self.assertEqual(result["structuredContent"]["observations"], [])
+        self.assertEqual(read_result(result)["observations"], [])
         self.assertFalse(any(block["type"] == "image" for block in result["content"]))
         state = json.loads(self.state.read_text())
         self.assertEqual((state["captures"], state["connections"]), (0, 0))
@@ -2367,7 +2368,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
                 {"tool": "press_keys", "args": {"keys": ["a"]}},
                 {"tool": "delay_ms", "args": args},
             ])
-            self.assertEqual(result["structuredContent"]["code"], "invalid_arguments")
+            self.assertEqual(read_result(result)["code"], "invalid_arguments")
         self.assertEqual(json.loads(self.state.read_text())["connections"], 0)
 
     def test_delay_cancellation_skips_later_input_and_screenshot(self):
@@ -2401,7 +2402,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.computer_path.unlink()
         self.assertTrue(select.select([client.process.stdout], [], [], 2)[0], "delay did not stop on revocation")
         result = json.loads(client.process.stdout.readline())["result"]
-        data = result["structuredContent"]
+        data = read_result(result)
         self.assertTrue(result["isError"], result)
         self.assertEqual(data["code"], "computer_use_disconnected")
         state = json.loads(self.state.read_text())
@@ -2410,7 +2411,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
     def test_real_eis_batch_and_global_coordinates(self):
         self.start_host()
         client = self.client()
-        capture = self.status(client)["structuredContent"]["canvas"]["id"]
+        capture = read_result(self.status(client))["canvas"]["id"]
         result = client.tool("vision", id=capture, steps=[
             {"tool": "click", "args": {"x": 60, "y": 50}},
             {"tool": "scroll", "args": {"x": 60, "y": 50, "direction": "down", "amount": 2}},
@@ -2418,7 +2419,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
             {"tool": "type_text", "args": {"text": "世界"}},
         ])
         self.assertFalse(result["isError"], result)
-        data = result["structuredContent"]
+        data = read_result(result)
         self.assertEqual(data["completed"], 4)
         self.assertEqual(set(data), {"completed", "status", "warnings", "observations"})
         self.assertEqual(data["status"], "ok")
@@ -2447,8 +2448,8 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         stale = client.tool("vision", id=current, observations=False, steps=[
             {"tool": "click", "args": {"x": 60, "y": 50, "id": capture}}])
         self.assertTrue(stale["isError"], stale)
-        self.assertEqual(stale["structuredContent"]["failed"]["code"], "stale_capture")
-        self.assertEqual(stale["structuredContent"]["completed"], 0)
+        self.assertEqual(read_result(stale)["failed"]["code"], "stale_capture")
+        self.assertEqual(read_result(stale)["completed"], 0)
         self.status(client)
         self.assertEqual(json.loads(self.state.read_text())["input"]["clicks"], 2)
 
@@ -2469,8 +2470,8 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.status(client)
         result = client.tool("vision", steps=[{"tool": "type_text", "args": {"text": "世界"}}])
         self.assertTrue(result["isError"], result)
-        self.assertEqual(result["structuredContent"]["failed"]["code"], "clipboard_selection_changed")
-        self.assertEqual(result["structuredContent"]["completed"], 0)
+        self.assertEqual(read_result(result)["failed"]["code"], "clipboard_selection_changed")
+        self.assertEqual(read_result(result)["completed"], 0)
         self.assertEqual(json.loads(self.state.read_text())["input"]["keys"], 0)
 
     def test_cancellation_interrupts_a_stalled_host(self):
@@ -2498,7 +2499,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         client = self.client()
         result = client.tool("vision", observations=[])
         self.assertFalse(result["isError"], result)
-        data = result["structuredContent"]["observations"][0]
+        data = read_result(result)["observations"][0]
         self.assertEqual(self.image(result).size, (500, 140))
         # Gap lies at x=320..340 in this overview.
         self.assertEqual(self.image(result).getpixel((330, 75)), (0, 0, 0))
@@ -2514,14 +2515,14 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
     def test_removed_zoom_is_rejected_before_effects(self):
         self.start_host()
         client = self.client()
-        initial = self.status(client)["structuredContent"]["canvas"]["id"]
+        initial = read_result(self.status(client))["canvas"]["id"]
         self.status(client)
         for observe, capture in (({"kind": "desktop", "zoom": [0, 0, 20, 20]}, initial),
                                  ({"kind": "desktop", "zoom": [-1, 0, 20, 20]}, None),
                                  ({"kind": "desktop", "zoom": [0, 0, 200, 20]}, None)):
             result = client.tool("vision", **({"id": capture} if capture else {}),
                 steps=[{"tool": "click", "args": {"x": 40, "y": 40}}], zoom=observe["zoom"])
-            self.assertEqual(result["structuredContent"]["code"], "invalid_arguments", result)
+            self.assertEqual(read_result(result)["code"], "invalid_arguments", result)
         self.status(client)
         self.assertEqual(json.loads(self.state.read_text())["input"]["clicks"], 0)
 
@@ -2535,7 +2536,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
             {"tool": "click", "args": {"x": -1, "y": 40}},
             {"tool": "press_keys", "args": {"keys": ["a"]}},
         ])
-        data = result["structuredContent"]
+        data = read_result(result)
         self.assertEqual((data["completed"], data["failed"]["index"]), (1, 1))
         self.assertEqual(set(data), {"completed", "failed", "status", "observations"})
         self.assertEqual(data["status"], "failed")
@@ -2545,14 +2546,14 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertEqual(json.loads(self.state.read_text())["captures"], captures + 1)
         self.configure(refuse=True)
         result = client.tool("vision", steps=[{"tool": "click", "args": {"x": 40, "y": 40}}])
-        self.assertEqual(result["structuredContent"]["completed"], 1)
-        self.assertEqual(result["structuredContent"]["status"], "failed")
+        self.assertEqual(read_result(result)["completed"], 1)
+        self.assertEqual(read_result(result)["status"], "failed")
         self.assertTrue(result["isError"])
-        self.assertIn("error", result["structuredContent"]["observations"][0])
+        self.assertIn("error", read_result(result)["observations"][0])
         error = client.tool("status")
         self.assertTrue(error["isError"])
-        self.assertIn("code", error["structuredContent"])
-        self.assertEqual(set(error["structuredContent"]), {"code", "hint"})
+        self.assertIn("code", read_result(error))
+        self.assertEqual(set(read_result(error)), {"code", "hint"})
 
     def test_capture_formats_truncation_and_layout_errors(self):
         self.start_host()
@@ -2582,7 +2583,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
     def test_kwin_replacement_invalidates_existing_handles_then_recovers(self):
         self.start_host()
         client = self.client()
-        original = self.status(client)["structuredContent"]["canvas"]["id"]
+        original = read_result(self.status(client))["canvas"]["id"]
         self.stop(self.kwin)
         self.kwin = self.child(["/usr/bin/python3", str(ROOT / "tests/scu_kwin_fixture.py"),
             self.address, str(self.state), str(self.control), str(self.backend)])
@@ -2590,9 +2591,9 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         time.sleep(.1)
         result = client.tool("status")
         self.assertTrue(result["isError"], result)
-        self.assertEqual(result["structuredContent"]["code"], "computer_use_disconnected")
+        self.assertEqual(read_result(result)["code"], "computer_use_disconnected")
         fresh = self.status(client)
-        self.assertNotEqual(fresh["structuredContent"]["canvas"]["id"], original)
+        self.assertNotEqual(read_result(fresh)["canvas"]["id"], original)
 
     def test_removed_zoom_is_rejected_before_keyboard_effects(self):
         self.start_host()
@@ -2601,7 +2602,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.configure(resize=True)
         result = client.tool("vision", steps=[{"tool": "press_keys", "args": {"keys": ["a"]}}],
             zoom=[0, 0, 20, 20])
-        self.assertEqual(result["structuredContent"]["code"], "invalid_arguments")
+        self.assertEqual(read_result(result)["code"], "invalid_arguments")
         self.status(client)
         self.assertEqual(json.loads(self.state.read_text())["input"]["keys"], 0)
 
@@ -2621,7 +2622,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
                     {"tool": "press_keys", "args": {"keys": ["a"]}}]})):
                     result = client.tool(name, **args)
                     self.assertTrue(result["isError"], result)
-                    self.assertEqual(result["structuredContent"]["code"], "missing_dependency")
+                    self.assertEqual(read_result(result)["code"], "missing_dependency")
                     self.assertTrue(all(block["type"] == "text" for block in result["content"]))
         state = json.loads(self.state.read_text())
         self.assertEqual((state["captures"], state["connections"]), (0, 0))
@@ -2633,10 +2634,10 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
             {"tool": "press_keys", "args": {"keys": ["a"]}}]})):
             result = client.tool(name, **args)
             self.assertTrue(result["isError"], result)
-            self.assertEqual(result["structuredContent"]["code"], "accessibility_unavailable")
+            self.assertEqual(read_result(result)["code"], "accessibility_unavailable")
             self.assertTrue(all(block["type"] == "text" for block in result["content"]))
-            self.assertNotIn("canvas", result["structuredContent"])
-            self.assertNotIn("apps", result["structuredContent"])
+            self.assertNotIn("canvas", read_result(result))
+            self.assertNotIn("apps", read_result(result))
         state = json.loads(self.state.read_text())
         self.assertEqual((state["captures"], state["connections"]), (0, 0))
         self.start_accessibility()
@@ -2651,7 +2652,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
             {"tool": "press_keys", "args": {"keys": ["a"]}}]})):
             result = client.tool(name, **args)
             self.assertTrue(result["isError"], result)
-            self.assertEqual(result["structuredContent"]["code"], "accessibility_unavailable")
+            self.assertEqual(read_result(result)["code"], "accessibility_unavailable")
             self.assertTrue(all(block["type"] == "text" for block in result["content"]))
         state = json.loads(self.state.read_text())
         self.assertEqual((state["captures"], state["connections"]), (0, 0))
@@ -2669,7 +2670,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertIn("supportedVersions", client.call("server/discover", {"_meta": metadata})["result"])
         self.assertEqual(client.call("initialize", {"protocolVersion": "2025-06-18"})["result"]["protocolVersion"], "2025-06-18")
         bad = client.tool("vision", steps=[{"tool": "type_text", "args": {"text": "世界", "bad": True}}])
-        self.assertEqual(bad["structuredContent"]["code"], "invalid_arguments")
+        self.assertEqual(read_result(bad)["code"], "invalid_arguments")
         for line in ("not json", "x" * (1024 * 1024 + 1)):
             client.process.stdin.write(line + "\n")
             client.process.stdin.flush()
@@ -2708,7 +2709,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertTrue(result["isError"], result)
         self.assertGreaterEqual(elapsed, 29)
         self.assertLess(elapsed, 32)
-        self.assertEqual(result["structuredContent"]["code"], "timeout")
+        self.assertEqual(read_result(result)["code"], "timeout")
         self.configure(hold_geometry=False)
         time.sleep(.2)
         self.status(client)

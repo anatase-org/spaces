@@ -792,8 +792,8 @@ static void list_tools(JsonResult *result)
     result_member(result, "tools", tool_list);
 }
 
-/* Human-facing content stays readable; structuredContent carries the same
- * compact trees and the existing observation/status metadata, never raw rows. */
+/* The readable content is the tool response seen by the model. Internal
+ * observation records are never returned as a second representation. */
 static void append_result_value(GString *text, JsonResult *value)
 {
     char *encoded = yyjson_mut_val_write(value, 0, NULL);
@@ -937,7 +937,6 @@ static void add_tool_result(JsonResult *result, const Tool *tool, JsonResult *ou
 {
     JsonResult *content = result_array();
     JsonResult *text = result_object();
-    JsonResult *structured = output != NULL ? output : error_payload();
     char *body = tool_result_text(tool, output);
     if (output && tool && !strcmp(tool->name, "status") &&
         yyjson_mut_is_true(yyjson_mut_obj_get(output, "locked"))) {
@@ -962,7 +961,6 @@ static void add_tool_result(JsonResult *result, const Tool *tool, JsonResult *ou
         }
     }
     result_member(result, "content", content);
-    result_member(result, "structuredContent", structured);
     gboolean batch_failed = output != NULL && tool != NULL &&
                             tool->batch != BATCH_NONE &&
                             g_strcmp0(yyjson_mut_get_str(yyjson_mut_obj_get(output, "status")), "failed") == 0;

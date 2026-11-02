@@ -16,7 +16,7 @@ import subprocess
 import time
 import uuid
 
-from scu_tree import read_trees
+from scu_tree import read_result
 
 
 class Probe:
@@ -46,17 +46,17 @@ class Probe:
         for index, block in enumerate(reply.get("content", [])):
             if block["type"] == "image":
                 (self.artifacts / f"{prefix}-{index}.png").write_bytes(base64.b64decode(block["data"]))
-        metadata = reply.get("structuredContent", {})
-        (self.artifacts / f"{prefix}.json").write_text(json.dumps(metadata, indent=2, ensure_ascii=False))
-        (self.artifacts / f"{prefix}-response.json").write_text(json.dumps(reply, indent=2, ensure_ascii=False))
+        metadata = read_result(reply)
+        (self.artifacts / f"{prefix}.json").write_text(json.dumps(reply, indent=2, ensure_ascii=False))
+        (self.artifacts / f"{prefix}.txt").write_text("\n".join(block["text"] for block in reply.get("content", []) if block["type"] == "text"))
         if expect_error:
             assert reply.get("isError"), metadata
             error = metadata.get("failed", metadata)
             assert error.get("code") == expect_error, metadata
-            assert error.get("hint") == "The screen is locked. Vision tools are unavailable.", metadata
+            assert error.get("hint", "").startswith("The screen is locked. Vision tools are unavailable."), metadata
         else:
             assert not reply.get("isError"), metadata
-        return read_trees(metadata)
+        return metadata
 
     def close(self):
         if not self.process.stdin.closed:
