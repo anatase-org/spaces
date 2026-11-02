@@ -14,6 +14,7 @@ DeviceAllow=char-pts rw
 DeviceAllow=/dev/fuse rwm
 Environment=PYTHONDONTWRITEBYTECODE=1
 ExecStart=/usr/bin/spaces.priv launch %I
+ExecStopPost=/usr/bin/systemd-nspawn --cleanup --machine=%I --directory=/var/lib/spaces/%I/rootfs
 
 [Install]
 WantedBy=multi-user.target
