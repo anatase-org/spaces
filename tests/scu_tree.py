@@ -82,7 +82,7 @@ def read_result(response):
                 app['windows'].append(dict(window_id=int(match[1]), title=title,
                     active=' active' in rest, shown=' hidden' not in rest,
                     bounds=dict(zip(('x', 'y', 'width', 'height'), bounds))))
-            elif match := re.fullmatch(r'Status: (\w+); completed: (\d+)', line):
+            elif match := re.fullmatch(r'Status: (\w+). completed: (\d+)', line):
                 result.update(status=match[1], completed=int(match[2]), observations=[])
             elif match := re.fullmatch(r'(Window (\d+)|Desktop)(?:; (\d+) x (\d+))?', line):
                 finish_tree()

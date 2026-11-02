@@ -94,7 +94,7 @@ static const char accessibility_description[] =
  * in this header. */
 /* Host observations, accessibility and input. */
 static const char scu_text_cancelled[] =
-    "Operation cancelled; completed actions were not rolled back.";
+    "Operation cancelled. Completed actions were not rolled back.";
 static const char scu_text_timeout[] =
     "Operation exceeded its time limit; inspect state before retrying.";
 static const char scu_text_atspi_dependency[] =
@@ -1207,7 +1207,7 @@ static char *tool_result_text(const Tool *tool, JsonResult *output)
         }
     } else {
         const char *status = yyjson_mut_get_str(yyjson_mut_obj_get(output, "status"));
-        g_string_append_printf(text, "Status: %s; completed: %" G_GINT64_FORMAT "\n", status ? status : "ok",
+        g_string_append_printf(text, "Status: %s. completed: %" G_GINT64_FORMAT "\n", status ? status : "ok",
             yyjson_mut_get_sint(yyjson_mut_obj_get(output, "completed")));
         append_result_error(text, "Failed", yyjson_mut_obj_get(output, "failed"));
         JsonResult *warnings = yyjson_mut_obj_get(output, "warnings");

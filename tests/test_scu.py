@@ -1343,7 +1343,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertTrue(response["isError"], response)
         self.assertEqual(read_result(response)["completed"], 1)
         text = response["content"][0]["text"]
-        self.assertIn("Status: failed; completed: 1", text)
+        self.assertIn("Status: failed. completed: 1", text)
         self.assertIn(f"Window {window + 99}", text)
         self.assertIn("Error: window_unavailable", text)
         recovered = client.tool("accessibility", observations={"window": window})
@@ -2417,6 +2417,16 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         observation = read_result(result)["observations"][0]
         self.assertIn("elements", observation)
         self.assertIn("screenshot_error", observation)
+        self.assertFalse(any(block["type"] == "image" for block in result["content"]))
+
+    def test_accessibility_observation_preserves_tree_while_window_moves(self):
+        self.start_host(moving_window=True)
+        client = self.client()
+        window = client.windows()[0]
+        result = client.tool("accessibility", observations={"window": window["window_id"], "refresh": True})
+        self.assertFalse(result["isError"], result)
+        self.assertEqual(read_result(result)["status"], "ok")
+        self.assertIn("elements", read_result(result)["observations"][0])
         self.assertFalse(any(block["type"] == "image" for block in result["content"]))
 
     def test_window_capture_preserves_observation_when_window_moves(self):
