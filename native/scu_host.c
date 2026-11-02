@@ -3166,21 +3166,91 @@ static gboolean accessibility_geometry(JsonValue *window, JsonValue *candidate,
         accessibility_size(window, candidate, anchor, origin, ratio);
 }
 
+typedef struct {
+    JsonValue *candidate;
+    guint pid;
+    CanvasRect anchor, client;
+    double ratio;
+    guint matches, frames, titles, sizes;
+    gboolean ambiguous;
+} AccessibilityMatch;
+
+static gboolean accessibility_has_pid(JsonValue *apps, gint64 pid)
+{
+    if (pid <= 0) return FALSE;
+    size_t i, n;
+    JsonValue *app;
+    yyjson_arr_foreach(apps, i, n, app) {
+        if (json_number(app, "pid", 0) == pid) return TRUE;
+    }
+    return FALSE;
+}
+
+/* Check the reverse association too: one accessibility frame must not fit
+ * several compositor windows. A zero PID filter searches all processes. */
+static guint accessibility_compositor_matches(JsonValue *candidate,
+    gint64 pid_filter, gboolean require_title)
+{
+    guint matches = 0;
+    size_t i, n;
+    JsonValue *window;
+    JsonValue *windows = json_member(yyjson_doc_get_root(visual.geometry), "windows");
+    yyjson_arr_foreach(windows, i, n, window) {
+        if (pid_filter && json_number(window, "pid", 0) != pid_filter) continue;
+        CanvasRect anchor, client;
+        double ratio;
+        if (accessibility_geometry(window, candidate, &anchor, &client, &ratio, require_title))
+            matches++;
+    }
+    return matches;
+}
+
+static AccessibilityMatch find_accessibility_match(JsonValue *window,
+    JsonValue *apps, gint64 pid_filter, gboolean require_title)
+{
+    AccessibilityMatch result = {0};
+    size_t i, n, j, m;
+    JsonValue *app, *candidate;
+    yyjson_arr_foreach(apps, i, n, app) {
+        if (pid_filter && json_number(app, "pid", 0) != pid_filter) continue;
+        yyjson_arr_foreach(json_member(app, "windows"), j, m, candidate) {
+            CanvasRect anchor, client;
+            double ratio;
+            gboolean title_matches = accessibility_titles_match(window, candidate);
+            gboolean size_matches = accessibility_size(window, candidate, &anchor, &client, &ratio);
+            result.frames++;
+            result.titles += title_matches;
+            result.sizes += size_matches;
+            if (!size_matches || (require_title && !title_matches)) continue;
+
+            /* PID + title identifies the process and window. Size-only or
+             * cross-process fallback also needs a unique reverse association. */
+            if (!pid_filter || !require_title) {
+                guint reverse_matches = accessibility_compositor_matches(candidate, pid_filter, require_title);
+                if (reverse_matches != 1) {
+                    result.ambiguous |= reverse_matches > 1;
+                    continue;
+                }
+            }
+            result.candidate = candidate;
+            result.pid = json_number(app, "pid", 0);
+            result.anchor = anchor;
+            result.client = client;
+            result.ratio = ratio;
+            result.matches++;
+        }
+    }
+    return result;
+}
+
 /* Semantic rectangles are private window-relative coordinates until a unique
  * KWin association anchors them. Raw rectangles never cross the MCP boundary. */
 static JsonValue *requested_kwin_window(JsonValue *args);
 
 static JsonResult *window_tree(JsonValue *args, gboolean read_text)
 {
-    CanvasRect client = {0};
-    JsonValue *candidate;
-    size_t i, n;
     yyjson_doc *listing = NULL;
-    JsonValue *match = NULL;
-    CanvasRect anchor = {0};
-    double ratio = 1;
-    guint matches = 0, best = 0, match_pid = 0, frames = 0, titles = 0, sizes = 0;
-    gboolean ambiguous = FALSE;
+    AccessibilityMatch match = {0};
     gint64 until = g_get_monotonic_time() + G_USEC_PER_SEC;
     do {
         yyjson_doc_free(listing);
@@ -3194,64 +3264,25 @@ static JsonResult *window_tree(JsonValue *args, gboolean read_text)
             yyjson_doc_free(listing);
             return scu_fail("window_unavailable", scu_text_kwin_window_unavailable);
         }
-        matches = best = frames = titles = sizes = 0;
-        ambiguous = FALSE;
-        /* Titles are mutable metadata. Prefer title + size, then accept a
-         * unique size association from these freshly queried inventories. */
-        for (guint pass = 0; pass < 2 && !matches && !ambiguous; pass++) {
-            gboolean require_title = pass == 0;
-            JsonValue *app;
-            yyjson_arr_foreach(json_member(yyjson_doc_get_root(listing), "apps"), i, n, app) {
-                guint score = json_number(app, "pid", -1) == json_number(window, "pid", -2) ? 2 : 1;
-                size_t j, m;
-                yyjson_arr_foreach(json_member(app, "windows"), j, m, candidate) {
-                    CanvasRect root, origin;
-                    double scale;
-                    if (require_title) {
-                        frames++;
-                        titles += accessibility_titles_match(window, candidate);
-                        sizes += accessibility_size(window, candidate, &root, &origin, &scale);
-                    }
-                    if (score < best || !accessibility_geometry(window, candidate, &root, &origin, &scale, require_title))
-                        continue;
-                    /* Flatpak bus credentials and compositor PIDs can differ.
-                     * Size-only matching also requires a unique reverse match,
-                     * restricted to this process when its identity is known. */
-                    if (score == 1 || !require_title) {
-                        guint alternatives = 0;
-                        size_t w, total;
-                        JsonValue *other;
-                        yyjson_arr_foreach(json_member(yyjson_doc_get_root(visual.geometry), "windows"), w, total, other) {
-                            if (score == 2 && json_number(other, "pid", -1) != json_number(app, "pid", -2))
-                                continue;
-                            CanvasRect unused_anchor, unused_origin;
-                            double unused_ratio;
-                            alternatives += accessibility_geometry(other, candidate, &unused_anchor, &unused_origin, &unused_ratio, require_title);
-                        }
-                        if (alternatives != 1) {
-                            ambiguous |= alternatives > 1;
-                            continue;
-                        }
-                    }
-                    if (score > best) { best = score; matches = 0; }
-                    match = candidate;
-                    match_pid = json_number(app, "pid", 0);
-                    anchor = root;
-                    client = origin;
-                    ratio = scale;
-                    matches++;
-                }
-            }
-        }
+        JsonValue *apps = json_member(yyjson_doc_get_root(listing), "apps");
+        /* Filter by process first. Search all applications only when AT-SPI
+         * lacks the compositor PID, as can happen with sandboxed applications. */
+        gint64 pid = json_number(window, "pid", 0);
+        gint64 pid_filter = accessibility_has_pid(apps, pid) ? pid : 0;
+        match = find_accessibility_match(window, apps, pid_filter, TRUE);
+        /* Titles can change during navigation. Try size alone only when
+         * title matching found no candidates and no ambiguity. */
+        if (!match.matches && !match.ambiguous)
+            match = find_accessibility_match(window, apps, pid_filter, FALSE);
         /* Navigation can briefly leave several equally sized frames with old
          * titles. Let both inventories settle before rejecting ambiguity. */
-        if ((matches == 1 && !ambiguous) || g_get_monotonic_time() >= until) break;
+        if ((match.matches == 1 && !match.ambiguous) || g_get_monotonic_time() >= until) break;
         if (!scu_pause(50)) { yyjson_doc_free(listing); return NULL; }
     } while (TRUE);
-    if (matches != 1 || ambiguous) {
-        const char *code = matches > 1 || ambiguous ? "accessibility_window_ambiguous"
-            : titles && !sizes ? "accessibility_geometry_mismatch" : "accessibility_window_unmatched";
-        char *hint = g_strdup_printf(scu_text_window_association_failed, frames, titles, sizes);
+    if (match.matches != 1 || match.ambiguous) {
+        const char *code = match.matches > 1 || match.ambiguous ? "accessibility_window_ambiguous"
+            : match.titles && !match.sizes ? "accessibility_geometry_mismatch" : "accessibility_window_unmatched";
+        char *hint = g_strdup_printf(scu_text_window_association_failed, match.frames, match.titles, match.sizes);
         scu_fail(code, hint);
         g_free(hint);
         yyjson_doc_free(listing);
@@ -3261,9 +3292,9 @@ static JsonResult *window_tree(JsonValue *args, gboolean read_text)
     JsonResult *copy = yyjson_val_mut_copy(request, args);
     yyjson_mut_obj_add_bool(request, copy, "read_text", read_text);
     yyjson_mut_obj_put(copy, yyjson_mut_str(request, "window_id"),
-        yyjson_mut_uint(request, json_number(match, "window_id", 0)));
+        yyjson_mut_uint(request, json_number(match.candidate, "window_id", 0)));
     /* The worker validates its own process identity, not the KWin PID. */
-    yyjson_mut_obj_put(copy, yyjson_mut_str(request, "pid"), yyjson_mut_uint(request, match_pid));
+    yyjson_mut_obj_put(copy, yyjson_mut_str(request, "pid"), yyjson_mut_uint(request, match.pid));
     JsonResult *scales = yyjson_mut_arr(request);
     for (guint d = 0; d < visual.display_count; d++)
         yyjson_mut_arr_add_real(request, scales, (double)visual.displays[d].width / visual.displays[d].logical_width);
@@ -3278,14 +3309,15 @@ static JsonResult *window_tree(JsonValue *args, gboolean read_text)
         return tree;
     }
     JsonResult *rows = yyjson_mut_obj_get(tree, "elements"), *row;
+    size_t i, n;
     yyjson_mut_arr_foreach(rows, i, n, row) {
         yyjson_doc *raw = yyjson_mut_val_imut_copy(yyjson_mut_obj_get(row, "frame"), NULL);
         CanvasRect rect;
         if (raw && read_rect(yyjson_doc_get_root(raw), &rect)) {
-            rect.x = client.x + (rect.x - anchor.x) * ratio;
-            rect.y = client.y + (rect.y - anchor.y) * ratio;
-            rect.width *= ratio;
-            rect.height *= ratio;
+            rect.x = match.client.x + (rect.x - match.anchor.x) * match.ratio;
+            rect.y = match.client.y + (rect.y - match.anchor.y) * match.ratio;
+            rect.width *= match.ratio;
+            rect.height *= match.ratio;
             JsonResult *converted = overview_rect(&rect);
             const char *coordinates[] = {"x", "y", "width", "height"};
             for (guint c = 0; c < G_N_ELEMENTS(coordinates); c++) {

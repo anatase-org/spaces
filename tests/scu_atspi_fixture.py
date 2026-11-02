@@ -100,20 +100,24 @@ XML = """<node>
 
 def main():
     address, state_path = sys.argv[1:3]
+    application_only = "--application-only" in sys.argv[3:]
     duplicate_windows = "--duplicate-windows" in sys.argv[3:]
     window_paths = [WINDOW, WINDOW_TWO] if duplicate_windows or "--two-windows" in sys.argv[3:] else [WINDOW]
     flags = (Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT
              | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION)
     registry = Gio.DBusConnection.new_for_address_sync(address, flags, None, None)
     app = Gio.DBusConnection.new_for_address_sync(address, flags, None, None)
-    registry.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus",
-                      "org.freedesktop.DBus", "RequestName",
-                      GLib.Variant("(su)", ("org.a11y.atspi.Registry", 0)),
-                      None, Gio.DBusCallFlags.NONE, 3000, None)
+    if not application_only:
+        registry.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus",
+                          "org.freedesktop.DBus", "RequestName",
+                          GLib.Variant("(su)", ("org.a11y.atspi.Registry", 0)),
+                          None, Gio.DBusCallFlags.NONE, 3000, None)
     node = Gio.DBusNodeInfo.new_for_xml(XML)
     state = {"clicks": 0, "action_times": [], "text": "", "password_reads": 0, "focus_requests": 0,
              "registrations": 0, "deregistrations": 0, "listeners": {},
              "attribute_queries": 0, "idle_pings": 0, "events": 0}
+    if application_only:
+        state["bus_name"] = app.get_unique_name()
     activation = next((int(arg.split("=", 1)[1]) for arg in sys.argv[3:]
                        if arg.startswith("--activation-delay=")), None)
     exposed = activation is None
@@ -309,6 +313,10 @@ def main():
     def children(connection, path):
         # libatspi asks for individual children. Building the entire sibling
         # list for every index made the wide-tree tests quadratic.
+        if connection == registry:
+            peers = Path(state_path).with_suffix(".apps.json")
+            names = json.loads(peers.read_text()) if peers.exists() else []
+            return [(name, ROOT) for name in [*names, app.get_unique_name()]]
         if element_ids:
             element_config()
         return cached_children(connection, path, element_version, exposed, window_exposed)
@@ -316,8 +324,6 @@ def main():
     @lru_cache(maxsize=8192)
     def cached_children(connection, path, version, app_exposed, frame_exposed):
         nonlocal window_pending
-        if connection == registry:
-            return [(app.get_unique_name(), ROOT)]
         if path == ROOT and not window_exposed:
             if not window_pending:
                 window_pending = True
@@ -604,12 +610,14 @@ def main():
         return True
 
     for connection, paths in ((registry, [ROOT]), (app, [ROOT, *window_paths, BUTTON, ENTRY, PASSWORD, PANEL, SLIDER, DOCUMENT, TOOLTIP, PROSE, CAPTION, HEADING, LINK, TOOLBAR, SEPARATOR, DIVIDER, *reading_names, *extra_paths])):
+        if connection == registry and application_only:
+            continue
         if connection == registry and "--registry-unavailable" in sys.argv[3:]:
             continue  # Own the name, but expose no working registry object.
         for path in paths:
             for info in node.interfaces:
                 connection.register_object(path, info, method, property_get, property_set)
-    if "--registry-unavailable" not in sys.argv[3:]:
+    if not application_only and "--registry-unavailable" not in sys.argv[3:]:
         registry.register_object("/org/a11y/atspi/registry",
             node.lookup_interface("org.a11y.atspi.Registry"), method, None, None)
     save()

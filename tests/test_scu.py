@@ -241,9 +241,20 @@ class ScuTests(unittest.TestCase):
         self.atspi_state.with_suffix(".title").unlink(missing_ok=True)
         self.atspi_state.with_suffix(".elements.json").unlink(missing_ok=True)
         self.atspi_state.with_suffix(".value.json").unlink(missing_ok=True)
+        self.atspi_state.with_suffix(".apps.json").unlink(missing_ok=True)
         self.atspi = self.child(command)
         self.ready(self.atspi)
         self.configure(app_pid=self.atspi.pid, two_windows=two_windows, atspi_address=address)
+
+    def add_accessibility_application(self):
+        state = self.directory / "other-atspi-state.json"
+        state.with_suffix(".title").unlink(missing_ok=True)
+        peer = self.child(["/usr/bin/python3", str(ROOT / "tests/scu_atspi_fixture.py"),
+                           f"unix:path={self.socket_path}", str(state), "--application-only"])
+        self.ready(peer)
+        self.atspi_state.with_suffix(".apps.json").write_text(
+            json.dumps([json.loads(state.read_text())["bus_name"]]))
+        return peer, state
 
     def start_host(self, accessibility=True, **config):
         if accessibility and not hasattr(self, "atspi"):
@@ -2123,6 +2134,33 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
     def test_size_fallback_rejects_multiple_accessibility_candidates(self):
         self.start_accessibility(duplicates=True)
         self.start_host(window_title="Changed title")
+        tree = self.snapshot(self.client())
+        self.assertEqual(tree["accessibility_error"]["code"], "accessibility_window_ambiguous")
+        self.assertNotIn("elements", tree)
+
+    def test_pid_size_match_ignores_ambiguity_from_other_processes(self):
+        self.start_accessibility()
+        self.atspi_state.with_suffix(".title").write_text("Loading primary page")
+        other, _ = self.add_accessibility_application()
+        self.start_host(window_title="New page title", duplicate_identity=True, duplicate_pid=other.pid)
+        tree = self.snapshot(self.client())
+        self.assertNotIn("accessibility_error", tree)
+        self.assertEqual(tree["elements"][0]["label"], "Loading primary page")
+
+    def test_pid_size_match_precedes_title_match_in_other_process(self):
+        self.start_accessibility()
+        self.atspi_state.with_suffix(".title").write_text("Loading primary page")
+        self.add_accessibility_application()
+        self.start_host()
+        tree = self.snapshot(self.client())
+        self.assertNotIn("accessibility_error", tree)
+        self.assertEqual(tree["elements"][0]["label"], "Loading primary page")
+
+    def test_pid_ambiguity_is_not_resolved_by_another_process_title(self):
+        self.start_accessibility(duplicates=True)
+        self.atspi_state.with_suffix(".title").write_text("Loading primary page")
+        self.add_accessibility_application()
+        self.start_host()
         tree = self.snapshot(self.client())
         self.assertEqual(tree["accessibility_error"]["code"], "accessibility_window_ambiguous")
         self.assertNotIn("elements", tree)
