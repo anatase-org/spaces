@@ -174,7 +174,8 @@ class ScuTests(unittest.TestCase):
                             deep=0, wide=0, delayed_window=False, title_after_attributes=False,
                             geometry_after_attributes=False, numeric=False, numeric_keyboard=False,
                             numeric_readonly=False, numeric_delay=False, browser=False,
-                            offscreen=False, tooltips=False, placeholders=0, long_labels=False, element_ids=False, reading_text=False):
+                            offscreen=False, tooltips=False, placeholders=0, long_labels=False, element_ids=False, reading_text=False,
+                            decorations=False):
         self.atspi_bus, address = self.bus(self.socket_path)
         self.atspi_state = self.directory / "atspi-state.json"
         command = ["/usr/bin/python3", str(ROOT / "tests/scu_atspi_fixture.py"), address, str(self.atspi_state)]
@@ -210,6 +211,8 @@ class ScuTests(unittest.TestCase):
             command.append("--tooltips")
         if reading_text:
             command.append("--reading-text")
+        if decorations:
+            command.append("--decorations")
         if placeholders:
             command.append(f"--placeholders={placeholders}")
         if deep:
@@ -236,6 +239,7 @@ class ScuTests(unittest.TestCase):
         self.atspi_state.with_suffix(".actions.json").unlink(missing_ok=True)
         self.atspi_state.with_suffix(".title").unlink(missing_ok=True)
         self.atspi_state.with_suffix(".elements.json").unlink(missing_ok=True)
+        self.atspi_state.with_suffix(".value.json").unlink(missing_ok=True)
         self.atspi = self.child(command)
         self.ready(self.atspi)
         self.configure(app_pid=self.atspi.pid, two_windows=two_windows, atspi_address=address)
@@ -1214,6 +1218,31 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
             actual = read_result(response)["observations"][0]["elements"]
             self.assertEqual(next(row["value"] for row in actual if row["label"] == "Fixture entry"), expected)
 
+    def test_decorative_wrappers_preserve_controls_without_allocating_targets(self):
+        self.start_accessibility(decorations=True, offscreen=True)
+        self.start_host()
+        for no_vision in (False, True):
+            client = self.client(no_vision=no_vision)
+            window = client.windows()[0]["window_id"]
+            for tool in (("vision", "accessibility") if not no_vision else ("accessibility",)):
+                result = client.tool(tool, observations=[window])
+                self.assertFalse(result["isError"], result)
+                tree = read_result(result)["observations"][0]
+                rows = tree["elements"]
+                self.assertEqual([row["element_id"] for row in rows], list(range(5)))
+                self.assertFalse(any(row["role"] == "tool bar" or row["label"] == "Separator" for row in rows))
+                self.assertEqual([row["label"] for row in rows[1:]],
+                                 ["Fixture button", "Fixture entry", "Fixture password", "Focusable divider"])
+                self.assertTrue(all(row["depth"] == 1 and row["parent_index"] == 0 for row in rows[1:]))
+                if tool == "vision":
+                    self.assertIn("id", tree)
+                    self.assertEqual(rows[1]["frame"]["y"], 620)
+                else:
+                    self.assertNotIn("id", tree)
+                    self.assertNotIn("; id:", result["content"][0]["text"])
+                self.assertFalse(client.tool("accessibility", steps=[
+                    {"tool": "activate", "args": {"element_id": rows[1]["element_id"]}}])["isError"])
+
     def test_accessibility_reads_noninteractive_text_without_coordinates(self):
         self.start_accessibility(reading_text=True)
         self.atspi_state.with_suffix(".actions.json").write_text(json.dumps(["clickAncestor", "showContextMenu"]))
@@ -1269,6 +1298,12 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
             self.assertTrue(any("Echo Echo" in row["label"] for row in text_rows))
             self.assertIn("Consider applying for YC's Winter 2027 batch! Applications are open till November 2.", tree)
             self.assertEqual(tree.count("Detailed sentence."), 20)
+            for phrase in ("Detailed sentence.", "Complete reading text."):
+                recovered = next(row for row in text_rows if phrase in row["label"])
+                self.assertNotIn("text_truncated", recovered)
+            clipped = next(row for row in text_rows if "Truly long reading text." in row["label"])
+            self.assertTrue(clipped["text_truncated"])
+            self.assertIn("…", clipped["label"])
             self.assertNotIn("四字字字", tree)
             self.assertTrue(any(row["label"] == "ab cd" for row in text_rows))
             ids = [row["element_id"] for row in rows if "element_id" in row]
@@ -1307,7 +1342,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertIn("Status: failed; completed: 1", text)
         self.assertIn(f"Window {window + 99}", text)
         self.assertIn("Error: window_unavailable", text)
-        self.assertIn(f"Window {window};", text)
+        self.assertIn(f"Window {window}\n", text)
         self.assertIn('button "Fixture button"', text)
         self.assertNotIn('"elements"', json.dumps(response))
 
@@ -1576,6 +1611,34 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertEqual(json.loads(self.atspi_state.read_text())["value"], 50)
         self.assertEqual(json.loads(self.state.read_text())["input"]["keys"], 0)
 
+    def test_invalid_numeric_ranges_are_not_advertised_and_can_recover(self):
+        self.start_accessibility(numeric=True)
+        self.start_host()
+        client = self.client()
+        baseline = next(row for row in self.snapshot(client)["elements"] if row["label"] == "Fixture volume")
+        overrides = self.atspi_state.with_suffix(".value.json")
+        for properties in ({"MinimumValue": 100, "MaximumValue": 0},
+                           {"MinimumValue": 0, "MaximumValue": 0, "CurrentValue": 0},
+                           {"MinimumValue": float("nan")}, {"MaximumValue": float("inf")},
+                           {"CurrentValue": float("nan")}, {"CurrentValue": 101},
+                           {"MinimumValue": 4.6e-310, "MaximumValue": 0}):
+            with self.subTest(properties=properties):
+                overrides.write_text(json.dumps(properties))
+                for tool in ("vision", "accessibility"):
+                    result = client.tool(tool, observations=[client.windows()[0]["window_id"]])
+                    self.assertFalse(result["isError"], result)
+                    row = next(row for row in read_result(result)["observations"][0]["elements"]
+                               if row["label"] == "Fixture volume")
+                    self.assertEqual(row["element_id"], baseline["element_id"])
+                    self.assertTrue({"value", "minimum", "maximum", "actions"}.isdisjoint(row), row)
+        overrides.unlink()
+        recovered = next(row for row in self.snapshot(client)["elements"] if row["label"] == "Fixture volume")
+        self.assertEqual(recovered["element_id"], baseline["element_id"])
+        self.assertEqual((recovered["value"], recovered["minimum"], recovered["maximum"]), (80, 0, 100))
+        self.assertEqual(recovered["actions"], ["set_value"])
+        self.assertEqual(json.loads(self.atspi_state.read_text())["value_writes"], 0)
+        self.assertEqual(json.loads(self.state.read_text())["input"]["keys"], 0)
+
     def test_delayed_numeric_setter_is_verified_before_keyboard_fallback(self):
         self.start_accessibility(numeric=True, numeric_delay=True)
         self.start_host()
@@ -1757,7 +1820,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
                 result = read_result(client.tool("accessibility", steps=[{"tool": tool, "args": {
                     "element_id": row["element_id"], field: text}}]))
                 self.assertEqual(result["status"], "ok", result)
-                self.assertIn("keyboard", result["warnings"][0]["warning"])
+                self.assertNotIn("warnings", result)
                 self.assertEqual(result["observations"], [])
                 self.assertEqual(json.loads(self.state.read_text())["input"]["text"], expected)
                 self.assertEqual(json.loads(self.atspi_state.read_text())["focus_requests"], 1)
@@ -2049,7 +2112,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         result = client.tool("accessibility", observations=[target["window_id"]])
         self.assertEqual(read_result(result)["status"], "ok", result)
         tree = read_result(result)["observations"][0]
-        self.assertEqual(tree["id"], status["canvas"]["id"])
+        self.assertNotIn("id", tree)
         self.assertNotIn("screenshot", tree)
         self.assertNotIn("screenshot_error", tree)
         self.assertFalse(any(block["type"] == "image" for block in result["content"]))
@@ -2442,6 +2505,9 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertEqual(state["input"]["keys_down"], 0)
         self.assertEqual(state["clipboard"], "世界")
         self.assertEqual(data["warnings"][0]["warning"], "Clipboard and primary selection text replaced.")
+        text = result["content"][0]["text"]
+        self.assertIn("Warning (step 3, type_text): Clipboard and primary selection text replaced.", text)
+        self.assertNotIn('"warning":', text)
         # Explicit numeric step IDs override the batch default in both directions.
         current = data["observations"][0]["id"]
         override = client.tool("vision", id=capture, observations=False, steps=[

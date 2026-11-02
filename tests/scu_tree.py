@@ -109,8 +109,8 @@ def read_result(response):
                     field = {'Error': 'error', 'Accessibility': 'accessibility_error',
                              'Screenshot': 'screenshot_error'}[match[1]]
                     observation[field] = error
-            elif line.startswith('Warnings: '):
-                result['warnings'] = json.loads(line[len('Warnings: '):])
+            elif match := re.fullmatch(r'Warning \(step (\d+), ([^)]+)\): (.*)', line):
+                result.setdefault('warnings', []).append(dict(index=int(match[1]), tool=match[2], warning=match[3]))
             elif line.startswith('Tree truncated;'):
                 observation['truncated'] = True
             elif observation is not None:

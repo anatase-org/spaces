@@ -718,16 +718,21 @@ static gboolean prose_row(JsonResult *row)
         (!g_strcmp0(role, "static") || !g_strcmp0(role, "paragraph") || !g_strcmp0(role, "heading"));
 }
 
+static gboolean prose_value_covers_label(const char *label, const char *value, gboolean paragraph)
+{
+    gsize prefix = label ? strlen(label) : 0;
+    if (prefix && g_str_has_suffix(label, "…")) prefix -= strlen("…");
+    return value && *value && (paragraph || (prefix && !strncmp(label, value, prefix)));
+}
+
 static char *prose_text(JsonResult *row)
 {
     GString *text = g_string_new(NULL);
     const char *label = yyjson_mut_get_str(yyjson_mut_obj_get(row, "label"));
     const char *value = yyjson_mut_get_str(yyjson_mut_obj_get(row, "value"));
     gboolean paragraph = !g_strcmp0(yyjson_mut_get_str(yyjson_mut_obj_get(row, "role")), "paragraph");
-    gsize prefix = label ? strlen(label) : 0;
-    if (prefix && g_str_has_suffix(label, "…")) prefix -= strlen("…");
     /* Text may extend the same shortened accessible name. */
-    if (label && *label && !(value && *value && (paragraph || (prefix && !strncmp(label, value, prefix)))))
+    if (label && *label && !prose_value_covers_label(label, value, paragraph))
         g_string_append(text, label);
     if (value && *value) {
         if (text->len) g_string_append_c(text, ' ');
@@ -1069,9 +1074,9 @@ static void append_accessible(Walk *state, AtspiAccessible *node,
     gboolean showing = accessible_has_state(node, ATSPI_STATE_SHOWING);
     gboolean visible = showing || accessible_has_state(node, ATSPI_STATE_VISIBLE);
     gboolean exposed = type != ATSPI_ROLE_TOOL_TIP || showing;
-    gboolean shortened = FALSE;
+    gboolean name_shortened = FALSE, value_shortened = FALSE;
     char *raw_name = atspi.accessible_get_name(node, NULL);
-    char *name = observation_text(raw_name, 256, &shortened, TRUE);
+    char *name = observation_text(raw_name, 256, &name_shortened, TRUE);
     g_free(raw_name);
     JsonResult *frame = exposed ? accessible_frame(node) : NULL;
     if (type == ATSPI_ROLE_DOCUMENT_WEB)
@@ -1103,7 +1108,7 @@ static void append_accessible(Walk *state, AtspiAccessible *node,
         if (text) {
             gint length = atspi.text_get_character_count(text, NULL);
             char *raw = length >= 0 ? atspi.text_get_text(text, 0, MIN(length, 513), NULL) : NULL;
-            value = observation_text(raw, 512, &shortened, reading);
+            value = observation_text(raw, 512, &value_shortened, reading);
             if (prose && raw && (strstr(raw, "\xef\xbf\xbc") || length > 512)) {
                 text_partial = length > 512;
                 char *prefix = g_utf8_substring(raw, 0, MIN(g_utf8_strlen(raw, -1), 512));
@@ -1118,7 +1123,7 @@ static void append_accessible(Walk *state, AtspiAccessible *node,
                 g_strfreev(parts);
                 g_free(prefix);
             }
-            if (length > 512) shortened = TRUE;
+            if (length > 512) value_shortened = TRUE;
             g_free(raw);
             g_object_unref(text);
         }
@@ -1135,6 +1140,10 @@ static void append_accessible(Walk *state, AtspiAccessible *node,
      * nodes with no semantic content, retaining unnamed editable/value controls
      * and continuing through their children regardless of visibility. */
     if (level && (!name || !*name) && (!value || !*value) && !text_input && !number) emit = FALSE;
+    /* Decorative wrappers have no target of their own. Keep their children,
+     * and retain separators that are actual focusable/editable controls. */
+    if (level && (type == ATSPI_ROLE_SEPARATOR || type == ATSPI_ROLE_TOOL_BAR) &&
+        !text_input && !number && !accessible_has_state(node, ATSPI_STATE_FOCUSABLE)) emit = FALSE;
     if (emit) {
         guint index = state->count;
         char *role = atspi.accessible_get_role_name(node, NULL);
@@ -1153,27 +1162,37 @@ static void append_accessible(Walk *state, AtspiAccessible *node,
         if (accessible_has_state(node, ATSPI_STATE_CHECKED)) result_boolean(row, "checked", TRUE);
         if (password) result_boolean(row, "protected", TRUE);
         else if (value && g_strcmp0(value, name)) result_string(row, "value", value);
+        gboolean shortened = value && value_shortened;
+        if (!prose || !prose_value_covers_label(name, value, type == ATSPI_ROLE_PARAGRAPH))
+            shortened |= name_shortened;
         if (shortened) result_boolean(row, "text_truncated", TRUE);
         if (text_parts) {
             result_member(row, "text_parts", text_parts);
             result_boolean(row, "text_partial", text_partial);
         }
-        JsonResult *actions = result_array();
-        /* Resolve generic actions on invocation; only editing needs tree flags. */
-        if (text_input) result_append(actions, yyjson_mut_str(scu.doc, "type_text"));
-        if (text_input || number) result_append(actions, yyjson_mut_str(scu.doc, "set_value"));
+        gboolean numeric_editable = FALSE;
         if (number) {
             GError *error = NULL;
             double current = atspi.value_get_current_value(number, &error);
-            if (!error && isfinite(current)) result_number(row, "value", current);
+            gboolean valid = !error && isfinite(current);
             g_clear_error(&error);
             double minimum = atspi.value_get_minimum_value(number, &error);
-            if (!error && isfinite(minimum)) result_number(row, "minimum", minimum);
+            valid &= !error && isfinite(minimum);
             g_clear_error(&error);
             double maximum = atspi.value_get_maximum_value(number, &error);
-            if (!error && isfinite(maximum)) result_number(row, "maximum", maximum);
+            valid &= !error && isfinite(maximum);
             g_clear_error(&error);
+            if (valid && minimum < maximum && minimum <= current && current <= maximum) {
+                result_number(row, "value", current);
+                result_number(row, "minimum", minimum);
+                result_number(row, "maximum", maximum);
+                numeric_editable = TRUE;
+            }
         }
+        JsonResult *actions = result_array();
+        /* Resolve generic actions on invocation; only editing needs tree flags. */
+        if (text_input) result_append(actions, yyjson_mut_str(scu.doc, "type_text"));
+        if (text_input || numeric_editable) result_append(actions, yyjson_mut_str(scu.doc, "set_value"));
         if (yyjson_mut_arr_size(actions)) result_member(row, "actions", actions);
         result_append(state->rows, row);
         state->count++;
@@ -3419,7 +3438,7 @@ static JsonResult *observe_window(JsonValue *args, gboolean screenshot)
         result_member(image, "accessibility_error", tree_error);
     }
     result_integer(result, "window_id", json_number(args, "window_id", 0));
-    result_integer(result, "id", visual.canvas.id);
+    if (screenshot) result_integer(result, "id", visual.canvas.id);
     limit_tree_output(result, screenshot);
 done:
     free(signature);
@@ -4191,9 +4210,7 @@ static JsonResult *type_target_value(const char *tool, JsonValue *args, gboolean
     }
     result = scu_action("global_input", TRUE, "Target text read back as requested after verified keyboard input.");
     JsonResult *warning = yyjson_mut_obj_get(submitted, "warning");
-    result_string(result, "warning", warning
-        ? "Used verified keyboard input. Clipboard and primary selection text replaced."
-        : "Used keyboard input after verifying the target and active window; text readback confirmed.");
+    if (warning) result_string(result, "warning", yyjson_mut_get_str(warning));
 done:
     target_input_arguments = target_input_window = NULL;
     /* Preserve the operation's error if cleanup is possible. Cancellation or

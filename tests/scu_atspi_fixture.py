@@ -13,8 +13,9 @@ from types import SimpleNamespace
 # Stable AT-SPI wire enum values; no libatspi client is used by the server.
 Atspi = SimpleNamespace(
     Role=SimpleNamespace(APPLICATION=75, FRAME=23, PUSH_BUTTON=43, ENTRY=79, PASSWORD_TEXT=40,
-                         PANEL=39, SLIDER=51, DOCUMENT_WEB=95, TOOL_TIP=64, PARAGRAPH=73, STATIC=116, HEADING=83, LINK=88),
-    StateType=SimpleNamespace(DEFUNCT=6, EDITABLE=7, ENABLED=8, FOCUSED=12, SENSITIVE=24, SHOWING=25, VISIBLE=30),
+                         PANEL=39, SLIDER=51, DOCUMENT_WEB=95, TOOL_TIP=64, PARAGRAPH=73, STATIC=116, HEADING=83, LINK=88,
+                         SEPARATOR=50, TOOL_BAR=63),
+    StateType=SimpleNamespace(DEFUNCT=6, EDITABLE=7, ENABLED=8, FOCUSABLE=11, FOCUSED=12, SENSITIVE=24, SHOWING=25, VISIBLE=30),
 )
 
 ROOT = "/org/a11y/atspi/accessible/root"
@@ -32,6 +33,9 @@ CAPTION = "/org/a11y/atspi/accessible/caption"
 HEADING = "/org/a11y/atspi/accessible/heading"
 LINK = "/org/a11y/atspi/accessible/link"
 SHORT = CAPTION + "/short"
+TOOLBAR = "/org/a11y/atspi/accessible/toolbar"
+SEPARATOR = "/org/a11y/atspi/accessible/separator"
+DIVIDER = "/org/a11y/atspi/accessible/divider"
 XML = """<node>
 <interface name='org.a11y.atspi.Accessible'>
  <property name='Name' type='s' access='read'/>
@@ -130,6 +134,7 @@ def main():
     offscreen = "--offscreen" in sys.argv[3:]
     tooltips = "--tooltips" in sys.argv[3:]
     reading_text = "--reading-text" in sys.argv[3:]
+    decorations = "--decorations" in sys.argv[3:]
     reading_values = {PROSE: "Read-only paragraph text, with a nested caption.",
                       CAPTION: "The complete caption text is not its accessible name.",
                       HEADING: "Article heading",
@@ -147,6 +152,7 @@ def main():
                           CAPTION + "/fragment2": "Applications",
                           CAPTION + "/fragment3": "are open till November 2.",
                           CAPTION + "/long": "Detailed sentence. " * 20,
+                          CAPTION + "/truncated": "Truly long reading text. " * 30,
                           PROSE + "/second": "Paragraph metadata",
                           CAPTION + "/before_code": "Before code",
                           CAPTION + "/code": "#define main oldmain #include <unistd.h>",
@@ -321,10 +327,13 @@ def main():
         if path == WINDOW and (not exposed or empty):
             # Chromium can advertise a child while it still returns null.
             return [("", "/org/a11y/atspi/null")] if not empty else []
+        if decorations and path in (WINDOW, TOOLBAR, SEPARATOR):
+            paths = {WINDOW: [TOOLBAR, DIVIDER], TOOLBAR: [SEPARATOR], SEPARATOR: [BUTTON, ENTRY, PASSWORD]}[path]
+            return [(app.get_unique_name(), p) for p in paths]
         if reading_text and path in (WINDOW, PROSE, LINK, CAPTION, SHORT, *reading_children):
-            paths = {WINDOW: [BUTTON, ENTRY, PASSWORD, PROSE, SHORT, CAPTION + "/ab", CAPTION + "/cd"],
+            paths = {WINDOW: [BUTTON, ENTRY, PASSWORD, CAPTION + "/truncated", PROSE, SHORT, CAPTION + "/ab", CAPTION + "/cd"],
                      PROSE: [HEADING, CAPTION, *(p for p in reading_names if
-                         not p.endswith(("/link_label", "/link_first", "/link_second", "/caption_text", "/short", "/ab", "/cd")) and
+                         not p.endswith(("/link_label", "/link_first", "/link_second", "/caption_text", "/short", "/ab", "/cd", "/truncated")) and
                          p not in reading_nested)],
                      CAPTION: [CAPTION + "/caption_text"], SHORT: [LINK],
                      LINK: [CAPTION + "/link_first", CAPTION + "/link_second"], **reading_children}[path]
@@ -409,12 +418,14 @@ def main():
                     BUTTON: Atspi.Role.PUSH_BUTTON, ENTRY: Atspi.Role.ENTRY,
                     PASSWORD: Atspi.Role.PASSWORD_TEXT, PANEL: Atspi.Role.PANEL, SLIDER: Atspi.Role.SLIDER,
                     DOCUMENT: Atspi.Role.DOCUMENT_WEB, TOOLTIP: Atspi.Role.TOOL_TIP,
-                    PROSE: Atspi.Role.PARAGRAPH, CAPTION: Atspi.Role.STATIC, HEADING: Atspi.Role.HEADING, LINK: Atspi.Role.LINK}[path]
+                    PROSE: Atspi.Role.PARAGRAPH, CAPTION: Atspi.Role.STATIC, HEADING: Atspi.Role.HEADING, LINK: Atspi.Role.LINK,
+                    TOOLBAR: Atspi.Role.TOOL_BAR, SEPARATOR: Atspi.Role.SEPARATOR, DIVIDER: Atspi.Role.SEPARATOR}[path]
             reply = GLib.Variant("(u)", (int(role),))
         elif name in ("GetRoleName", "GetLocalizedRoleName"):
             reply = GLib.Variant("(s)", ({ROOT: "application", WINDOW: "frame", WINDOW_TWO: "frame",
                     BUTTON: "push button", ENTRY: "entry", PASSWORD: "password text", PANEL: "panel", SLIDER: "slider",
-                    DOCUMENT: "document web", TOOLTIP: "tool tip", PROSE: "paragraph", CAPTION: "static", HEADING: "heading", LINK: "link"}[path],))
+                    DOCUMENT: "document web", TOOLTIP: "tool tip", PROSE: "paragraph", CAPTION: "static", HEADING: "heading", LINK: "link",
+                    TOOLBAR: "tool bar", SEPARATOR: "separator", DIVIDER: "separator"}[path],))
         elif name == "GetState":
             bits = sum(1 << int(s) for s in (Atspi.StateType.ENABLED, Atspi.StateType.SENSITIVE,
                                              Atspi.StateType.VISIBLE, Atspi.StateType.SHOWING))
@@ -426,6 +437,8 @@ def main():
                 bits &= ~(1 << Atspi.StateType.SHOWING)
             if path == ENTRY:
                 bits |= 1 << Atspi.StateType.EDITABLE
+            if path == DIVIDER:
+                bits |= 1 << Atspi.StateType.FOCUSABLE
             if element_ids and original_path.rsplit("/accessible/", 1)[-1] in element_config().get("defunct", []):
                 bits |= 1 << Atspi.StateType.DEFUNCT
             still_focused = focused
@@ -541,7 +554,8 @@ def main():
                 return GLib.Variant("s", "Repeated button " + path.rsplit("/", 1)[1] + (" x" * 110 if long_labels else ""))
             return GLib.Variant("s", {ROOT: "scu fixture", WINDOW: "scu test window", WINDOW_TWO: "scu test window" if duplicate_windows else "scu second window",
                 BUTTON: "Fixture button", ENTRY: "Fixture entry", PASSWORD: "Fixture password", PANEL: "Hidden container", SLIDER: "Fixture volume",
-                DOCUMENT: "Fixture document", TOOLTIP: "tooltip", PROSE: "Article paragraph", CAPTION: "Caption", HEADING: "Article heading", LINK: "Article link"}[path])
+                DOCUMENT: "Fixture document", TOOLTIP: "tooltip", PROSE: "Article paragraph", CAPTION: "Caption", HEADING: "Article heading", LINK: "Article link",
+                TOOLBAR: "Bookmarks", SEPARATOR: "Separator", DIVIDER: "Focusable divider"}[path])
         if name == "ToolkitName" and browser: return GLib.Variant("s", "Chromium")
         if name in ("Description", "ToolkitName", "Version"): return GLib.Variant("s", "fixture")
         if name == "ChildCount": return GLib.Variant("i", len(children(connection, path)))
@@ -550,9 +564,11 @@ def main():
         if name == "CharacterCount": return GLib.Variant("i", len(reading_values[path] if path in reading_values else text_value()))
         if name == "CaretOffset": return GLib.Variant("i", len(text_value()))
         if name == "Id": return GLib.Variant("i", 1)
-        if name == "CurrentValue": return GLib.Variant("d", number_value())
-        if name == "MinimumValue": return GLib.Variant("d", 0.0)
-        if name == "MaximumValue": return GLib.Variant("d", 100.0)
+        if name in ("CurrentValue", "MinimumValue", "MaximumValue"):
+            properties = Path(state_path).with_suffix(".value.json")
+            overrides = json.loads(properties.read_text()) if properties.exists() else {}
+            default = {"CurrentValue": number_value(), "MinimumValue": 0.0, "MaximumValue": 100.0}[name]
+            return GLib.Variant("d", float(overrides.get(name, default)))
         if name == "MinimumIncrement": return GLib.Variant("d", 5.0)
 
     def property_set(connection, sender, path, interface, name, value):
@@ -568,7 +584,7 @@ def main():
         save()
         return True
 
-    for connection, paths in ((registry, [ROOT]), (app, [ROOT, *window_paths, BUTTON, ENTRY, PASSWORD, PANEL, SLIDER, DOCUMENT, TOOLTIP, PROSE, CAPTION, HEADING, LINK, *reading_names, *extra_paths])):
+    for connection, paths in ((registry, [ROOT]), (app, [ROOT, *window_paths, BUTTON, ENTRY, PASSWORD, PANEL, SLIDER, DOCUMENT, TOOLTIP, PROSE, CAPTION, HEADING, LINK, TOOLBAR, SEPARATOR, DIVIDER, *reading_names, *extra_paths])):
         if connection == registry and "--registry-unavailable" in sys.argv[3:]:
             continue  # Own the name, but expose no working registry object.
         for path in paths:

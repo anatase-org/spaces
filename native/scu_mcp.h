@@ -901,10 +901,13 @@ static char *tool_result_text(const Tool *tool, JsonResult *output)
             yyjson_mut_get_sint(yyjson_mut_obj_get(output, "completed")));
         append_result_error(text, "Failed", yyjson_mut_obj_get(output, "failed"));
         JsonResult *warnings = yyjson_mut_obj_get(output, "warnings");
-        if (warnings) {
-            g_string_append(text, "Warnings: ");
-            append_result_value(text, warnings);
-            g_string_append_c(text, '\n');
+        JsonResult *warning;
+        size_t warning_index, warning_count;
+        yyjson_mut_arr_foreach(warnings, warning_index, warning_count, warning) {
+            g_string_append_printf(text, "Warning (step %" G_GINT64_FORMAT ", %s): %s\n",
+                yyjson_mut_get_sint(yyjson_mut_obj_get(warning, "index")),
+                yyjson_mut_get_str(yyjson_mut_obj_get(warning, "tool")),
+                yyjson_mut_get_str(yyjson_mut_obj_get(warning, "warning")));
         }
         JsonResult *observation;
         size_t i, n;
