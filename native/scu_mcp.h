@@ -84,7 +84,7 @@ static const char accessibility_description[] =
     "after all steps, including trailing delays. Omit observations to skip tree reads. "
     "When possible, a zero-context unified diff against the last returned tree is provided. "
     "Set refresh:true to force a full tree. "
-    "A different window or large diff returns Full tree. Set refresh:true for a full tree. "
+    "A different window or large diff returns a full tree. Set refresh:true for a full tree. "
     "Element actions can target offscreen controls. ";
 
 typedef enum {
@@ -952,8 +952,8 @@ static char *tool_result_text(const Tool *tool, JsonResult *output)
             if (yyjson_mut_is_true(yyjson_mut_obj_get(observation, "truncated"))) g_string_append(text, "Tree truncated; listed element IDs remain usable.\n");
             const char *tree = yyjson_mut_get_str(yyjson_mut_obj_get(observation, "tree_markdown"));
             if (tree) {
-                if (yyjson_mut_is_true(yyjson_mut_obj_get(observation, "tree_full")))
-                    g_string_append(text, "Full tree.\n");
+                g_string_append(text, yyjson_mut_is_false(yyjson_mut_obj_get(observation, "tree_full"))
+                    ? "Tree (diff):\n" : "Tree (full):\n");
                 g_string_append(text, tree);
             }
         }

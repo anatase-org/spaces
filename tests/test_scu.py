@@ -1498,7 +1498,10 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         response = client.tool(tool, observations={"window": window, **options})
         self.assertFalse(response["isError"], response)
         self.assertEqual(sum(b["type"] == "image" for b in response["content"]), tool == "vision")
-        return read_result(response)["observations"][0]
+        observation = read_result(response)["observations"][0]
+        marker = "Tree (diff):" if "tree_diff" in observation else "Tree (full):"
+        self.assertIn(marker, response["content"][0]["text"])
+        return observation
 
     def test_observation_baselines_are_per_client_tool_and_last_window(self):
         self.start_accessibility(two_windows=True)
@@ -1547,7 +1550,6 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
             self.assertFalse(response["isError"], response)
             changed = self.observe_tree(client, window, tool)
             self.assertIn("@@ -", changed["tree_diff"])
-            self.assertNotIn("Full tree.", changed["tree_diff"])
             full = self.observe_tree(client, window, tool, refresh=True)
             self.assertEqual(apply_tree_diff(previous["tree_markdown"], changed["tree_diff"]), full["tree_markdown"])
             self.assertIn(expected, full["tree_markdown"])
