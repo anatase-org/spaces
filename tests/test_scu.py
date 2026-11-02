@@ -247,11 +247,12 @@ class ScuTests(unittest.TestCase):
         self.ready(self.atspi)
         self.configure(app_pid=self.atspi.pid, two_windows=two_windows, atspi_address=address)
 
-    def add_accessibility_application(self):
+    def add_accessibility_application(self, app_name=None):
         state = self.directory / "other-atspi-state.json"
         state.with_suffix(".title").unlink(missing_ok=True)
         peer = self.child(["/usr/bin/python3", str(ROOT / "tests/scu_atspi_fixture.py"),
-                           f"unix:path={self.socket_path}", str(state), "--application-only"])
+                           f"unix:path={self.socket_path}", str(state), "--application-only",
+                           *(["--app-name=" + app_name] if app_name else [])])
         self.ready(peer)
         self.atspi_state.with_suffix(".apps.json").write_text(
             json.dumps([json.loads(state.read_text())["bus_name"]]))
@@ -1190,6 +1191,46 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
             self.assertIn(f'window_id={window["window_id"]} {json.dumps(window["title"])} active bounds=', text)
             self.assertNotIn('"apps":', text)
             self.assertEqual(any(b["type"] == "image" for b in response["content"]), not no_vision)
+
+    def test_blocklisted_compositor_windows_are_absent_from_discovery_and_matching(self):
+        self.start_accessibility()
+        self.start_host(app_pid=self.atspi.pid + 100000, duplicate_identity=True)
+        for application in ("xwaylandvideobridge", "org.kde.xwaylandvideobridge", "XwaylandVideoBridge"):
+            self.configure(duplicate_app_name=application)
+            for no_vision in (False, True):
+                with self.subTest(application=application, no_vision=no_vision):
+                    client = self.client(no_vision=no_vision)
+                    windows = client.windows()
+                    self.assertEqual(len(windows), 1)
+                    self.assertEqual(windows[0]["app_name"], "scu fixture")
+                    # The bridge has the same title and geometry. It must not
+                    # make the cross-process reverse association ambiguous.
+                    tree = self.snapshot_accessibility(client, windows[0]["window_id"])
+                    self.assertIn("Fixture button", [row["label"] for row in tree["elements"]])
+
+    def test_blocklist_rejects_existing_window_handles_and_does_not_match_captions(self):
+        self.start_host(window_title="xwaylandvideobridge")
+        client = self.client()
+        windows = client.windows()
+        self.assertEqual(len(windows), 1)
+        window = windows[0]["window_id"]
+        self.configure(app_name="xwaylandvideobridge")
+        self.assertEqual(client.windows(), [])
+        result = client.tool("accessibility", observations={"window": window, "refresh": True})
+        self.assertEqual(read_result(result)["observations"][0]["error"]["code"], "window_unavailable")
+
+    def test_blocklisted_accessibility_application_does_not_compete_with_normal_windows(self):
+        self.start_accessibility()
+        _, other_state = self.add_accessibility_application(app_name="xwaylandvideobridge")
+        self.start_host(app_pid=self.atspi.pid + 100000)
+        client = self.client()
+        tree = self.snapshot_accessibility(client, client.windows()[0]["window_id"])
+        button = next(row for row in tree["elements"] if row["label"] == "Fixture button")
+        result = client.tool("accessibility", steps=[{"tool": "activate", "args": {
+            "element_id": button["element_id"]}}])
+        self.assertFalse(result["isError"], result)
+        self.assertEqual(json.loads(self.atspi_state.read_text())["clicks"], 1)
+        self.assertEqual(json.loads(other_state.read_text())["clicks"], 0)
 
     def test_readable_frames_round_without_changing_canvas_geometry(self):
         self.start_host()

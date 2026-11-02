@@ -70,6 +70,21 @@ static GVariant *host_call(const char *name, const char *path, const char *inter
     const char *method, GVariant *args, GUnixFDList *input, GUnixFDList **output,
     GError **error);
 
+/* Match application identities, not captions that ordinary windows can share.
+ * Apply the same list to compositor windows and accessibility applications. */
+static gboolean window_blocklisted(const char *application)
+{
+    static const char *const blocklist[] = {
+        "xwaylandvideobridge",
+        "org.kde.xwaylandvideobridge",
+    };
+    if (!application) return FALSE;
+    for (guint i = 0; i < G_N_ELEMENTS(blocklist); i++) {
+        if (!g_ascii_strcasecmp(application, blocklist[i])) return TRUE;
+    }
+    return FALSE;
+}
+
 static void *scu_library(const char *name)
 {
     static GHashTable *loaded;
@@ -552,6 +567,10 @@ static void discover_application_windows(AtspiAccessible *application)
 {
     atspi.accessible_clear_cache(application);
     char *name = atspi.accessible_get_name(application, NULL);
+    if (window_blocklisted(name)) {
+        g_free(name);
+        return;
+    }
     guint process_id = atspi.accessible_get_process_id(application, NULL);
     gint count = MIN(atspi.accessible_get_child_count(application, NULL), 128);
     if (!count) {
@@ -4741,6 +4760,15 @@ static gboolean host_geometry(GError **error)
         return FALSE;
     }
     yyjson_mut_doc *output = yyjson_doc_mut_copy(document, NULL);
+    /* Filter at ingestion so listings, direct lookups, reverse associations,
+     * and foreground input checks all see the same window inventory. */
+    yyjson_mut_arr_iter windows;
+    yyjson_mut_arr_iter_init(yyjson_mut_obj_get(yyjson_mut_doc_get_root(output), "windows"), &windows);
+    JsonResult *window;
+    while ((window = yyjson_mut_arr_iter_next(&windows))) {
+        const char *application = yyjson_mut_get_str(yyjson_mut_obj_get(window, "app_name"));
+        if (window_blocklisted(application)) yyjson_mut_arr_iter_remove(&windows);
+    }
     yyjson_mut_obj_add_strcpy(output, yyjson_mut_doc_get_root(output), "owner", host.owner);
     g_free(host.geometry);
     host.geometry = yyjson_mut_write(output, 0, NULL);

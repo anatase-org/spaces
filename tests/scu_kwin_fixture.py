@@ -95,7 +95,7 @@ def geometry():
         outputs[0]["geometry"]["width"] += 10
     if config.get("overlap") and len(outputs) > 1:
         outputs[1]["geometry"]["x"] = -60
-    windows = [{"key": "window-1", "pid": config.get("app_pid", 123), "app_name": "scu fixture",
+    windows = [{"key": "window-1", "pid": config.get("app_pid", 123), "app_name": config.get("app_name", "scu fixture"),
                 "title": config.get("window_title", "scu test window"), "frame": {"x": 10, "y": 10, "width": 40, "height": 30},
                 "client": {"x": 10, "y": 10, "width": 40, "height": 30}, "shown": True, "active": config.get("active", True)}]
     if state["geometry_requests"] >= config.get("settled_title_after_request", math.inf):
@@ -118,7 +118,8 @@ def geometry():
         windows[0]["client"] = {"x": 12, "y": 14, "width": 32, "height": 20}
         windows[0]["frame"] = windows[0]["client"]
     if config.get("duplicate_identity"):
-        windows.append({**windows[0], "key": "window-duplicate", "pid": config.get("duplicate_pid", 999999)})
+        windows.append({**windows[0], "key": "window-duplicate", "pid": config.get("duplicate_pid", 999999),
+                        "app_name": config.get("duplicate_app_name", windows[0]["app_name"])})
     return {"outputs": outputs, "windows": windows}
 
 

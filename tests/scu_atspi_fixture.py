@@ -100,6 +100,7 @@ XML = """<node>
 
 def main():
     address, state_path = sys.argv[1:3]
+    application_name = next((arg.split("=", 1)[1] for arg in sys.argv[3:] if arg.startswith("--app-name=")), "scu fixture")
     application_only = "--application-only" in sys.argv[3:]
     duplicate_windows = "--duplicate-windows" in sys.argv[3:]
     window_paths = [WINDOW, WINDOW_TWO] if duplicate_windows or "--two-windows" in sys.argv[3:] else [WINDOW]
@@ -589,7 +590,7 @@ def main():
                 # Exercise escaped response bytes before the independent walk
                 # deadline, even on slower hosts. Stay below the name limit.
                 return GLib.Variant("s", "Repeated button " + path.rsplit("/", 1)[1] + (' "\\' * 70 if long_labels else ""))
-            return GLib.Variant("s", {ROOT: "scu fixture", WINDOW: "scu test window", WINDOW_TWO: "scu test window" if duplicate_windows else "scu second window",
+            return GLib.Variant("s", {ROOT: application_name, WINDOW: "scu test window", WINDOW_TWO: "scu test window" if duplicate_windows else "scu second window",
                 BUTTON: "Fixture button", ENTRY: "Fixture entry", PASSWORD: "Fixture password", PANEL: "Hidden container", SLIDER: "Fixture volume",
                 DOCUMENT: "Fixture document", TOOLTIP: "tooltip", PROSE: "Article paragraph", CAPTION: "Caption", HEADING: "Article heading", LINK: "Article link",
                 TOOLBAR: "Bookmarks", SEPARATOR: "Separator", DIVIDER: "Focusable divider"}[path])
