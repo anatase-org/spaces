@@ -3,7 +3,7 @@
 
 char *scu_test_diff(const char *previous, const char *current)
 {
-    return tree_diff(previous, current);
+    return tree_diff(previous, current, "No Changes.\n");
 }
 
 void scu_test_free(char *text)

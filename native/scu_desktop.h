@@ -118,7 +118,7 @@ static gboolean desktop_read_session(GError **error)
         desktop.lock_known = TRUE;
         desktop.valid = TRUE;
     } else g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_PERMISSION_DENIED,
-        "SCU requires the selected user's active local Wayland session.");
+        scu_text_desktop_session_required);
     g_variant_unref(properties); g_variant_unref(reply);
     return valid;
 }
@@ -127,7 +127,7 @@ static gboolean desktop_bind(const char *session, const char *wayland, GError **
 {
     if (desktop.session) {
         if (!desktop.valid || strcmp(session, desktop.session) || strcmp(wayland, desktop.wayland)) {
-            g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "The shared SCU host belongs to another desktop generation.");
+            g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, scu_text_desktop_generation_changed);
             return FALSE;
         }
         return TRUE;
@@ -189,7 +189,7 @@ static gboolean desktop_refresh_lock(void)
     if (!desktop.session) return TRUE;
     GError *error = NULL;
     if (!desktop.valid) {
-        scu_fail("desktop_session_unavailable", "The selected graphical login is no longer active.");
+        scu_fail("desktop_session_unavailable", scu_text_desktop_login_inactive);
         return FALSE;
     }
     if (!desktop_read_session(&error)) goto unavailable;
@@ -204,7 +204,7 @@ static gboolean desktop_refresh_lock(void)
     return TRUE;
 unavailable:
     release_input();
-    scu_fail("desktop_session_unavailable", error ? error->message : "Cannot inspect the host session lock.");
+    scu_fail("desktop_session_unavailable", error ? error->message : scu_text_session_lock_unavailable);
     g_clear_error(&error);
     return FALSE;
 }
@@ -216,7 +216,7 @@ static gboolean desktop_input_allowed(void)
         return FALSE;
     }
     if (desktop.session && (!desktop.lock_known || !desktop.screen_known)) {
-        scu_fail("desktop_session_unavailable", "Cannot inspect the host session lock.");
+        scu_fail("desktop_session_unavailable", scu_text_session_lock_unavailable);
         return FALSE;
     }
     return TRUE;
@@ -255,7 +255,7 @@ static void desktop_helper_exited(GObject *source, GAsyncResult *result, gpointe
         desktop.queried = 0;
         if (!expected) {
             g_free(desktop.display_error);
-            desktop.display_error = g_strdup("krfb-virtualmonitor exited before a usable fallback appeared.");
+            desktop.display_error = g_strdup(scu_text_virtual_monitor_exited);
         }
     }
 }
@@ -297,7 +297,7 @@ static void desktop_query_done(GObject *source, GAsyncResult *result, gpointer u
         if (desktop.outputs) g_clear_pointer(&desktop.display_error, g_free);
     } else {
         g_free(desktop.display_error);
-        desktop.display_error = g_strdup(error ? error->message : "kscreen-doctor did not return a valid output inventory.");
+        desktop.display_error = g_strdup(error ? error->message : scu_text_output_inventory_invalid);
     }
     g_free(owned_name);
     yyjson_doc_free(doc); g_free(output); g_clear_error(&error);
@@ -354,7 +354,7 @@ static void desktop_maintain(guint clients)
 static gboolean desktop_ready(void)
 {
     if (!desktop.session) return TRUE;
-    if (!desktop.valid) { scu_fail("desktop_session_unavailable", "The selected graphical login is no longer active."); return FALSE; }
+    if (!desktop.valid) { scu_fail("desktop_session_unavailable", scu_text_desktop_login_inactive); return FALSE; }
     if (!desktop_refresh_lock()) return FALSE;
     if (g_get_monotonic_time() - desktop.queried > 200000) {
         desktop.query_ready = FALSE;
@@ -366,7 +366,7 @@ static gboolean desktop_ready(void)
         if (desktop.query_ready && desktop.outputs && !desktop.helper_stopping) return TRUE;
         if (!scu_pause(10)) return FALSE;
     } while (g_get_monotonic_time() < until);
-    scu_fail("virtual_display_unavailable", desktop.display_error ? desktop.display_error : "No usable desktop output became available.");
+    scu_fail("virtual_display_unavailable", desktop.display_error ? desktop.display_error : scu_text_desktop_output_unavailable);
     return FALSE;
 }
 

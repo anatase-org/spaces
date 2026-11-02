@@ -46,11 +46,11 @@ static void scu_invalidate(void)
 static gboolean scu_tick(void)
 {
     if (g_atomic_int_get(&scu.cancelled) || g_atomic_int_get(&scu.stopping)) {
-        scu_fail("cancelled", "Operation cancelled; completed actions were not rolled back.");
+        scu_fail("cancelled", scu_text_cancelled);
         return FALSE;
     }
     if (scu.deadline && g_get_monotonic_time() >= scu.deadline) {
-        scu_fail("timeout", "Operation exceeded its time limit; inspect state before retrying.");
+        scu_fail("timeout", scu_text_timeout);
         return FALSE;
     }
     return TRUE;
@@ -106,20 +106,20 @@ static gboolean connect_host(void)
     poll_backend();
     if (disconnected) {
         disconnected = FALSE;
-        scu_fail("computer_use_disconnected", "The host computer-use service disconnected. Call status again; no action was replayed.");
+        scu_fail("computer_use_disconnected", scu_text_host_service_disconnected);
         return FALSE;
     }
     if (host_fd >= 0) return TRUE;
     struct stat st;
     if (!endpoint_available(&st)) {
-        scu_fail("accessibility_permission_required", "Computer use is not forwarded. On the host, run `spaces configure <space>` and enable Plus Accessibility and Agent computer use. If enabled, check the graphical login and Spaces service log.");
+        scu_fail("accessibility_permission_required", scu_text_computer_use_not_forwarded);
         return FALSE;
     }
     char *path = computer_socket_path();
     struct sockaddr_un address = {.sun_family = AF_UNIX};
     if (strlen(path) >= sizeof(address.sun_path)) {
         g_free(path);
-        scu_fail("computer_use_unavailable", "The host socket path is too long.");
+        scu_fail("computer_use_unavailable", scu_text_socket_path_too_long);
         return FALSE;
     }
     strcpy(address.sun_path, path);
@@ -138,7 +138,7 @@ static gboolean connect_host(void)
     socklen_t size = sizeof(credentials);
     if (rc < 0 || getsockopt(host_fd, SOL_SOCKET, SO_PEERCRED, &credentials, &size) ||
         credentials.uid != getuid()) {
-        scu_fail("computer_use_unavailable", "Cannot connect to the host computer-use service.");
+        scu_fail("computer_use_unavailable", scu_text_host_connect_failed);
         scu_invalidate();
         disconnected = FALSE;
         return FALSE;
@@ -186,7 +186,7 @@ static JsonResult *forward_tool(JsonValue *id, JsonValue *parameters)
     if (yyjson_equals(json_member(value, "id"), id) && yyjson_is_obj(result)) {
         output = yyjson_val_mut_copy(scu.doc, result);
     } else {
-        scu_fail("computer_use_disconnected", "The host computer-use service disconnected. Call status again; no action was replayed.");
+        scu_fail("computer_use_disconnected", scu_text_host_service_disconnected);
         scu_invalidate();
         disconnected = FALSE; /* This request has already reported the loss. */
     }

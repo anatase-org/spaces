@@ -10,9 +10,9 @@ static void tree_diff_range(GString *out, gsize start, gsize count)
     if (count != 1) g_string_append_printf(out, ",%" G_GSIZE_FORMAT, count);
 }
 
-static char *tree_diff(const char *previous, const char *current)
+static char *tree_diff(const char *previous, const char *current, const char *unchanged_text)
 {
-    if (!strcmp(previous, current)) return g_strdup("No Changes.\n");
+    if (!strcmp(previous, current)) return g_strdup(unchanged_text);
     char **old = g_strsplit(previous, "\n", -1), **now = g_strsplit(current, "\n", -1);
     gsize old_count = g_strv_length(old), new_count = g_strv_length(now);
     if (old_count && !*old[old_count - 1]) old_count--;

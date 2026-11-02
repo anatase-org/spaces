@@ -103,12 +103,12 @@ static gboolean scu_tick(void)
     if (scu.vision_request && !desktop_input_allowed()) return FALSE;
     if (g_atomic_int_get(&scu.cancelled) || g_atomic_int_get(&scu.stopping)) {
         scu_fail("cancelled",
-            "Operation cancelled; completed actions were not rolled back.");
+            scu_text_cancelled);
         return FALSE;
     }
     if (scu.deadline && g_get_monotonic_time() > scu.deadline) {
         scu_fail("timeout",
-            "Operation exceeded its time limit; inspect state before retrying.");
+            scu_text_timeout);
         return FALSE;
     }
     return TRUE;
@@ -396,8 +396,7 @@ static gboolean ensure_atspi(void)
 {
     if (!load_atspi()) {
         scu_fail("missing_dependency",
-            "Install the host AT-SPI library: at-spi2-core (Fedora/Arch), "
-            "libatspi2.0-0 (Ubuntu).");
+            scu_text_atspi_dependency);
         return FALSE;
     }
     if (atspi_initialized) {
@@ -410,7 +409,7 @@ static gboolean ensure_atspi(void)
         "/org/a11y/bus", "org.a11y.Bus", "GetAddress", NULL,
         G_VARIANT_TYPE("(s)"), G_DBUS_CALL_FLAGS_NONE, 1500, NULL, &error) : NULL;
     if (!reply) {
-        scu_fail("accessibility_unavailable", error ? error->message : "The host accessibility bus is unavailable.");
+        scu_fail("accessibility_unavailable", error ? error->message : scu_text_accessibility_bus_unavailable);
         g_clear_error(&error);
         g_clear_object(&bus);
         return FALSE;
@@ -425,7 +424,7 @@ static gboolean ensure_atspi(void)
         /* A failed initialization can leave libatspi's private bus cached. */
         retire_atspi_worker = TRUE;
         scu_fail("accessibility_unavailable",
-            "Could not initialize the host AT-SPI bus.");
+            scu_text_accessibility_init_failed);
         return FALSE;
     }
     atspi_initialized = TRUE;
@@ -433,7 +432,7 @@ static gboolean ensure_atspi(void)
     if (!atspi_listener ||
         !atspi.event_listener_register(atspi_listener, atspi_event, &error) || error) {
         scu_fail("accessibility_unavailable", error ? error->message :
-            "Could not register the host accessibility consumer.");
+            scu_text_accessibility_consumer_failed);
         g_clear_error(&error);
         scu_atspi_close();
         return FALSE;
@@ -570,7 +569,7 @@ static gboolean discover_windows(void)
     AtspiAccessible *desktop = atspi.get_desktop(0);
     if (desktop == NULL) {
         scu_fail(
-            "accessibility_unavailable", "Host accessibility registry is unavailable.");
+            "accessibility_unavailable", scu_text_accessibility_registry_unavailable);
         return FALSE;
     }
     atspi.accessible_clear_cache(desktop);
@@ -586,7 +585,7 @@ static gboolean discover_windows(void)
     if (error != NULL || count < 0) {
         scu_fail("accessibility_unavailable",
             error != NULL ? error->message
-                          : "Host accessibility registry disconnected.");
+                          : scu_text_accessibility_registry_disconnected);
         g_clear_error(&error);
         g_object_unref(desktop);
         scu_atspi_close();
@@ -628,7 +627,7 @@ static JsonResult *check_accessibility_ready(void)
     }
     if (error || count < 0) {
         scu_fail("accessibility_unavailable",
-            error ? error->message : "Host accessibility registry is unavailable.");
+            error ? error->message : scu_text_accessibility_registry_unavailable);
         g_clear_error(&error);
         scu_atspi_close();
         return NULL;
@@ -715,7 +714,7 @@ static void mark_tree_complex(JsonResult *tree)
     result_boolean(tree, "truncated", TRUE);
     JsonResult *limitation = result_object();
     result_string(limitation, "code", "accessibility_tree_too_complex");
-    result_string(limitation, "hint", "This window exceeds the accessibility response budget. The partial tree's elements remain usable; use screenshot input for omitted controls.");
+    result_string(limitation, "hint", scu_text_tree_response_budget);
     result_member(tree, "accessibility_error", limitation);
 }
 
@@ -1272,12 +1271,11 @@ static JsonResult *read_window_state(JsonValue *args)
     }
     if (!w) {
         return scu_fail("window_unavailable",
-            "Window is absent or belongs to a different process. Call status "
-            "again.");
+            scu_text_window_identity_unavailable);
     }
     if (!prepare_accessible_window(w->accessible)) return NULL;
     if (!element_table)
-        return scu_fail("stale_element", "No MCP instance is associated with this tree read.");
+        return scu_fail("stale_element", scu_text_tree_client_missing);
     Walk state = {.window = w, .rows = result_array(), .scales = json_member(args, "device_scales"),
         .read_text = json_boolean(args, "read_text"),
         .until = g_get_monotonic_time() + 5 * G_USEC_PER_SEC};
@@ -1321,12 +1319,12 @@ static JsonResult *invoke_accessible_action(
     if (!completed) {
         scu_fail("accessible_action_failed",
             error != NULL ? error->message
-                          : "The element does not expose this action.");
+                          : scu_text_element_action_unavailable);
         g_clear_error(&error);
         return NULL;
     }
     return scu_action("accessibility", FALSE,
-        "Accessible action submitted; inspect the resulting state.");
+        scu_text_accessible_action_submitted);
 }
 
 static gboolean number_matches(double actual, double expected)
@@ -1342,18 +1340,18 @@ static JsonResult *set_accessible_number(AtspiAccessible *node, const char *text
     double number = g_ascii_strtod(text, &end);
     if (!value || end == text || *end || !isfinite(number)) {
         g_clear_object(&value);
-        return scu_fail("invalid_arguments", "A numeric control requires a finite number in value.");
+        return scu_fail("invalid_arguments", scu_text_numeric_value_invalid);
     }
     double minimum = atspi.value_get_minimum_value(value, &error);
     double maximum = error ? NAN : atspi.value_get_maximum_value(value, &error);
     if (error || !isfinite(minimum) || !isfinite(maximum) || minimum > maximum) {
         g_clear_object(&value);
         g_clear_error(&error);
-        return scu_fail("value_readback_failed", "The numeric control did not expose a readable range. No value was submitted.");
+        return scu_fail("value_readback_failed", scu_text_numeric_range_unreadable);
     }
     if (number < minimum || number > maximum) {
         g_object_unref(value);
-        return scu_fail("invalid_arguments", "The requested value is outside this control's minimum and maximum. Read its window tree for the range.");
+        return scu_fail("invalid_arguments", scu_text_numeric_value_out_of_range);
     }
     gboolean completed = atspi.value_set_current_value(value, number, &error);
     if (error) {
@@ -1375,10 +1373,10 @@ static JsonResult *set_accessible_number(AtspiAccessible *node, const char *text
     g_object_unref(value);
     if (error) {
         g_clear_error(&error);
-        return scu_fail("value_readback_failed", "The numeric value could not be read after submission. Inspect the result before retrying.");
+        return scu_fail("value_readback_failed", scu_text_numeric_readback_unavailable);
     }
     if (confirmed)
-        return scu_action("accessibility", TRUE, "Accessible numeric value read back as requested.");
+        return scu_action("accessibility", TRUE, scu_text_numeric_value_confirmed);
     /* Chromium can accept SetCurrentValue on an ARIA slider without delivering
      * an application change. Use its keyboard behavior under the existing focus
      * guards, and verify every change instead of treating submission as success. */
@@ -1388,7 +1386,7 @@ static JsonResult *set_accessible_number(AtspiAccessible *node, const char *text
         result_boolean(result, "numeric", TRUE);
         return result;
     }
-    return scu_fail("value_readback_failed", "The numeric control did not read back the requested value. Inspect the result before retrying.");
+    return scu_fail("value_readback_failed", scu_text_numeric_readback_failed);
 }
 
 /* AT-SPI caret positions count Unicode characters, not UTF-8 bytes. Build the
@@ -1417,7 +1415,7 @@ static JsonResult *edit_accessible_text(
 {
     if (atspi.accessible_get_role(node, NULL) == ATSPI_ROLE_PASSWORD_TEXT) {
         return scu_fail("protected_element",
-            "Password elements are excluded from semantic value operations.");
+            scu_text_password_value_protected);
     }
 
     gboolean replace = strcmp(tool, "set_value") == 0;
@@ -1450,7 +1448,7 @@ static JsonResult *edit_accessible_text(
             }
         }
         return scu_fail(
-            "accessible_action_failed", "The element does not expose editable text.");
+            "accessible_action_failed", scu_text_editable_text_unavailable);
     }
 
     if (replace) {
@@ -1458,8 +1456,7 @@ static JsonResult *edit_accessible_text(
         completed = atspi.editable_text_set_text_contents(editable, contents, &error);
     } else if (atspi.text_get_n_selections(text, NULL) > 0) {
         scu_fail("unsupported_feature",
-            "Semantic insertion with selected text is unsupported; "
-            "use set_value or foreground typing.");
+            scu_text_text_selection_unsupported);
     } else {
         gint caret = atspi.text_get_caret_offset(text, NULL);
         if (caret >= 0) {
@@ -1484,16 +1481,16 @@ static JsonResult *edit_accessible_text(
     if (!completed) {
         scu_fail("accessible_action_failed",
             error != NULL ? error->message
-                          : "The accessible text edit could not be submitted.");
+                          : scu_text_text_edit_failed);
         g_clear_error(&error);
         return NULL;
     }
     if (replace && !confirmed)
-        return scu_fail("text_readback_failed", "The text control did not read back the requested value. Inspect the result before retrying.");
+        return scu_fail("text_readback_failed", scu_text_text_readback_failed);
     return scu_action("accessibility", confirmed,
         confirmed
-            ? "Accessible text value read back with the expected contents."
-            : "Accessible text edit submitted; complete readback was unavailable.");
+            ? scu_text_text_value_confirmed
+            : scu_text_text_edit_unconfirmed);
 }
 
 /* Private parent/worker coordination for existing text actions. EIS remains
@@ -1516,7 +1513,7 @@ static JsonResult *accessible_target_input(AtspiAccessible *node, Element *eleme
     const char *focus_error = numeric ? "value_focus_changed" : "text_focus_changed";
     if (!(numeric ? atspi.accessible_get_role(node, NULL) == ATSPI_ROLE_SLIDER : keyboard_editable(node)) ||
         !accessible_has_state(node, ATSPI_STATE_ENABLED))
-        return scu_fail("accessible_action_failed", "The target is not an enabled editable control.");
+        return scu_fail("accessible_action_failed", scu_text_target_not_editable);
     if (!strcmp(operation, "target_input_prepare")) {
         g_clear_object(&input_target);
         g_clear_pointer(&input_expected, g_free);
@@ -1532,7 +1529,7 @@ static JsonResult *accessible_target_input(AtspiAccessible *node, Element *eleme
             g_clear_object(&component);
         }
         if (!focused || error) {
-            scu_fail("accessible_action_failed", error ? error->message : "The control could not take focus.");
+            scu_fail("accessible_action_failed", error ? error->message : scu_text_control_focus_failed);
             g_clear_error(&error);
             return NULL;
         }
@@ -1543,12 +1540,12 @@ static JsonResult *accessible_target_input(AtspiAccessible *node, Element *eleme
             if (!scu_pause(10)) return NULL;
         } while (g_get_monotonic_time() < until);
         if (!accessible_has_state(node, ATSPI_STATE_FOCUSED))
-            return scu_fail(focus_error, "The requested control did not gain focus. No keyboard input was sent.");
+            return scu_fail(focus_error, scu_text_target_focus_failed);
         if (numeric) {
             input_expected = g_strdup(json_string(args, "value"));
         } else {
             AtspiText *text = atspi.accessible_get_text_iface(node);
-            if (!text) return scu_fail("accessible_action_failed", "The target does not expose text readback.");
+            if (!text) return scu_fail("accessible_action_failed", scu_text_target_text_unreadable);
             const char *contents = json_string(args, "text");
             if (json_boolean(args, "replace")) input_expected = g_strdup(contents);
             else {
@@ -1570,14 +1567,14 @@ static JsonResult *accessible_target_input(AtspiAccessible *node, Element *eleme
                 }
             }
             g_object_unref(text);
-            if (!input_expected) return scu_fail("accessible_action_failed", "Cannot verify the text insertion position. No keyboard input was sent.");
+            if (!input_expected) return scu_fail("accessible_action_failed", scu_text_text_insertion_unverifiable);
         }
         input_target = g_object_ref(node);
     } else {
         atspi.accessible_clear_cache(node);
         if (input_target != node || input_numeric != numeric || accessible_has_state(node, ATSPI_STATE_DEFUNCT) ||
             !accessible_has_state(node, ATSPI_STATE_FOCUSED))
-            return scu_fail(focus_error, "The target lost focus; no further keyboard input was sent.");
+            return scu_fail(focus_error, scu_text_target_focus_lost);
     }
     JsonResult *result = result_object();
     if (numeric) {
@@ -1588,7 +1585,7 @@ static JsonResult *accessible_target_input(AtspiAccessible *node, Element *eleme
         gboolean readable = !error && isfinite(current);
         g_clear_error(&error);
         if (!readable)
-            return scu_fail("value_readback_failed", "The target's numeric value could not be read. No further keyboard input was sent.");
+            return scu_fail("value_readback_failed", scu_text_target_numeric_unreadable);
         result_number(result, "value", current);
         result_boolean(result, "confirmed", number_matches(current, g_ascii_strtod(input_expected, NULL)));
         if (strcmp(operation, "target_input_prepare")) return result;
@@ -1640,15 +1637,14 @@ static JsonResult *operate_on_element(const char *tool, JsonValue *arguments)
     Element *element = lookup_element(arguments);
     if (element == NULL) {
         return scu_fail("stale_element",
-            "Element ID is unallocated or stale. Read a window tree with accessibility "
-            "observations:{window:window_id} and use its element ID.");
+            scu_text_stale_element);
     }
 
     AtspiAccessible *node = g_object_ref(element->accessible);
     JsonResult *result;
     if (accessible_has_state(node, ATSPI_STATE_DEFUNCT)) {
         result = scu_fail("stale_element",
-            "Accessible application or element disappeared. Read window state again.");
+            scu_text_element_disappeared);
     } else if (g_str_has_prefix(tool, "target_input_")) {
         result = accessible_target_input(node, element, tool, arguments);
     } else if (!strcmp(tool, "activate") || !strcmp(tool, "open_context_menu")) {
@@ -1657,8 +1653,7 @@ static JsonResult *operate_on_element(const char *tool, JsonValue *arguments)
         result = edit_accessible_text(node, tool, arguments);
     } else {
         result =
-            scu_fail("unsupported_feature", "This action cannot use an accessibility "
-                                            "element ID. Use desktop foreground input.");
+            scu_fail("unsupported_feature", scu_text_element_input_unsupported);
     }
     g_object_unref(node);
     return result;
@@ -1758,7 +1753,7 @@ static JsonResult *clipboard_selection(const char *tool, JsonValue *args)
     if (!clipboard_selection_node || !clipboard_selection_text ||
         !accessible_has_state(clipboard_selection_node, ATSPI_STATE_FOCUSED)) {
         clear_clipboard_selection();
-        return scu_fail("clipboard_selection_changed", "Clipboard/PRIMARY changed, but text focus changed before paste. No paste was sent.");
+        return scu_fail("clipboard_selection_changed", scu_text_paste_focus_changed);
     }
     gint length = atspi.text_get_character_count(clipboard_selection_text, NULL);
     char *value = length >= 0 && length <= 65536
@@ -1784,7 +1779,7 @@ static JsonResult *clipboard_selection(const char *tool, JsonValue *args)
         clear_clipboard_selection();
     }
     if (!restored) {
-        return scu_fail("clipboard_selection_changed", "Clipboard/PRIMARY changed, but the text selection could not be restored safely. No paste was sent. Use set_value for accessible text replacement.");
+        return scu_fail("clipboard_selection_changed", scu_text_paste_selection_changed);
     }
     result_boolean(result, "restored", TRUE);
     return result;
@@ -1863,7 +1858,7 @@ static gboolean start_atspi_worker(void)
         return TRUE;
     }
     if (atspi_worker_base > G_MAXUINT - 0x100000) {
-        scu_fail("handle_limit", "Restart scu to allocate a fresh window ID range.");
+        scu_fail("handle_limit", scu_text_window_id_limit);
         return FALSE;
     }
     char *base = g_strdup_printf("%u", atspi_worker_base);
@@ -1876,7 +1871,7 @@ static gboolean start_atspi_worker(void)
     atspi_worker_base += 0x100000;
     if (!ok) {
         scu_fail("accessibility_unavailable",
-            error != NULL ? error->message : "Could not start the semantic adapter.");
+            error != NULL ? error->message : scu_text_semantic_adapter_start_failed);
         g_clear_error(&error);
         return FALSE;
     }
@@ -1943,7 +1938,7 @@ static JsonResult *atspi_worker_call(const char *tool, JsonValue *args)
     JsonResult *result = output != NULL ? yyjson_val_mut_copy(scu.doc, output) : NULL;
     if (document == NULL) {
         scu_fail("accessibility_unavailable",
-            "Semantic adapter disconnected; no action was retried.");
+            scu_text_semantic_adapter_disconnected);
         stop_atspi_worker();
     } else {
         JsonValue *error = json_member(root, "error");
@@ -2039,7 +2034,7 @@ static int run_atspi_worker(guint base)
             result_string(error, "code",
                 scu.code != NULL ? scu.code : "accessibility_unavailable");
             result_string(error, "hint",
-                scu.hint != NULL ? scu.hint : "Semantic operation failed.");
+                scu.hint != NULL ? scu.hint : scu_text_semantic_operation_failed);
             result_member(result, "error", error);
         }
         result_boolean(result, "retire", retire_atspi_worker);
@@ -2476,11 +2471,11 @@ static gboolean require_computer_access(void)
 {
     if (visual.broken) {
         scu_invalidate();
-        scu_fail("computer_use_disconnected", "KWin computer use disconnected. Inspect status before continuing; no action was replayed.");
+        scu_fail("computer_use_disconnected", scu_text_kwin_disconnected);
         return FALSE;
     }
     if (!session_bus || g_dbus_connection_is_closed(session_bus)) {
-        scu_fail("computer_use_unavailable", "The host session bus is unavailable.");
+        scu_fail("computer_use_unavailable", scu_text_session_bus_unavailable);
         return FALSE;
     }
     if (!visual.bus) {
@@ -2512,7 +2507,7 @@ static gboolean refresh_geometry(void)
     if (!require_computer_access() || !host_geometry(&error)) {
         scu_fail(g_error_matches(error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT) ||
                 g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED) ? "timeout" : "kwin_geometry_unavailable",
-            error ? error->message : "KWin geometry is unavailable.");
+            error ? error->message : scu_text_kwin_geometry_unavailable);
         g_clear_error(&error);
         return FALSE;
     }
@@ -2525,14 +2520,14 @@ static gboolean refresh_geometry(void)
     if (!owner || !yyjson_is_arr(outputs) || count == 0 || count > MAX_DISPLAYS ||
         !yyjson_is_arr(json_member(root, "windows"))) {
         yyjson_doc_free(document);
-        scu_fail("kwin_geometry_unavailable", "KWin returned invalid desktop geometry.");
+        scu_fail("kwin_geometry_unavailable", scu_text_kwin_geometry_invalid);
         return FALSE;
     }
     if (visual.owner && strcmp(visual.owner, owner)) {
         yyjson_doc_free(document);
         visual.broken = TRUE;
         scu_atspi_close();
-        scu_fail("computer_use_disconnected", "KWin restarted. Call status again; no action was replayed.");
+        scu_fail("computer_use_disconnected", scu_text_kwin_restarted);
         return FALSE;
     }
     Display next[MAX_DISPLAYS] = {0};
@@ -2548,7 +2543,7 @@ static gboolean refresh_geometry(void)
                 g_free(next[j].mapping_id);
             }
             yyjson_doc_free(document);
-            scu_fail("kwin_geometry_unavailable", "KWin output geometry or scale is invalid.");
+            scu_fail("kwin_geometry_unavailable", scu_text_kwin_output_geometry_invalid);
             return FALSE;
         }
         next[i] = (Display){.mapping_id = g_strdup(name), .has_geometry = TRUE,
@@ -2579,29 +2574,29 @@ static gboolean ensure_visual_session(void)
     }
     for (guint i = 1; libs[i]; i++) {
         if (!scu_library(libs[i])) {
-            char *hint = g_strdup_printf("Missing library %s. Install the package for it.", libs[i]);
+            char *hint = g_strdup_printf(scu_text_library_missing, libs[i]);
             scu_fail("missing_dependency", hint);
             g_free(hint);
             return FALSE;
         }
     }
     if (!load_visual_libraries()) {
-        scu_fail("missing_dependency", "Install host libei, libxkbcommon and GdkPixbuf libraries.");
+        scu_fail("missing_dependency", scu_text_input_dependencies);
         return FALSE;
     }
     GError *error = NULL;
     int fd = connect_input(&error);
     if (fd < 0) {
-        scu_fail("input_unavailable", error ? error->message : "KWin did not provide an EIS connection.");
+        scu_fail("input_unavailable", error ? error->message : scu_text_kwin_eis_unavailable);
         g_clear_error(&error);
         return FALSE;
     }
     visual.input = ei_api.new_sender(NULL);
     visual.devices = g_ptr_array_new_with_free_func(free_input_device);
-    ei_api.configure_name(visual.input, "Spaces computer use");
+    ei_api.configure_name(visual.input, scu_text_input_session_name);
     if (ei_api.setup_backend_fd(visual.input, fd) < 0) {
         close(fd);
-        scu_fail("input_unavailable", "Could not connect to KWin EIS.");
+        scu_fail("input_unavailable", scu_text_kwin_eis_connect_failed);
         return FALSE;
     }
     gint64 deadline = g_get_monotonic_time() + 3 * G_USEC_PER_SEC;
@@ -2620,7 +2615,7 @@ static gboolean ensure_visual_session(void)
             return scu_pause(20);
         }
     }
-    scu_fail("input_unavailable", "KWin EIS did not resume a pointer device.");
+    scu_fail("input_unavailable", scu_text_kwin_pointer_unavailable);
     return FALSE;
 }
 
@@ -2683,13 +2678,13 @@ static gboolean canvas_layout(CanvasLayout *layout, char **key)
 {
     memset(layout, 0, sizeof(*layout));
     if (visual.display_count == 0) {
-        scu_fail("capture_unavailable", "KWin has no active desktop outputs.");
+        scu_fail("capture_unavailable", scu_text_desktop_outputs_unavailable);
         return FALSE;
     }
     for (guint i = 0; i < visual.display_count; i++) {
         Display *display = &visual.displays[i];
         if (!display->has_geometry || display->logical_width <= 0 || display->logical_height <= 0) {
-            scu_fail("canvas_layout_unavailable", "KWin did not provide complete output geometry.");
+            scu_fail("canvas_layout_unavailable", scu_text_output_geometry_incomplete);
             return FALSE;
         }
     }
@@ -2705,7 +2700,7 @@ static gboolean canvas_layout(CanvasLayout *layout, char **key)
         layout->native_heights[i] = display->height;
         if (display->failed || visual.broken) {
             g_string_free(identity, TRUE);
-            scu_fail("capture_unavailable", "KWin desktop access disconnected.");
+            scu_fail("capture_unavailable", scu_text_desktop_access_disconnected);
             return FALSE;
         }
         *rect = (CanvasRect){display->logical_x, display->logical_y,
@@ -2713,7 +2708,7 @@ static gboolean canvas_layout(CanvasLayout *layout, char **key)
         if (display->width == 0 || display->height == 0 || rect->width <= 0 ||
             rect->height <= 0) {
             g_string_free(identity, TRUE);
-            scu_fail("capture_unavailable", "A KWin output has no valid dimensions.");
+            scu_fail("capture_unavailable", scu_text_output_dimensions_invalid);
             return FALSE;
         }
         for (guint j = 0; j < i; j++) {
@@ -2722,7 +2717,7 @@ static gboolean canvas_layout(CanvasLayout *layout, char **key)
                 rect->y < other->y + other->height && other->y < rect->y + rect->height) {
                 g_string_free(identity, TRUE);
                 scu_fail("ambiguous_canvas_layout",
-                    "Granted capture regions overlap; a unique canvas cannot be established.");
+                    scu_text_capture_regions_overlap);
                 return FALSE;
             }
         }
@@ -2772,7 +2767,7 @@ static gboolean validate_canvas(void)
 {
     CanvasSnapshot *canvas = &visual.canvas;
     if (!canvas->key) {
-        scu_fail("stale_capture", "Take a full desktop overview before sending pixel input.");
+        scu_fail("stale_capture", scu_text_overview_required);
         return FALSE;
     }
     CanvasLayout current;
@@ -2783,7 +2778,7 @@ static gboolean validate_canvas(void)
     gboolean valid = strcmp(key, canvas->key) == 0;
     g_free(key);
     if (!valid) {
-        scu_fail("stale_capture", "Desktop geometry or input mapping changed. Take a new full overview.");
+        scu_fail("stale_capture", scu_text_overview_mapping_changed);
     }
     return valid;
 }
@@ -2849,7 +2844,7 @@ static GBytes *render_canvas(const CanvasLayout *layout, const CanvasRect *view,
 {
     guchar *output = g_try_malloc0((gsize)width * height * 3);
     if (!output) {
-        scu_fail("capture_failed", "Could not allocate the desktop image.");
+        scu_fail("capture_failed", scu_text_desktop_image_allocation_failed);
         return NULL;
     }
     const guchar *sources[MAX_DISPLAYS];
@@ -2918,7 +2913,7 @@ static GBytes *capture_pixels(const char *method, GVariant *arguments,
     GBytes *pixels = host_capture(arguments, window_key, width, height, &error);
     g_variant_unref(owned);
     if (!pixels) {
-        scu_fail("capture_failed", error ? error->message : "KWin capture failed.");
+        scu_fail("capture_failed", error ? error->message : scu_text_kwin_capture_failed);
         g_clear_error(&error);
     }
     return pixels;
@@ -2945,7 +2940,7 @@ static gboolean append_image(GBytes *pixels, guint width, guint height)
     gboolean saved = image && pixbuf.save_to_buffer(image, &png, &length, "png", &error, NULL);
     g_clear_object(&image);
     if (!saved || length > 32u * 1024u * 1024u) {
-        scu_fail("capture_failed", error ? error->message : "PNG exceeds the 32 MiB image limit.");
+        scu_fail("capture_failed", error ? error->message : scu_text_png_size_limit);
         g_clear_error(&error);
         g_free(png);
         return FALSE;
@@ -2990,7 +2985,7 @@ static JsonResult *capture_desktop(void)
         (guint64)output_width * output_height * 4 > MAX_FRAME_BYTES) {
         g_bytes_unref(source);
         g_free(key);
-        return scu_fail("capture_failed", "Canvas exceeds the image memory limits.");
+        return scu_fail("capture_failed", scu_text_canvas_memory_limit);
     }
     CanvasLayout sampling = {.count = 1};
     sampling.tiles[0] = captured;
@@ -3010,7 +3005,7 @@ static JsonResult *capture_desktop(void)
     if (!unchanged) {
         g_bytes_unref(pixels);
         g_free(key);
-        return scu_fail("stale_capture", "KWin geometry changed during capture. Request a new overview.");
+        return scu_fail("stale_capture", scu_text_capture_geometry_changed);
     }
     gboolean saved = append_image(pixels, output_width, output_height);
     g_bytes_unref(pixels);
@@ -3099,14 +3094,14 @@ static gboolean require_computer_ready(void)
     }
     for (guint i = 0; libs[i]; i++) {
         if (!scu_library(libs[i])) {
-            char *hint = g_strdup_printf("Missing library %s. Install the package for it.", libs[i]);
+            char *hint = g_strdup_printf(scu_text_library_missing, libs[i]);
             scu_fail("missing_dependency", hint);
             g_free(hint);
             return FALSE;
         }
     }
     if (!load_atspi() || !load_visual_libraries()) {
-        scu_fail("missing_dependency", "The installed computer-use libraries are missing required functions. Update the host libraries.");
+        scu_fail("missing_dependency", scu_text_library_functions_missing);
         return FALSE;
     }
     return atspi_worker_call("check_ready", NULL) != NULL;
@@ -3123,7 +3118,7 @@ static JsonResult *kwin_status(void)
     JsonResult *result = result_object();
     JsonResult *canvas = canvas_status();
     if (yyjson_mut_is_null(canvas)) {
-        return scu_fail("stale_capture", "Desktop geometry changed during status. Take a new full overview.");
+        return scu_fail("stale_capture", scu_text_status_geometry_changed);
     }
     result_member(result, "canvas", canvas);
     result_member(result, "apps", kwin_apps());
@@ -3232,7 +3227,7 @@ static JsonResult *window_tree(JsonValue *args, JsonValue *window, gboolean read
         if (!same) {
             free(signature);
             yyjson_doc_free(listing);
-            return scu_fail("stale_window_geometry", "Window changed during observation. Observe again.");
+            return scu_fail("stale_window_geometry", scu_text_window_geometry_changed);
         }
         matches = best = frames = titles = sizes = 0;
         ambiguous = FALSE;
@@ -3290,7 +3285,7 @@ static JsonResult *window_tree(JsonValue *args, JsonValue *window, gboolean read
     if (matches != 1) {
         const char *code = matches > 1 || ambiguous ? "accessibility_window_ambiguous"
             : titles && !sizes ? "accessibility_geometry_mismatch" : "accessibility_window_unmatched";
-        char *hint = g_strdup_printf("Could not uniquely associate this window after refreshing accessibility metadata (%u frames, %u matching titles, %u matching sizes). Use screenshot input if the window has no unique accessibility match.", frames, titles, sizes);
+        char *hint = g_strdup_printf(scu_text_window_association_failed, frames, titles, sizes);
         scu_fail(code, hint);
         g_free(hint);
         yyjson_doc_free(listing);
@@ -3404,7 +3399,7 @@ static JsonResult *observe_window(JsonValue *args, gboolean screenshot)
     }
     JsonValue *window = requested_kwin_window(args);
     if (!window) {
-        return scu_fail("window_unavailable", "KWin window is unavailable. Call status again.");
+        return scu_fail("window_unavailable", scu_text_kwin_window_unavailable);
     }
     char *signature = window_geometry_signature(window);
     guint images = yyjson_mut_arr_size(scu.images);
@@ -3440,7 +3435,7 @@ static JsonResult *observe_window(JsonValue *args, gboolean screenshot)
     gboolean same = current && !strcmp(signature, current);
     free(current);
     if (!same) {
-        scu_fail("stale_window_geometry", "Window changed during observation. Observe again.");
+        scu_fail("stale_window_geometry", scu_text_window_geometry_changed);
         goto done;
     }
     result = tree ? tree : image;
@@ -3487,7 +3482,7 @@ static InputDevice *wait_for_device(enum ei_device_capability capability)
     }
     if (device == NULL) {
         scu_fail("input_unavailable",
-            "The granted EIS session has no resumed device for this input operation.");
+            scu_text_input_device_unavailable);
     }
     return device;
 }
@@ -3504,7 +3499,7 @@ static gboolean pointer_target(double x, double y,
     CanvasSnapshot *canvas = &visual.canvas;
     if (!isfinite(x) || !isfinite(y) || x < 0 || y < 0 ||
         x >= canvas->width || y >= canvas->height) {
-        scu_fail("invalid_coordinates", "Coordinates lie outside the full desktop overview.");
+        scu_fail("invalid_coordinates", scu_text_coordinates_outside_overview);
         return FALSE;
     }
     double logical_x = canvas->layout.x + x * canvas->layout.width / canvas->width;
@@ -3517,7 +3512,7 @@ static gboolean pointer_target(double x, double y,
         RegionBinding binding;
         if (!bind_stream_region(&visual.displays[i], &binding)) {
             scu_fail("ambiguous_display_mapping",
-                "The image and input region cannot be paired uniquely. No pointer input was sent.");
+                scu_text_input_region_ambiguous);
             return FALSE;
         }
         *device_out = binding.device;
@@ -3530,7 +3525,7 @@ static gboolean pointer_target(double x, double y,
     if (allow_gap) {
         return TRUE;
     }
-    scu_fail("invalid_coordinates", "Coordinates fall in a gap between granted desktop regions.");
+    scu_fail("invalid_coordinates", scu_text_coordinates_in_gap);
     return FALSE;
 }
 
@@ -3567,7 +3562,7 @@ static InputDevice *seat_device(struct ei_device *pointer, enum ei_device_capabi
             return device;
         }
     }
-    scu_fail("input_unavailable", "The pointer's input seat has no compatible resumed device.");
+    scu_fail("input_unavailable", scu_text_pointer_seat_unavailable);
     return NULL;
 }
 
@@ -3666,7 +3661,7 @@ static JsonResult *pointer_action(const char *tool, JsonValue *arguments)
             if (!bind_stream_region(&visual.displays[i], &binding) ||
                 ei_api.device_get_seat(binding.device) != seat) {
                 scu_fail("input_unavailable",
-                    "The drag crosses an ambiguous region or incompatible input seat. No input was sent.");
+                    scu_text_drag_region_ambiguous);
                 goto done;
             }
         }
@@ -3726,7 +3721,7 @@ static JsonResult *pointer_action(const char *tool, JsonValue *arguments)
             goto done;
         }
     }
-    result = scu_action("global_input", FALSE, "Pointer input submitted; inspect the resulting state.");
+    result = scu_action("global_input", FALSE, scu_text_pointer_input_submitted);
 done:
     release_input();
     for (guint i = 0; i <= count; i++) {
@@ -3861,7 +3856,7 @@ static gboolean device_resumed(struct ei_device *raw)
         }
     }
     scu_fail("input_unavailable",
-        "The input device was removed or paused during the action.");
+        scu_text_input_device_removed);
     return FALSE;
 }
 
@@ -3893,7 +3888,7 @@ static JsonResult *keyboard_action(JsonValue *arguments)
     if (!load_keyboard_map(device, &map)) {
         free_keyboard_map(&map);
         return scu_fail("keyboard_mapping_unavailable",
-            "The compositor did not supply a usable XKB keyboard map.");
+            scu_text_keyboard_map_unavailable);
     }
     const char *names[6] = {0};
     guint count = 0;
@@ -3908,8 +3903,7 @@ static JsonResult *keyboard_action(JsonValue *arguments)
         if (symbol == XKB_KEY_NoSymbol || !lookup_keysym(&map, symbol, &stroke)) {
             free_keyboard_map(&map);
             return scu_fail("unsupported_key",
-                "A requested key is absent from the compositor's "
-                "keyboard map. No key was pressed.");
+                scu_text_key_unavailable);
         }
         guint candidates[2] = {stroke.code, 0};
         guint candidate_count = 1;
@@ -3918,7 +3912,7 @@ static JsonResult *keyboard_action(JsonValue *arguments)
             if (!lookup_keysym(&map, XKB_KEY_Shift_L, &shift)) {
                 free_keyboard_map(&map);
                 return scu_fail(
-                    "unsupported_key", "Shift is unavailable in the keyboard map.");
+                    "unsupported_key", scu_text_shift_unavailable);
             }
             candidates[0] = shift.code;
             candidates[1] = stroke.code;
@@ -3936,7 +3930,7 @@ static JsonResult *keyboard_action(JsonValue *arguments)
             }
             if (code_count >= G_N_ELEMENTS(codes)) {
                 free_keyboard_map(&map);
-                return scu_fail("invalid_arguments", "Too many keys in this chord.");
+                return scu_fail("invalid_arguments", scu_text_key_chord_limit);
             }
             codes[code_count++] = candidates[candidate];
         }
@@ -3946,7 +3940,7 @@ static JsonResult *keyboard_action(JsonValue *arguments)
         return NULL;
     }
     return scu_action("global_input", FALSE,
-        "Foreground key chord submitted; inspect the resulting state.");
+        scu_text_key_chord_submitted);
 }
 
 static gboolean paste_text(struct ei_device *device, KeyboardMap *map, const char *text)
@@ -3956,7 +3950,7 @@ static gboolean paste_text(struct ei_device *device, KeyboardMap *map, const cha
     if (!lookup_keysym(map, XKB_KEY_Control_L, &control) ||
         !lookup_keysym(map, XKB_KEY_v, &paste)) {
         scu_fail("unsupported_key",
-            "Clipboard paste shortcut is unavailable in the keyboard map.");
+            scu_text_paste_shortcut_unavailable);
         return FALSE;
     }
     gboolean saved_selection = FALSE;
@@ -3990,7 +3984,7 @@ static gboolean paste_text(struct ei_device *device, KeyboardMap *map, const cha
     GVariant *reply = host_call("org.kde.klipper", "/klipper", "org.kde.klipper.klipper",
         "setClipboardContents", g_variant_new("(s)", text), NULL, NULL, &error);
     if (!reply) {
-        scu_fail("clipboard_unavailable", error ? error->message : "Host clipboard is unavailable.");
+        scu_fail("clipboard_unavailable", error ? error->message : scu_text_clipboard_unavailable);
     }
     g_clear_error(&error);
     if (!reply) {
@@ -4018,7 +4012,7 @@ static JsonResult *type_foreground_text(JsonValue *arguments)
     const char *text = json_string(arguments, "text");
     if (*text == '\0') {
         return scu_action(
-            "global_input", FALSE, "Empty text: no input sent.");
+            "global_input", FALSE, scu_text_empty_text);
     }
     InputDevice *text_device = capable_device(EI_DEVICE_CAP_TEXT);
     if (text_device != NULL && ei_api.device_text_utf8 != NULL) {
@@ -4039,7 +4033,7 @@ static JsonResult *type_foreground_text(JsonValue *arguments)
             cursor = end;
         }
         return scu_action("global_input", FALSE,
-            "UTF-8 input submitted through EIS text; verify the visible result.");
+            scu_text_utf8_input_submitted);
     }
     InputDevice *input = wait_for_device(EI_DEVICE_CAP_KEYBOARD);
     if (input == NULL) {
@@ -4050,7 +4044,7 @@ static JsonResult *type_foreground_text(JsonValue *arguments)
     if (!load_keyboard_map(device, &map)) {
         free_keyboard_map(&map);
         return scu_fail("keyboard_mapping_unavailable",
-            "No compositor XKB map is available for text input.");
+            scu_text_text_keyboard_map_unavailable);
     }
     GArray *strokes = g_array_new(FALSE, FALSE, sizeof(KeyStroke));
     gboolean representable = TRUE;
@@ -4077,7 +4071,7 @@ static JsonResult *type_foreground_text(JsonValue *arguments)
         }
         JsonResult *result = scu_action("global_input", FALSE, NULL);
         result_string(result, "route", "clipboard_paste");
-        result_string(result, "warning", "Clipboard and primary selection text replaced.");
+        result_string(result, "warning", scu_text_clipboard_replaced);
         return result;
     }
     free_keyboard_map(&map);
@@ -4092,8 +4086,7 @@ static JsonResult *type_foreground_text(JsonValue *arguments)
     }
     g_array_unref(strokes);
     return scu_action("global_input", FALSE,
-        "Text submitted using the compositor's keyboard map; verify the visible "
-        "result.");
+        scu_text_keyboard_text_submitted);
 }
 
 static gboolean keyboard_fallback;
@@ -4123,7 +4116,7 @@ static gboolean verify_target_input(void)
     }
     if (matches != 1 || !active) {
         scu_fail(json_boolean(target_input_arguments, "numeric") ? "value_focus_changed" : "text_focus_changed",
-            "The target is not in the uniquely matched active window. No further keyboard input was sent.");
+            scu_text_target_window_inactive);
         return FALSE;
     }
     return atspi_worker_call("target_input_verify", target_input_arguments) != NULL;
@@ -4135,7 +4128,7 @@ static JsonResult *type_target_number(JsonValue *args, JsonResult *readback)
     gint64 until = g_get_monotonic_time() + 3 * G_USEC_PER_SEC;
     for (guint i = 0; i < 64 && g_get_monotonic_time() < until; i++) {
         if (yyjson_mut_is_true(yyjson_mut_obj_get(readback, "confirmed")))
-            return scu_action("global_input", TRUE, "Target numeric value read back as requested after verified keyboard input.");
+            return scu_action("global_input", TRUE, scu_text_target_numeric_confirmed);
         double before = yyjson_mut_get_num(yyjson_mut_obj_get(readback, "value"));
         const char *key = before < expected ? "{\"keys\":[\"Right\"]}" : "{\"keys\":[\"Left\"]}";
         yyjson_doc *chord = yyjson_read(key, strlen(key), 0);
@@ -4150,13 +4143,13 @@ static JsonResult *type_target_number(JsonValue *args, JsonResult *readback)
             if (!readback) return NULL;
             current = yyjson_mut_get_num(yyjson_mut_obj_get(readback, "value"));
             if (yyjson_mut_is_true(yyjson_mut_obj_get(readback, "confirmed")))
-                return scu_action("global_input", TRUE, "Target numeric value read back as requested after verified keyboard input.");
+                return scu_action("global_input", TRUE, scu_text_target_numeric_confirmed);
             if (!number_matches(current, before)) break;
         } while (g_get_monotonic_time() < progress);
         if (fabs(current - expected) >= fabs(before - expected))
-            return scu_fail("value_readback_failed", "The slider did not move toward the requested value. No further keyboard input was sent.");
+            return scu_fail("value_readback_failed", scu_text_slider_no_progress);
     }
-    return scu_fail("value_readback_failed", "The slider did not reach the requested value within the input limit. Inspect the result before retrying.");
+    return scu_fail("value_readback_failed", scu_text_slider_value_unreached);
 }
 
 static JsonResult *type_target_value(const char *tool, JsonValue *args, gboolean numeric)
@@ -4200,7 +4193,7 @@ static JsonResult *type_target_value(const char *tool, JsonValue *args, gboolean
             selected = yyjson_mut_is_true(yyjson_mut_obj_get(selection, "confirmed"));
         } while (!selected && g_get_monotonic_time() < until);
         if (!selected) {
-            scu_fail("text_selection_unavailable", "The text control did not confirm full selection. No replacement text was sent.");
+            scu_fail("text_selection_unavailable", scu_text_text_selection_unconfirmed);
             goto done;
         }
     }
@@ -4221,10 +4214,10 @@ static JsonResult *type_target_value(const char *tool, JsonValue *args, gboolean
         confirmed = yyjson_mut_is_true(yyjson_mut_obj_get(readback, "confirmed"));
     } while (!confirmed && g_get_monotonic_time() < until);
     if (!confirmed) {
-        scu_fail("text_readback_failed", "Keyboard input was submitted, but the target text did not read back as expected. Inspect the result before retrying.");
+        scu_fail("text_readback_failed", scu_text_keyboard_text_readback_failed);
         goto done;
     }
-    result = scu_action("global_input", TRUE, "Target text read back as requested after verified keyboard input.");
+    result = scu_action("global_input", TRUE, scu_text_target_text_confirmed);
     JsonResult *warning = yyjson_mut_obj_get(submitted, "warning");
     if (warning) result_string(result, "warning", yyjson_mut_get_str(warning));
 done:
@@ -4387,7 +4380,7 @@ static JsonResult *run_batch(const Tool *batch, JsonValue *args)
         if (!previous_delay && !wait_for_delay(300)) {
             release_input();
         } else if (visual.broken || (failed && foreground_attempted && visual.bus == NULL)) {
-            scu_fail("visual_session_closed", "Visual session disconnected during the batch.");
+            scu_fail("visual_session_closed", scu_text_visual_session_closed);
         } else {
             ready = ensure_visual_session();
         }
@@ -4472,7 +4465,7 @@ observed:
             char *full = g_strdup(tree), *diff = NULL;
             if (baseline->tree && baseline->window == window && !json_boolean(requested, "refresh") &&
                 !baseline->truncated && !truncated)
-                diff = tree_diff(baseline->tree, tree);
+                diff = tree_diff(baseline->tree, tree, scu_text_tree_unchanged);
             result_boolean(observation, "tree_full", diff == NULL);
             if (diff) result_string(observation, "tree_markdown", diff);
             g_free(diff);
@@ -4483,7 +4476,7 @@ observed:
     result_string(result, "status", failed ? "failed" : "ok");
     goto done;
 invalid:
-    scu_fail("invalid_arguments", "Each step must be {tool,args} naming an action supported by this batch tool.");
+    scu_fail("invalid_arguments", scu_text_batch_step_invalid);
 done:
     return valid ? result : NULL;
 }
@@ -4570,7 +4563,7 @@ static void host_publish(GDBusConnection *connection, const char *sender,
     g_variant_get(args, "(&s&s)", &token, &json);
     if (g_strcmp0(sender, host.owner) || g_strcmp0(token, host.token) || strlen(json) > 1024 * 1024) {
         g_dbus_method_invocation_return_error(invocation, G_DBUS_ERROR,
-            G_DBUS_ERROR_ACCESS_DENIED, "Invalid geometry publisher");
+            G_DBUS_ERROR_ACCESS_DENIED, scu_text_geometry_publisher_invalid);
         return;
     }
     g_free(host.geometry);
@@ -4645,7 +4638,7 @@ static gboolean host_geometry(GError **error)
     close(fd);
     g_free(script);
     if (offset != length) {
-        g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Could not write the fixed KWin geometry script");
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, scu_text_geometry_script_write_failed);
         unload_geometry_script();
         return FALSE;
     }
@@ -4657,7 +4650,7 @@ static gboolean host_geometry(GError **error)
     }
     if (host.script_id < 0) {
         if (error && !*error) {
-            g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, "KWin refused its fixed geometry script");
+            g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, scu_text_geometry_script_refused);
         }
         unload_geometry_script();
         return FALSE;
@@ -4676,14 +4669,14 @@ static gboolean host_geometry(GError **error)
     unload_geometry_script();
     if (!host.geometry) {
         if (error && !*error) {
-            g_set_error(error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT, "Timed out reading KWin geometry");
+            g_set_error(error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT, scu_text_geometry_timeout);
         }
         return FALSE;
     }
     yyjson_doc *document = yyjson_read(host.geometry, strlen(host.geometry), 0);
     if (!document || !yyjson_is_obj(yyjson_doc_get_root(document))) {
         yyjson_doc_free(document);
-        g_set_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA, "KWin returned invalid geometry JSON");
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA, scu_text_geometry_json_invalid);
         return FALSE;
     }
     yyjson_mut_doc *output = yyjson_doc_mut_copy(document, NULL);
@@ -4732,12 +4725,12 @@ static GBytes *decode_kwin_pixels(const guchar *raw, gsize length, guint width,
         format == 16 || format == 17 || format == 18;
     if (!supported || !width || !height || (guint64)width * height * 4 > MAX_FRAME_BYTES ||
         (guint64)width * channels > stride || (guint64)stride * height != length) {
-        g_set_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA, "Unsupported or malformed KWin image format/stride");
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA, scu_text_capture_format_invalid);
         return NULL;
     }
     guchar *pixels = g_try_malloc((gsize)width * height * 3);
     if (!pixels) {
-        g_set_error(error, G_IO_ERROR, G_IO_ERROR_NO_SPACE, "Cannot allocate KWin image");
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_NO_SPACE, scu_text_capture_allocation_failed);
         return NULL;
     }
     for (guint y = 0; y < height; y++) {
@@ -4783,7 +4776,7 @@ static gboolean host_read_pixels(int fd, guchar *pixels, gsize length, GError **
         }
     }
     if (offset != length) {
-        g_set_error(error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT, "KWin capture was truncated, disconnected or timed out");
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT, scu_text_capture_interrupted);
         return FALSE;
     }
     return TRUE;
@@ -4814,14 +4807,14 @@ static GBytes *host_capture(GVariant *args, const char *window_key,
         }
         yyjson_doc_free(geometry);
         if (frame.width <= 0 || frame.height <= 0) {
-            g_set_error(error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND, "KWin window is unavailable");
+            g_set_error(error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND, scu_text_capture_window_unavailable);
             return NULL;
         }
         w = -lower_integer(-frame.width);
         h = -lower_integer(-frame.height);
     } else if (!host_output_bounds(&bounds) || w <= 0 || h <= 0 || x < bounds.x || y < bounds.y ||
         (gint64)x + w > bounds.x + bounds.width || (gint64)y + h > bounds.y + bounds.height) {
-        g_set_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT, "Capture is outside the KWin desktop");
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT, scu_text_capture_outside_desktop);
         return NULL;
     }
     /* Refuse excessive work before asking the compositor to allocate an image,
@@ -4838,12 +4831,12 @@ static GBytes *host_capture(GVariant *args, const char *window_key,
         yyjson_doc_free(geometry);
     }
     if ((double)w * density * h * density * 4 > MAX_FRAME_BYTES) {
-        g_set_error(error, G_IO_ERROR, G_IO_ERROR_NO_SPACE, "Capture exceeds the 256 MiB image limit; request a smaller region");
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_NO_SPACE, scu_text_capture_image_limit);
         return NULL;
     }
     int pipes[2];
     if (pipe2(pipes, O_CLOEXEC | O_NONBLOCK) < 0) {
-        g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Cannot create capture pipe");
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, scu_text_capture_pipe_failed);
         return NULL;
     }
     GUnixFDList *fds = g_unix_fd_list_new();
@@ -4881,11 +4874,11 @@ static GBytes *host_capture(GVariant *args, const char *window_key,
         if (raw && host_read_pixels(pipes[0], raw, length, error)) {
             result = decode_kwin_pixels(raw, length, *width, *height, stride, format, error);
         } else if (error && !*error) {
-            g_set_error(error, G_IO_ERROR, G_IO_ERROR_NO_SPACE, "Capture exceeds memory limits");
+            g_set_error(error, G_IO_ERROR, G_IO_ERROR_NO_SPACE, scu_text_capture_memory_limit);
         }
         g_free(raw);
     } else if (error && !*error) {
-        g_set_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA, "Invalid or oversized KWin capture metadata");
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA, scu_text_capture_metadata_invalid);
     }
     close(pipes[0]);
     g_clear_pointer(&metadata, g_variant_unref);
@@ -4955,7 +4948,7 @@ static gboolean initialize_host(void)
     initialized = TRUE; /* The guest owns public MCP negotiation. */
     return TRUE;
 failed:
-    g_printerr("scu: cannot start host: %s\n", error ? error->message : "initialization failed");
+    g_printerr(scu_text_host_start_failed_format, error ? error->message : scu_text_host_initialization_failed);
     g_clear_error(&error);
     return FALSE;
 }

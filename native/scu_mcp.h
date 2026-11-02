@@ -86,6 +86,305 @@ static const char accessibility_description[] =
     "A different window or large diff returns a full tree. Set refresh:true for a full tree. "
     "Element actions can target offscreen controls. ";
 
+/* Editable response text. Protocol keys, error codes, toolkit tokens and
+ * embedded scripts stay with their implementations. Preserve printf arguments
+ * when editing format strings. Tool descriptions and result labels also live
+ * in this header. */
+/* Host observations, accessibility and input. */
+static const char scu_text_cancelled[] =
+    "Operation cancelled; completed actions were not rolled back.";
+static const char scu_text_timeout[] =
+    "Operation exceeded its time limit; inspect state before retrying.";
+static const char scu_text_atspi_dependency[] =
+    "Install the host AT-SPI library: at-spi2-core (Fedora/Arch), "
+    "libatspi2.0-0 (Ubuntu).";
+static const char scu_text_accessibility_bus_unavailable[] =
+    "The host accessibility bus is unavailable.";
+static const char scu_text_accessibility_init_failed[] =
+    "Could not initialize the host AT-SPI bus.";
+static const char scu_text_accessibility_consumer_failed[] =
+    "Could not register the host accessibility consumer.";
+static const char scu_text_accessibility_registry_unavailable[] =
+    "Host accessibility registry is unavailable.";
+static const char scu_text_accessibility_registry_disconnected[] =
+    "Host accessibility registry disconnected.";
+
+/* Accessibility observations. */
+static const char scu_text_tree_response_budget[] =
+    "This window exceeds the accessibility response budget. The partial tree's elements remain usable; use screenshot input for omitted controls.";
+static const char scu_text_window_identity_unavailable[] =
+    "Window is absent or belongs to a different process. Call status "
+    "again.";
+static const char scu_text_tree_client_missing[] =
+    "No MCP instance is associated with this tree read.";
+
+/* Semantic actions and readback. */
+static const char scu_text_element_action_unavailable[] =
+    "The element does not expose this action.";
+static const char scu_text_accessible_action_submitted[] =
+    "Accessible action submitted; inspect the resulting state.";
+static const char scu_text_numeric_value_invalid[] =
+    "A numeric control requires a finite number in value.";
+static const char scu_text_numeric_range_unreadable[] =
+    "The numeric control did not expose a readable range. No value was submitted.";
+static const char scu_text_numeric_value_out_of_range[] =
+    "The requested value is outside this control's minimum and maximum. Read its window tree for the range.";
+static const char scu_text_numeric_readback_unavailable[] =
+    "The numeric value could not be read after submission. Inspect the result before retrying.";
+static const char scu_text_numeric_value_confirmed[] =
+    "Accessible numeric value read back as requested.";
+static const char scu_text_numeric_readback_failed[] =
+    "The numeric control did not read back the requested value. Inspect the result before retrying.";
+static const char scu_text_password_value_protected[] =
+    "Password elements are excluded from semantic value operations.";
+static const char scu_text_editable_text_unavailable[] =
+    "The element does not expose editable text.";
+static const char scu_text_text_selection_unsupported[] =
+    "Semantic insertion with selected text is unsupported; "
+    "use set_value or foreground typing.";
+static const char scu_text_text_edit_failed[] =
+    "The accessible text edit could not be submitted.";
+static const char scu_text_text_readback_failed[] =
+    "The text control did not read back the requested value. Inspect the result before retrying.";
+static const char scu_text_text_value_confirmed[] =
+    "Accessible text value read back with the expected contents.";
+static const char scu_text_text_edit_unconfirmed[] =
+    "Accessible text edit submitted; complete readback was unavailable.";
+
+/* Targeted keyboard input. */
+static const char scu_text_target_not_editable[] =
+    "The target is not an enabled editable control.";
+static const char scu_text_control_focus_failed[] =
+    "The control could not take focus.";
+static const char scu_text_target_focus_failed[] =
+    "The requested control did not gain focus. No keyboard input was sent.";
+static const char scu_text_target_text_unreadable[] =
+    "The target does not expose text readback.";
+static const char scu_text_text_insertion_unverifiable[] =
+    "Cannot verify the text insertion position. No keyboard input was sent.";
+static const char scu_text_target_focus_lost[] =
+    "The target lost focus; no further keyboard input was sent.";
+static const char scu_text_target_numeric_unreadable[] =
+    "The target's numeric value could not be read. No further keyboard input was sent.";
+static const char scu_text_stale_element[] =
+    "Element ID is unallocated or stale. Read a window tree with accessibility "
+    "observations:{window:window_id} and use its element ID.";
+static const char scu_text_element_disappeared[] =
+    "Accessible application or element disappeared. Read window state again.";
+static const char scu_text_element_input_unsupported[] =
+    "This action cannot use an accessibility "
+    "element ID. Use desktop foreground input.";
+
+/* Clipboard and adapter lifecycle. */
+static const char scu_text_paste_focus_changed[] =
+    "Clipboard/PRIMARY changed, but text focus changed before paste. No paste was sent.";
+static const char scu_text_paste_selection_changed[] =
+    "Clipboard/PRIMARY changed, but the text selection could not be restored safely. No paste was sent. Use set_value for accessible text replacement.";
+static const char scu_text_window_id_limit[] =
+    "Restart scu to allocate a fresh window ID range.";
+static const char scu_text_semantic_adapter_start_failed[] =
+    "Could not start the semantic adapter.";
+static const char scu_text_semantic_adapter_disconnected[] =
+    "Semantic adapter disconnected; no action was retried.";
+static const char scu_text_semantic_operation_failed[] =
+    "Semantic operation failed.";
+
+/* Compositor, capture and dependencies. */
+static const char scu_text_kwin_disconnected[] =
+    "KWin computer use disconnected. Inspect status before continuing; no action was replayed.";
+static const char scu_text_session_bus_unavailable[] =
+    "The host session bus is unavailable.";
+static const char scu_text_kwin_geometry_unavailable[] =
+    "KWin geometry is unavailable.";
+static const char scu_text_kwin_geometry_invalid[] =
+    "KWin returned invalid desktop geometry.";
+static const char scu_text_kwin_restarted[] =
+    "KWin restarted. Call status again; no action was replayed.";
+static const char scu_text_kwin_output_geometry_invalid[] =
+    "KWin output geometry or scale is invalid.";
+static const char scu_text_library_missing[] =
+    "Missing library %s. Install the package for it.";
+static const char scu_text_input_dependencies[] =
+    "Install host libei, libxkbcommon and GdkPixbuf libraries.";
+static const char scu_text_kwin_eis_unavailable[] =
+    "KWin did not provide an EIS connection.";
+static const char scu_text_input_session_name[] =
+    "Spaces computer use";
+static const char scu_text_kwin_eis_connect_failed[] =
+    "Could not connect to KWin EIS.";
+static const char scu_text_kwin_pointer_unavailable[] =
+    "KWin EIS did not resume a pointer device.";
+static const char scu_text_desktop_outputs_unavailable[] =
+    "KWin has no active desktop outputs.";
+static const char scu_text_output_geometry_incomplete[] =
+    "KWin did not provide complete output geometry.";
+static const char scu_text_desktop_access_disconnected[] =
+    "KWin desktop access disconnected.";
+static const char scu_text_output_dimensions_invalid[] =
+    "A KWin output has no valid dimensions.";
+static const char scu_text_capture_regions_overlap[] =
+    "Granted capture regions overlap; a unique canvas cannot be established.";
+static const char scu_text_overview_required[] =
+    "Take a full desktop overview before sending pixel input.";
+static const char scu_text_overview_mapping_changed[] =
+    "Desktop geometry or input mapping changed. Take a new full overview.";
+static const char scu_text_desktop_image_allocation_failed[] =
+    "Could not allocate the desktop image.";
+static const char scu_text_kwin_capture_failed[] =
+    "KWin capture failed.";
+static const char scu_text_png_size_limit[] =
+    "PNG exceeds the 32 MiB image limit.";
+static const char scu_text_canvas_memory_limit[] =
+    "Canvas exceeds the image memory limits.";
+static const char scu_text_capture_geometry_changed[] =
+    "KWin geometry changed during capture. Request a new overview.";
+static const char scu_text_library_functions_missing[] =
+    "The installed computer-use libraries are missing required functions. Update the host libraries.";
+static const char scu_text_status_geometry_changed[] =
+    "Desktop geometry changed during status. Take a new full overview.";
+
+/* Window association. */
+static const char scu_text_window_geometry_changed[] =
+    "Window changed during observation. Observe again.";
+static const char scu_text_window_association_failed[] =
+    "Could not uniquely associate this window after refreshing accessibility metadata (%u frames, %u matching titles, %u matching sizes). Use screenshot input if the window has no unique accessibility match.";
+static const char scu_text_kwin_window_unavailable[] =
+    "KWin window is unavailable. Call status again.";
+
+/* Pointer and keyboard input. */
+static const char scu_text_input_device_unavailable[] =
+    "The granted EIS session has no resumed device for this input operation.";
+static const char scu_text_coordinates_outside_overview[] =
+    "Coordinates lie outside the full desktop overview.";
+static const char scu_text_input_region_ambiguous[] =
+    "The image and input region cannot be paired uniquely. No pointer input was sent.";
+static const char scu_text_coordinates_in_gap[] =
+    "Coordinates fall in a gap between granted desktop regions.";
+static const char scu_text_pointer_seat_unavailable[] =
+    "The pointer's input seat has no compatible resumed device.";
+static const char scu_text_drag_region_ambiguous[] =
+    "The drag crosses an ambiguous region or incompatible input seat. No input was sent.";
+static const char scu_text_pointer_input_submitted[] =
+    "Pointer input submitted; inspect the resulting state.";
+static const char scu_text_input_device_removed[] =
+    "The input device was removed or paused during the action.";
+static const char scu_text_keyboard_map_unavailable[] =
+    "The compositor did not supply a usable XKB keyboard map.";
+static const char scu_text_key_unavailable[] =
+    "A requested key is absent from the compositor's "
+    "keyboard map. No key was pressed.";
+static const char scu_text_shift_unavailable[] =
+    "Shift is unavailable in the keyboard map.";
+static const char scu_text_key_chord_limit[] =
+    "Too many keys in this chord.";
+static const char scu_text_key_chord_submitted[] =
+    "Foreground key chord submitted; inspect the resulting state.";
+static const char scu_text_paste_shortcut_unavailable[] =
+    "Clipboard paste shortcut is unavailable in the keyboard map.";
+static const char scu_text_clipboard_unavailable[] =
+    "Host clipboard is unavailable.";
+static const char scu_text_empty_text[] =
+    "Empty text: no input sent.";
+static const char scu_text_utf8_input_submitted[] =
+    "UTF-8 input submitted through EIS text; verify the visible result.";
+static const char scu_text_text_keyboard_map_unavailable[] =
+    "No compositor XKB map is available for text input.";
+static const char scu_text_clipboard_replaced[] =
+    "Clipboard and primary selection text replaced.";
+static const char scu_text_keyboard_text_submitted[] =
+    "Text submitted using the compositor's keyboard map; verify the visible "
+    "result.";
+
+/* Verified keyboard readback. */
+static const char scu_text_target_window_inactive[] =
+    "The target is not in the uniquely matched active window. No further keyboard input was sent.";
+static const char scu_text_target_numeric_confirmed[] =
+    "Target numeric value read back as requested after verified keyboard input.";
+static const char scu_text_slider_no_progress[] =
+    "The slider did not move toward the requested value. No further keyboard input was sent.";
+static const char scu_text_slider_value_unreached[] =
+    "The slider did not reach the requested value within the input limit. Inspect the result before retrying.";
+static const char scu_text_text_selection_unconfirmed[] =
+    "The text control did not confirm full selection. No replacement text was sent.";
+static const char scu_text_keyboard_text_readback_failed[] =
+    "Keyboard input was submitted, but the target text did not read back as expected. Inspect the result before retrying.";
+static const char scu_text_target_text_confirmed[] =
+    "Target text read back as requested after verified keyboard input.";
+static const char scu_text_visual_session_closed[] =
+    "Visual session disconnected during the batch.";
+static const char scu_text_batch_step_invalid[] =
+    "Each step must be {tool,args} naming an action supported by this batch tool.";
+
+/* Geometry and image transport diagnostics. */
+static const char scu_text_geometry_publisher_invalid[] =
+    "Invalid geometry publisher";
+static const char scu_text_geometry_script_write_failed[] =
+    "Could not write the fixed KWin geometry script";
+static const char scu_text_geometry_script_refused[] =
+    "KWin refused its fixed geometry script";
+static const char scu_text_geometry_timeout[] =
+    "Timed out reading KWin geometry";
+static const char scu_text_geometry_json_invalid[] =
+    "KWin returned invalid geometry JSON";
+static const char scu_text_capture_format_invalid[] =
+    "Unsupported or malformed KWin image format/stride";
+static const char scu_text_capture_allocation_failed[] =
+    "Cannot allocate KWin image";
+static const char scu_text_capture_interrupted[] =
+    "KWin capture was truncated, disconnected or timed out";
+static const char scu_text_capture_window_unavailable[] =
+    "KWin window is unavailable";
+static const char scu_text_capture_outside_desktop[] =
+    "Capture is outside the KWin desktop";
+static const char scu_text_capture_image_limit[] =
+    "Capture exceeds the 256 MiB image limit; request a smaller region";
+static const char scu_text_capture_pipe_failed[] =
+    "Cannot create capture pipe";
+static const char scu_text_capture_memory_limit[] =
+    "Capture exceeds memory limits";
+static const char scu_text_capture_metadata_invalid[] =
+    "Invalid or oversized KWin capture metadata";
+static const char scu_text_host_start_failed_format[] =
+    "scu: cannot start host: %s\n";
+static const char scu_text_host_initialization_failed[] =
+    "initialization failed";
+
+/* Space-side connection. */
+static const char scu_text_host_service_disconnected[] =
+    "The host computer-use service disconnected. Call status again; no action was replayed.";
+static const char scu_text_computer_use_not_forwarded[] =
+    "Computer use is not forwarded. On the host, run `spaces configure <space>` and enable Plus Accessibility and Agent computer use. If enabled, check the graphical login and Spaces service log.";
+static const char scu_text_socket_path_too_long[] =
+    "The host socket path is too long.";
+static const char scu_text_host_connect_failed[] =
+    "Cannot connect to the host computer-use service.";
+
+/* Desktop session and output. */
+static const char scu_text_desktop_session_required[] =
+    "SCU requires the selected user's active local Wayland session.";
+static const char scu_text_desktop_generation_changed[] =
+    "The shared SCU host belongs to another desktop generation.";
+static const char scu_text_desktop_login_inactive[] =
+    "The selected graphical login is no longer active.";
+static const char scu_text_session_lock_unavailable[] =
+    "Cannot inspect the host session lock.";
+static const char scu_text_virtual_monitor_exited[] =
+    "krfb-virtualmonitor exited before a usable fallback appeared.";
+static const char scu_text_output_inventory_invalid[] =
+    "kscreen-doctor did not return a valid output inventory.";
+static const char scu_text_desktop_output_unavailable[] =
+    "No usable desktop output became available.";
+
+/* Host service. */
+static const char scu_text_malformed_message[] =
+    "Malformed or oversized JSON message";
+static const char scu_text_registration_failed_format[] =
+    "scu: registration failed: %s\n";
+static const char scu_text_registration_session_invalid[] =
+    "invalid session";
+
+static const char scu_text_tree_unchanged[] = "No Changes.\n";
+
 typedef enum {
     ARG_STRING,
     ARG_NUMBER,
@@ -1174,7 +1473,7 @@ static G_GNUC_UNUSED int serve_mcp(void)
         gpointer p = g_async_queue_timeout_pop(requests, 100000);
         if (p == GINT_TO_POINTER(1)) {
             scu.doc = yyjson_mut_doc_new(NULL);
-            send_response(NULL, NULL, -32700, "Malformed or oversized JSON message");
+            send_response(NULL, NULL, -32700, scu_text_malformed_message);
             yyjson_mut_doc_free(scu.doc);
             scu.doc = NULL;
         } else if (p) {

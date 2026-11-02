@@ -399,7 +399,7 @@ static int run_shared_host(const char *test_path, int ready_fd)
                     if (event->document) handle_request(event->document);
                     else {
                         scu.doc = yyjson_mut_doc_new(NULL);
-                        send_response(NULL, NULL, -32700, "Malformed or oversized JSON message");
+                        send_response(NULL, NULL, -32700, scu_text_malformed_message);
                         yyjson_mut_doc_free(scu.doc); scu.doc = NULL;
                     }
                 }
@@ -422,7 +422,7 @@ static int run_shared_host(const char *test_path, int ready_fd)
                         lease->accept_source = g_unix_fd_add(lease->listener, G_IO_IN, host_accept, lease);
                     }
                 } else {
-                    g_printerr("scu: registration failed: %s\n", error ? error->message : "invalid session");
+                    g_printerr(scu_text_registration_failed_format, error ? error->message : scu_text_registration_session_invalid);
                     host_revoke(lease);
                 }
                 g_clear_error(&error);
