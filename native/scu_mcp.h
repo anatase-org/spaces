@@ -41,6 +41,8 @@ static const char usage[] =
 
 static const char desktop_locked_warning[] =
     "The screen is locked. Vision tools are unavailable. You need to use the accesibility tool or ask the user to unlock.";
+static const char keyboard_locked_warning[] =
+    "This control requires keyboard input, which is unavailable while the screen is locked.";
 
 static const char server_instructions[] =
     "Computer use MCP server. Control the host desktop: screenshots, mouse, "

@@ -4488,8 +4488,13 @@ static JsonResult *execute_tool(const Tool *t, JsonValue *args)
     }
     if (!strcmp(t->name, "set_value") || json_member(args, "element_id")) {
         JsonResult *result = scu_atspi(t->name, args);
-        if (result && yyjson_mut_is_true(yyjson_mut_obj_get(result, "keyboard_required")))
-            return type_target_value(t->name, args, yyjson_mut_is_true(yyjson_mut_obj_get(result, "numeric")));
+        if (result && yyjson_mut_is_true(yyjson_mut_obj_get(result, "keyboard_required"))) {
+            result = type_target_value(t->name, args, yyjson_mut_is_true(yyjson_mut_obj_get(result, "numeric")));
+            if (!result && !g_strcmp0(scu.code, "desktop_locked")) {
+                g_free(scu.hint);
+                scu.hint = g_strdup(keyboard_locked_warning);
+            }
+        }
         return result;
     }
     return scu_visual(t->name, args);

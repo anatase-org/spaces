@@ -53,7 +53,7 @@ class Probe:
             assert reply.get("isError"), metadata
             error = metadata.get("failed", metadata)
             assert error.get("code") == expect_error, metadata
-            assert error.get("hint", "").startswith("The screen is locked. Vision tools are unavailable."), metadata
+            assert isinstance(error.get("hint"), str) and error["hint"], metadata
         else:
             assert not reply.get("isError"), metadata
         return metadata

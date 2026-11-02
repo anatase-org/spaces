@@ -517,6 +517,8 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
             result = client.tool("accessibility", steps=[{"tool": name, "args": {
                 "element_id": entry["element_id"], **extra}}])
             self.assertEqual(read_result(result)["failed"]["code"], "desktop_locked", result)
+            self.assertEqual(read_result(result)["failed"]["hint"],
+                "This control requires keyboard input, which is unavailable while the screen is locked.")
             self.assertFalse(any(b["type"] == "image" for b in result["content"]))
         after = json.loads(self.atspi_state.read_text())
         self.assertEqual(after["focus_requests"], before["focus_requests"])
