@@ -919,7 +919,7 @@ static JsonResult *prose_text_run(JsonResult *rows, size_t *index)
     return keep ? row : NULL;
 }
 
-/* Render only after geometry revalidation. Raw rows stay inside the host;
+/* Render only the final observation. Raw rows stay inside the host;
  * the response budget applies to the compact representation actually sent. */
 static void limit_tree_output(JsonResult *tree, gboolean include_frame)
 {
@@ -3192,21 +3192,8 @@ static gboolean accessibility_geometry(JsonValue *window, JsonValue *candidate,
  * KWin association anchors them. Raw rectangles never cross the MCP boundary. */
 static JsonValue *requested_kwin_window(JsonValue *args);
 
-static char *window_geometry_signature(JsonValue *window)
+static JsonResult *window_tree(JsonValue *args, gboolean read_text)
 {
-    if (!window) return NULL;
-    const char *fields[] = {"key", "pid", "client", "buffer", "frame"};
-    JsonResult *geometry = result_object();
-    for (guint i = 0; i < G_N_ELEMENTS(fields); i++) {
-        JsonValue *value = json_member(window, fields[i]);
-        if (value) result_member(geometry, fields[i], yyjson_val_mut_copy(scu.doc, value));
-    }
-    return yyjson_mut_val_write(geometry, 0, NULL);
-}
-
-static JsonResult *window_tree(JsonValue *args, JsonValue *window, gboolean read_text)
-{
-    char *signature = window_geometry_signature(window);
     CanvasRect client = {0};
     JsonValue *candidate;
     size_t i, n;
@@ -3221,17 +3208,13 @@ static JsonResult *window_tree(JsonValue *args, JsonValue *window, gboolean read
         yyjson_doc_free(listing);
         listing = NULL;
         JsonResult *discovery = atspi_worker_call("list_apps", NULL);
-        if (!discovery) { free(signature); return NULL; }
+        if (!discovery) return NULL;
         listing = yyjson_mut_val_imut_copy(discovery, NULL);
-        if (!refresh_geometry()) { free(signature); yyjson_doc_free(listing); return NULL; }
-        window = requested_kwin_window(args);
-        char *current = window_geometry_signature(window);
-        gboolean same = current && !g_strcmp0(signature, current);
-        free(current);
-        if (!same) {
-            free(signature);
+        if (!refresh_geometry()) { yyjson_doc_free(listing); return NULL; }
+        JsonValue *window = requested_kwin_window(args);
+        if (!window) {
             yyjson_doc_free(listing);
-            return scu_fail("stale_window_geometry", scu_text_window_geometry_changed);
+            return scu_fail("window_unavailable", scu_text_kwin_window_unavailable);
         }
         matches = best = frames = titles = sizes = 0;
         ambiguous = FALSE;
@@ -3283,9 +3266,8 @@ static JsonResult *window_tree(JsonValue *args, JsonValue *window, gboolean read
             }
         }
         if (matches || ambiguous || g_get_monotonic_time() >= until) break;
-        if (!scu_pause(50)) { free(signature); yyjson_doc_free(listing); return NULL; }
+        if (!scu_pause(50)) { yyjson_doc_free(listing); return NULL; }
     } while (TRUE);
-    free(signature);
     if (matches != 1) {
         const char *code = matches > 1 || ambiguous ? "accessibility_window_ambiguous"
             : titles && !sizes ? "accessibility_geometry_mismatch" : "accessibility_window_unmatched";
@@ -3405,10 +3387,9 @@ static JsonResult *observe_window(JsonValue *args, gboolean screenshot)
     if (!window) {
         return scu_fail("window_unavailable", scu_text_kwin_window_unavailable);
     }
-    char *signature = window_geometry_signature(window);
     guint images = yyjson_mut_arr_size(scu.images);
     JsonResult *result = NULL, *tree_error = NULL;
-    JsonResult *tree = window_tree(args, window, !screenshot);
+    JsonResult *tree = window_tree(args, !screenshot);
     if (!tree) {
         if (!screenshot || (g_strcmp0(scu.code, "accessibility_window_unmatched") &&
             g_strcmp0(scu.code, "accessibility_window_ambiguous") &&
@@ -3431,17 +3412,6 @@ static JsonResult *observe_window(JsonValue *args, gboolean screenshot)
             clear_tool_error();
         }
     }
-    if (!refresh_geometry() || !validate_canvas()) {
-        goto done;
-    }
-    window = requested_kwin_window(args);
-    char *current = window_geometry_signature(window);
-    gboolean same = current && !strcmp(signature, current);
-    free(current);
-    if (!same) {
-        scu_fail("stale_window_geometry", scu_text_window_geometry_changed);
-        goto done;
-    }
     result = tree ? tree : image;
     if (tree && image) {
         result_member(tree, "screenshot", yyjson_mut_obj_get(image, "screenshot"));
@@ -3451,7 +3421,6 @@ static JsonResult *observe_window(JsonValue *args, gboolean screenshot)
     result_integer(result, "window_id", json_number(args, "window_id", 0));
     limit_tree_output(result, screenshot);
 done:
-    free(signature);
     if (!result) {
         yyjson_mut_arr_remove_range(scu.images, images, yyjson_mut_arr_size(scu.images) - images);
     }

@@ -246,8 +246,6 @@ static const char scu_text_status_geometry_changed[] =
     "Desktop geometry changed during status. Take a new full overview.";
 
 /* Window association. */
-static const char scu_text_window_geometry_changed[] =
-    "Window changed during observation. Observe again.";
 static const char scu_text_window_association_failed[] =
     "Could not uniquely associate this window (%u frames, %u matching titles, %u matching sizes). Use screenshot input if the window cannot be matched.";
 static const char scu_text_kwin_window_unavailable[] =

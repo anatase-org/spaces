@@ -2419,13 +2419,33 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertIn("screenshot_error", observation)
         self.assertFalse(any(block["type"] == "image" for block in result["content"]))
 
-    def test_window_capture_rejects_geometry_races(self):
+    def test_window_capture_preserves_observation_when_window_moves(self):
         self.start_host(change_window_on_capture=True)
         client = self.client()
         window = client.windows()[0]
         result = client.tool("vision", observations={"window": window["window_id"], "refresh": True})
-        self.assertEqual(read_result(result)["observations"][0]["error"]["code"], "stale_window_geometry")
-        self.assertFalse(any(block["type"] == "image" for block in result["content"]))
+        self.assertFalse(result["isError"], result)
+        self.assertEqual(read_result(result)["status"], "ok")
+        self.assertIn("elements", read_result(result)["observations"][0])
+        self.assertIn("screenshot", read_result(result)["observations"][0])
+        self.assertEqual(self.image(result).size, (80, 60))
+        self.assertEqual(json.loads(self.control.read_text())["window_x"], 20)
+
+        button = next(row for row in read_result(result)["observations"][0]["elements"]
+                      if row["label"] == "Fixture button")
+        result = client.tool("accessibility", steps=[
+            {"tool": "activate", "args": {"element_id": button["element_id"]}},
+            {"tool": "activate", "args": {"element_id": 19999}},
+        ], observations={"window": window["window_id"], "refresh": True})
+        self.assertTrue(result["isError"], result)
+        data = read_result(result)
+        self.assertEqual(data["status"], "failed")
+        self.assertEqual(data["completed"], 1)
+        self.assertEqual(data["failed"]["index"], 1)
+        self.assertEqual(data["failed"]["tool"], "activate")
+        self.assertEqual(data["failed"]["code"], "stale_element")
+        self.assertEqual(json.loads(self.atspi_state.read_text())["clicks"], 1)
+        self.assertIn("elements", data["observations"][0])
 
     def test_window_title_change_during_capture_preserves_the_observation(self):
         self.start_host(change_title_on_capture=True)
