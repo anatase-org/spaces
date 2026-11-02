@@ -2175,7 +2175,6 @@ typedef struct {
 } CanvasLayout;
 
 typedef struct {
-    guint64 id; /* Positive JSON-safe integer; zero means no overview. */
     char *key;
     guint width, height;
     CanvasLayout layout;
@@ -2203,7 +2202,6 @@ typedef struct {
 } VisualSession;
 
 static VisualSession visual;
-static guint64 next_capture;
 
 static gboolean load_visual_libraries(void)
 {
@@ -2769,10 +2767,10 @@ static gboolean canvas_layout(CanvasLayout *layout, char **key)
     return TRUE;
 }
 
-static gboolean validate_canvas(guint64 id)
+static gboolean validate_canvas(void)
 {
     CanvasSnapshot *canvas = &visual.canvas;
-    if (canvas->id == 0 || (id && id != canvas->id)) {
+    if (!canvas->key) {
         scu_fail("stale_capture", "Take a full desktop overview before sending pixel input.");
         return FALSE;
     }
@@ -2792,12 +2790,12 @@ static gboolean validate_canvas(guint64 id)
 /* Describe the full overview's coordinate frame and capture guard. */
 static JsonResult *canvas_status(void)
 {
-    if (visual.canvas.id == 0) {
+    if (!visual.canvas.key) {
         return yyjson_mut_null(scu.doc);
     }
     char *code = scu.code, *hint = scu.hint;
     scu.code = scu.hint = NULL;
-    gboolean valid = validate_canvas(0);
+    gboolean valid = validate_canvas();
     g_free(scu.code);
     g_free(scu.hint);
     scu.code = code;
@@ -2809,7 +2807,6 @@ static JsonResult *canvas_status(void)
     JsonResult *result = result_object();
     result_integer(result, "width", canvas->width);
     result_integer(result, "height", canvas->height);
-    result_integer(result, "id", canvas->id);
     return result;
 }
 
@@ -2965,9 +2962,6 @@ static gboolean append_image(GBytes *pixels, guint width, guint height)
 
 static JsonResult *capture_desktop(void)
 {
-    if (next_capture == MAX_CAPTURE_ID) {
-        return scu_fail("capture_limit", "Capture IDs exhausted. Reconnect the MCP client.");
-    }
     CanvasLayout layout;
     char *key = NULL;
     if (!prepare_capture() || !canvas_layout(&layout, &key)) {
@@ -3024,11 +3018,9 @@ static JsonResult *capture_desktop(void)
         return NULL;
     }
     g_free(visual.canvas.key);
-    visual.canvas = (CanvasSnapshot){.id = ++next_capture,
-        .key = key, .width = output_width, .height = output_height,
+    visual.canvas = (CanvasSnapshot){.key = key, .width = output_width, .height = output_height,
         .layout = layout};
     JsonResult *result = result_object();
-    result_integer(result, "id", visual.canvas.id);
     result_integer(result, "width", output_width);
     result_integer(result, "height", output_height);
     visual.observed_input_sequence = visual.input_sequence;
@@ -3390,7 +3382,7 @@ static JsonResult *window_image(JsonValue *window)
 
 static JsonResult *observe_window(JsonValue *args, gboolean screenshot)
 {
-    if (!validate_canvas(0)) {
+    if (!validate_canvas()) {
         if (!screenshot) return NULL;
         clear_tool_error();
         guint images = yyjson_mut_arr_size(scu.images);
@@ -3429,7 +3421,7 @@ static JsonResult *observe_window(JsonValue *args, gboolean screenshot)
             clear_tool_error();
         }
     }
-    if (!refresh_geometry() || !validate_canvas(0)) {
+    if (!refresh_geometry() || !validate_canvas()) {
         goto done;
     }
     window = requested_kwin_window(args);
@@ -3447,7 +3439,6 @@ static JsonResult *observe_window(JsonValue *args, gboolean screenshot)
         result_member(image, "accessibility_error", tree_error);
     }
     result_integer(result, "window_id", json_number(args, "window_id", 0));
-    if (screenshot) result_integer(result, "id", visual.canvas.id);
     limit_tree_output(result, screenshot);
 done:
     free(signature);
@@ -3492,11 +3483,11 @@ static InputDevice *wait_for_device(enum ei_device_capability capability)
 
 /* Resolve overview coordinates.
  * A gap is allowed only for intermediate samples of a held-button drag. */
-static gboolean pointer_target(JsonValue *arguments, double x, double y,
+static gboolean pointer_target(double x, double y,
     gboolean allow_gap, struct ei_device **device_out, double *screen_x, double *screen_y)
 {
     *device_out = NULL;
-    if (!validate_canvas(yyjson_get_uint(json_member(arguments, "id")))) {
+    if (!validate_canvas()) {
         return FALSE;
     }
     CanvasSnapshot *canvas = &visual.canvas;
@@ -3638,7 +3629,7 @@ static JsonResult *pointer_action(const char *tool, JsonValue *arguments)
     for (guint i = 0; i <= count; i++) {
         double fraction = count ? (double)i / count : 0;
         struct ei_device *raw = NULL;
-        if (!pointer_target(arguments, x + (to_x - x) * fraction,
+        if (!pointer_target(x + (to_x - x) * fraction,
                 y + (to_y - y) * fraction, drag && i > 0 && i < count,
                 &raw, &samples[i].x, &samples[i].y)) {
             goto done;
@@ -3688,7 +3679,7 @@ static JsonResult *pointer_action(const char *tool, JsonValue *arguments)
      * to them. A mapping change during a drag aborts rather than retargeting. */
     for (guint i = 0; i <= count; i++) {
         if ((i && !scu_pause(duration / count)) || !visual_step() ||
-            !validate_canvas(yyjson_get_uint(json_member(arguments, "id"))) ||
+            !validate_canvas() ||
             (buttons && !device_resumed(buttons)) || (scroll && !device_resumed(scroll))) {
             goto done;
         }
@@ -4253,23 +4244,6 @@ static JsonResult *scu_visual(const char *tool, JsonValue *arguments)
  * definitions build tools/list schemas and validate direct and batched calls.
  * Optional upstream arguments are absent until their behavior is implemented.
  */
-/* The only shared action default is a pixel capture. Semantic element IDs carry
- * their own identity; window observations always name their window explicitly. */
-static yyjson_doc *prepare_arguments(JsonValue *args, guint64 id)
-{
-    yyjson_mut_doc *document = yyjson_mut_doc_new(NULL);
-    JsonResult *copy = yyjson_val_mut_copy(document, args);
-    yyjson_mut_doc_set_root(document, copy);
-    if (id && !json_member(args, "element_id") &&
-        (json_member(args, "x") || json_member(args, "from_x")) &&
-        !json_member(args, "id")) {
-        yyjson_mut_obj_add_uint(document, copy, "id", id);
-    }
-    yyjson_doc *result = yyjson_mut_doc_imut_copy(document, NULL);
-    yyjson_mut_doc_free(document);
-    return result;
-}
-
 static void clear_tool_error(void)
 {
     g_clear_pointer(&scu.code, g_free);
@@ -4302,7 +4276,7 @@ static JsonResult *batch_failure(guint index, const Tool *tool)
 static JsonResult *compact_observation(JsonResult *observation)
 {
     JsonResult *result = result_object();
-    const char *fields[] = {"id", "width", "height", NULL};
+    const char *fields[] = {"width", "height", NULL};
     for (unsigned index = 0; fields[index]; index++) {
         JsonResult *value = yyjson_mut_obj_get(observation, fields[index]);
         if (value != NULL) {
@@ -4317,7 +4291,7 @@ static JsonResult *compact_observation(JsonResult *observation)
  * of successful steps. Observation is independent of action confirmation. */
 static JsonResult *run_batch(const Tool *batch, JsonValue *args)
 {
-    yyjson_doc *steps[64] = {0};
+    JsonValue *steps[64] = {0};
     Tool actions[64] = {0};
     gboolean accessibility = batch->batch == BATCH_ACCESSIBILITY;
     JsonValue *array = json_member(args, "steps");
@@ -4335,9 +4309,8 @@ static JsonResult *run_batch(const Tool *batch, JsonValue *args)
             yyjson_obj_size(step) != 2 || !yyjson_is_obj(arguments)) {
             goto invalid;
         }
-        steps[index] = prepare_arguments(arguments, yyjson_get_uint(json_member(args, "id")));
-        JsonValue *merged = yyjson_doc_get_root(steps[index]);
-        if (!validate_arguments(action, merged)) {
+        steps[index] = arguments;
+        if (!validate_arguments(action, arguments)) {
             goto done;
         }
     }
@@ -4353,16 +4326,16 @@ static JsonResult *run_batch(const Tool *batch, JsonValue *args)
     guint completed = 0;
     gboolean failed = FALSE, foreground_attempted = FALSE;
     for (index = 0; index < count; index++) {
-        JsonValue *merged = yyjson_doc_get_root(steps[index]);
+        JsonValue *arguments = steps[index];
         gboolean delay = !strcmp(actions[index].name, "delay_ms");
         foreground_attempted |= !delay &&
-            json_member(merged, "element_id") == NULL;
+            json_member(arguments, "element_id") == NULL;
         /* A delay step supplies its own gap. Other action boundaries retain
          * their default wait, including after an earlier explicit delay. */
         JsonResult *value = NULL;
         keyboard_fallback = FALSE;
         if (!index || delay || previous_delay || wait_for_delay(150)) {
-            value = execute_tool(&actions[index], merged);
+            value = execute_tool(&actions[index], arguments);
         }
         if (keyboard_fallback) foreground_attempted = TRUE;
         previous_delay = value != NULL && delay;
@@ -4496,9 +4469,6 @@ observed:
 invalid:
     scu_fail("invalid_arguments", "Each step must be {tool,args} naming an action supported by this batch tool.");
 done:
-    for (index = 0; index < count; index++) {
-        yyjson_doc_free(steps[index]);
-    }
     return valid ? result : NULL;
 }
 
@@ -4964,7 +4934,6 @@ static gboolean initialize_host(void)
         goto failed;
     }
     /* Fresh namespaces prevent old handles from naming a new worker's state. */
-    next_capture = (guint64)g_random_int() << 20;
     next_kwin_window = g_random_int_range(1, G_MAXINT);
     atspi_worker_base = (guint)g_random_int_range(1, 1024) << 20;
     initialized = TRUE; /* The guest owns public MCP negotiation. */

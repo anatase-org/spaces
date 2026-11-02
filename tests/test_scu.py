@@ -380,7 +380,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         data = read_result(result)
         self.assertEqual(set(data), {"canvas", "apps", "locked"})
         self.assertTrue(data["locked"])
-        self.assertGreater(data["canvas"]["id"], 0)
+        self.assertEqual(set(data["canvas"]), {"width", "height"})
         self.assertTrue(data["apps"])
         self.assertTrue(any(block.get("type") == "text" and block.get("text", "").startswith(
             "The screen is locked. Vision tools are unavailable.") for block in result["content"]))
@@ -816,9 +816,9 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
     def test_clients_share_capture_but_have_private_element_ids_and_one_helper(self):
         self.start_host()
         first, second = self.client(), self.client()
-        one = read_result(self.status(first))
-        # The same current capture is valid from another Space/client.
-        result = second.tool("vision", id=one["canvas"]["id"],
+        self.status(first)
+        # Pixel input uses the host's latest overview across Spaces/clients.
+        result = second.tool("vision",
             steps=[{"tool": "click", "args": {"x": 40, "y": 40}}], observations=False)
         self.assertFalse(result["isError"], result)
         tree = self.snapshot(first)
@@ -1153,7 +1153,8 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
             text = response["content"][0]["text"]
             window = data["apps"][0]["windows"][0]
             self.assertIn("Screen: unlocked", text)
-            self.assertIn(f"Canvas: 160 x 120; id: {data['canvas']['id']}", text)
+            self.assertIn("Canvas: 160 x 120\n", text)
+            self.assertNotIn("; id:", text)
             self.assertIn(f'window_id={window["window_id"]} {json.dumps(window["title"])} active bounds=', text)
             self.assertNotIn('"apps":', text)
             self.assertEqual(any(b["type"] == "image" for b in response["content"]), not no_vision)
@@ -1237,7 +1238,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
                                  ["Fixture button", "Fixture entry", "Fixture password", "Focusable divider"])
                 self.assertTrue(all(row["depth"] == 1 and row["parent_index"] == 0 for row in rows[1:]))
                 if tool == "vision":
-                    self.assertIn("id", tree)
+                    self.assertNotIn("id", tree)
                     self.assertEqual(rows[1]["frame"]["y"], 620)
                 else:
                     self.assertNotIn("id", tree)
@@ -1358,8 +1359,8 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         data = read_result(response)
         self.assertIn("Screen: unlocked", response["content"][0]["text"])
         self.assertIn("Windows:", response["content"][0]["text"])
-        self.assertIn(f"id: {data['canvas']['id']}", response["content"][0]["text"])
-        self.assertGreater(data["canvas"]["id"], 0)
+        self.assertNotIn("; id:", response["content"][0]["text"])
+        self.assertEqual(set(data["canvas"]), {"width", "height"})
         self.assertGreater(json.loads(self.state.read_text())["captures"], 0)
         window = data["apps"][0]["windows"][0]["window_id"]
         tree = hidden.tool("accessibility", observations={"window": window, "refresh": True})
@@ -1429,7 +1430,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
             ("vision", {"steps": [click, {"tool": "type_text", "args": {"text": "x", "element_id": "unused"}}]}),
             ("accessibility", {"steps": [activate, {"tool": "type_text", "args": {"text": "x"}}]}),
             ("accessibility", {"steps": [activate], "observe": False}),
-            ("accessibility", {"steps": [activate], "id": tree["id"]}),
+            ("accessibility", {"steps": [activate], "id": 1}),
             ("accessibility", {"steps": [activate], "screenshot": False}),
             ("vision", {"steps": [click], "observe": False}),
         ):
@@ -1667,9 +1668,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         tools = client.call("tools/list", {})["result"]["tools"]
         self.assertEqual({tool["name"] for tool in tools}, {"vision", "accessibility", "status"})
         schema = next(tool["inputSchema"] for tool in tools if tool["name"] == "vision")
-        self.assertEqual(set(schema["properties"]), {"steps", "observations", "id"})
-        self.assertEqual(schema["properties"]["id"]["type"], "integer")
-        self.assertEqual(schema["properties"]["id"]["minimum"], 1)
+        self.assertEqual(set(schema["properties"]), {"steps", "observations"})
         variants = schema["properties"]["observations"]["anyOf"]
         self.assertEqual(variants[0]["type"], "object")
         self.assertEqual(variants[0]["required"], ["window"])
@@ -1684,7 +1683,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertEqual(list(actions), ["click", "move_cursor", "drag", "scroll", "press_keys",
                                          "type_text", "delay_ms"])
         self.assertEqual(actions["click"]["required"], ["x", "y"])
-        self.assertEqual(set(actions["click"]["properties"]), {"x", "y", "id", "button", "count"})
+        self.assertEqual(set(actions["click"]["properties"]), {"x", "y", "button", "count"})
         accessibility = next(tool["inputSchema"] for tool in tools if tool["name"] == "accessibility")
         self.assertEqual(set(accessibility["properties"]), {"steps", "observations"})
         self.assertEqual(accessibility["properties"]["observations"], {**variants[0], "description": accessibility["properties"]["observations"]["description"]})
@@ -1722,9 +1721,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertFalse(data["locked"])
         self.assertEqual(self.image(result).size, (160, 120))
         canvas = data["canvas"]
-        self.assertEqual(set(canvas), {"width", "height", "id"})
-        self.assertIs(type(canvas["id"]), int)
-        self.assertGreater(canvas["id"], 0)
+        self.assertEqual(set(canvas), {"width", "height"})
         self.assertEqual((canvas["width"], canvas["height"]), (160, 120))
         self.assertEqual(len(data["apps"]), 1)
         windows = data["apps"][0]["windows"]
@@ -1738,8 +1735,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.start_host()
         client = self.client()
         tree = self.snapshot(client)
-        self.assertIn("id", tree)
-        self.assertIs(type(tree["id"]), int)
+        self.assertNotIn("id", tree)
         rows = {row["label"]: row for row in tree["elements"]}
         self.assertNotIn("actions", rows["Fixture button"])
         self.assertEqual(rows["Fixture entry"]["actions"], ["type_text", "set_value"])
@@ -2244,7 +2240,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertFalse(result["isError"], result)
         observation = read_result(result)["observations"][0]
         self.assertIn("elements", observation)
-        self.assertEqual(observation["id"], status["canvas"]["id"])
+        self.assertNotIn("id", observation)
         self.assertEqual(observation["screenshot"], {
             "width": 80, "height": 60,
             "bounds": {"x": 20, "y": 20, "width": 80, "height": 60}})
@@ -2418,7 +2414,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
                          {"tool": "click", "args": {"x": 1, "y": 1, name: value}}]}):
                 result = client.tool("vision", **args)
                 self.assertEqual(read_result(result)["code"], "invalid_arguments")
-        for invalid_id in (0, -1, 1.5, True, "1", "c1", 9007199254740992):
+        for invalid_id in (1, 0, -1, 1.5, True, "1", "c1", 9007199254740992):
             for args in ({"id": invalid_id, "steps": [{"tool": "press_keys", "args": {"keys": ["a"]}}]},
                          {"steps": [{"tool": "press_keys", "args": {"keys": ["a"]}},
                                     {"tool": "click", "args": {"x": 1, "y": 1, "id": invalid_id}}]}):
@@ -2644,8 +2640,8 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
     def test_real_eis_batch_and_global_coordinates(self):
         self.start_host()
         client = self.client()
-        capture = read_result(self.status(client))["canvas"]["id"]
-        result = client.tool("vision", id=capture, steps=[
+        self.status(client)
+        result = client.tool("vision", steps=[
             {"tool": "click", "args": {"x": 60, "y": 50}},
             {"tool": "scroll", "args": {"x": 60, "y": 50, "direction": "down", "amount": 2}},
             {"tool": "press_keys", "args": {"keys": ["ctrl", "a"]}},
@@ -2658,12 +2654,10 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertEqual(data["status"], "ok")
         self.assertNotIn("steps", data)
         self.assertEqual(self.image(result).size, (160, 120))
-        self.assertNotEqual(data["observations"][0]["id"], capture)
-        self.assertIs(type(data["observations"][0]["id"]), int)
-        self.assertGreater(data["observations"][0]["id"], capture)
+        self.assertNotIn("id", data["observations"][0])
         self.assertNotIn("zoom", data["observations"][0])
         self.assertEqual(set(data["observations"][0]),
-                         {"id", "width", "height"})
+                         {"width", "height"})
         self.assertEqual((data["observations"][0]["width"], data["observations"][0]["height"]), (160, 120))
         state = json.loads(self.state.read_text())
         self.assertEqual((state["input"]["x"], state["input"]["y"]), (720, 450))
@@ -2676,16 +2670,10 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         text = result["content"][0]["text"]
         self.assertIn("Warning (step 3, type_text): Clipboard and primary selection text replaced.", text)
         self.assertNotIn('"warning":', text)
-        # Explicit numeric step IDs override the batch default in both directions.
-        current = data["observations"][0]["id"]
-        override = client.tool("vision", id=capture, observations=False, steps=[
-            {"tool": "click", "args": {"x": 60, "y": 50, "id": current}}])
-        self.assertFalse(override["isError"], override)
-        stale = client.tool("vision", id=current, observations=False, steps=[
-            {"tool": "click", "args": {"x": 60, "y": 50, "id": capture}}])
-        self.assertTrue(stale["isError"], stale)
-        self.assertEqual(read_result(stale)["failed"]["code"], "stale_capture")
-        self.assertEqual(read_result(stale)["completed"], 0)
+        # A later pixel action uses the fresh overview captured by the batch.
+        again = client.tool("vision", observations=False, steps=[
+            {"tool": "click", "args": {"x": 60, "y": 50}}])
+        self.assertFalse(again["isError"], again)
         self.status(client)
         self.assertEqual(json.loads(self.state.read_text())["input"]["clicks"], 2)
 
@@ -2751,13 +2739,10 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
     def test_removed_zoom_is_rejected_before_effects(self):
         self.start_host()
         client = self.client()
-        initial = read_result(self.status(client))["canvas"]["id"]
         self.status(client)
-        for observe, capture in (({"kind": "desktop", "zoom": [0, 0, 20, 20]}, initial),
-                                 ({"kind": "desktop", "zoom": [-1, 0, 20, 20]}, None),
-                                 ({"kind": "desktop", "zoom": [0, 0, 200, 20]}, None)):
-            result = client.tool("vision", **({"id": capture} if capture else {}),
-                steps=[{"tool": "click", "args": {"x": 40, "y": 40}}], zoom=observe["zoom"])
+        for zoom in ([0, 0, 20, 20], [-1, 0, 20, 20], [0, 0, 200, 20]):
+            result = client.tool("vision",
+                steps=[{"tool": "click", "args": {"x": 40, "y": 40}}], zoom=zoom)
             self.assertEqual(read_result(result)["code"], "invalid_arguments", result)
         self.status(client)
         self.assertEqual(json.loads(self.state.read_text())["input"]["clicks"], 0)
@@ -2819,7 +2804,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
     def test_kwin_replacement_invalidates_existing_handles_then_recovers(self):
         self.start_host()
         client = self.client()
-        original = read_result(self.status(client))["canvas"]["id"]
+        self.status(client)
         self.stop(self.kwin)
         self.kwin = self.child(["/usr/bin/python3", str(ROOT / "tests/scu_kwin_fixture.py"),
             self.address, str(self.state), str(self.control), str(self.backend)])
@@ -2829,7 +2814,10 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertTrue(result["isError"], result)
         self.assertEqual(read_result(result)["code"], "computer_use_disconnected")
         fresh = self.status(client)
-        self.assertNotEqual(read_result(fresh)["canvas"]["id"], original)
+        self.assertEqual(read_result(fresh)["canvas"], {"width": 160, "height": 120})
+        recovered = client.tool("vision", observations=False, steps=[
+            {"tool": "click", "args": {"x": 40, "y": 40}}])
+        self.assertFalse(recovered["isError"], recovered)
 
     def test_removed_zoom_is_rejected_before_keyboard_effects(self):
         self.start_host()

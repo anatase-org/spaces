@@ -176,7 +176,7 @@ def main():
     def focus_entry(probe):
         status, rows = fixture_window(probe)
         frame = rows["Spaces fixture entry"]["frame"]
-        probe.tool("vision", id=status["canvas"]["id"], observations=False, steps=[
+        probe.tool("vision", observations=False, steps=[
             {"tool": "click", "args": {"x": frame["x"] + frame["width"] / 2,
                                        "y": frame["y"] + frame["height"] / 2}}])
         probe.tool("accessibility", steps=[
@@ -275,7 +275,7 @@ def main():
 
             def locked_status(probe):
                 current = probe.tool("status")
-                assert current["locked"] and current["canvas"]["id"] and current["apps"], current
+                assert current["locked"] and current["canvas"]["width"] and current["apps"], current
                 assert not any(block["type"] == "image" for block in probe.last_reply["content"])
                 assert {"type": "text", "text": "The screen is locked. Vision tools are unavailable."} in probe.last_reply["content"]
                 assert locked(), "SCU changed the session lock"

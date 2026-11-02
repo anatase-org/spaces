@@ -66,9 +66,9 @@ def read_result(response):
                 continue
             if line.startswith('Screen: '):
                 result.update(locked=line == 'Screen: locked', apps=[])
-            elif match := re.fullmatch(r'Canvas: (\d+) x (\d+); id: (\d+)', line):
-                width, height, capture = map(int, match.groups())
-                result['canvas'] = dict(width=width, height=height, id=capture)
+            elif match := re.fullmatch(r'Canvas: (\d+) x (\d+)', line):
+                width, height = map(int, match.groups())
+                result['canvas'] = dict(width=width, height=height)
             elif line == 'Windows:':
                 continue
             elif 'apps' in result and line.startswith('  ') and not line.startswith('    '):
@@ -84,15 +84,13 @@ def read_result(response):
                     bounds=dict(zip(('x', 'y', 'width', 'height'), bounds))))
             elif match := re.fullmatch(r'Status: (\w+); completed: (\d+)', line):
                 result.update(status=match[1], completed=int(match[2]), observations=[])
-            elif match := re.fullmatch(r'(Window (\d+)|Desktop)(?:; id: (\d+))?(?:; (\d+) x (\d+))?', line):
+            elif match := re.fullmatch(r'(Window (\d+)|Desktop)(?:; (\d+) x (\d+))?', line):
                 finish_tree()
                 observation = {}
                 if match[2] is not None:
                     observation['window_id'] = int(match[2])
                 if match[3] is not None:
-                    observation['id'] = int(match[3])
-                if match[4] is not None:
-                    observation.update(width=int(match[4]), height=int(match[5]))
+                    observation.update(width=int(match[3]), height=int(match[4]))
                 result['observations'].append(observation)
             elif match := re.fullmatch(r'Screenshot: (\d+) x (\d+); bounds=(.*)', line):
                 observation['screenshot'] = dict(width=int(match[1]), height=int(match[2]),

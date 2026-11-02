@@ -79,12 +79,11 @@ def main():
             if args.visual_actions:
                 if args.entry_point is None:
                     raise AssertionError("Inspect a capture and supply --entry-point X Y for visual tests")
-                image = first
                 x, y = args.entry_point
                 tool("accessibility", steps=[
                     {"tool": "set_value", "args": {"element_id": rows["Spaces fixture entry"]["element_id"], "value": ""}}])
                 performed = tool("vision", steps=[
-                    {"tool": "click", "args": {"id": image["id"], "x": x, "y": y}},
+                    {"tool": "click", "args": {"x": x, "y": y}},
                     {"tool": "type_text", "args": {"text": "replace me"}},
                     {"tool": "press_keys", "args": {"keys": ["ctrl", "a"]}},
                     {"tool": "type_text", "args": {"text": "Visual "}},
@@ -92,15 +91,11 @@ def main():
                     {"tool": "press_keys", "args": {"keys": ["End"]}},
                     {"tool": "type_text", "args": {"text": "!"}},
                 ])
-                # Automatic overview replaces the global pixel capture.
-                image = performed["observations"][0]
                 if args.surface_point is not None:
                     x, y = args.surface_point
                     tool("vision", steps=[
-                        {"tool": "scroll", "args": {"id": image["id"],
-                                    "x": x, "y": y, "direction": "down", "amount": 2}},
-                        {"tool": "drag", "args": {"id": image["id"],
-                                  "from_x": x - 40, "from_y": y,
+                        {"tool": "scroll", "args": {"x": x, "y": y, "direction": "down", "amount": 2}},
+                        {"tool": "drag", "args": {"from_x": x - 40, "from_y": y,
                                   "to_x": x + 40, "to_y": y + 20, "duration_ms": 300}},
                     ])
                 tool("vision")

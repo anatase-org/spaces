@@ -65,7 +65,7 @@ static void establish_canvas(guint width, guint height)
     char *key = NULL;
     assert(canvas_layout(&layout, &key));
     g_free(visual.canvas.key);
-    visual.canvas = (CanvasSnapshot){.id = 1, .key = key,
+    visual.canvas = (CanvasSnapshot){.key = key,
         .width = width, .height = height, .layout = layout};
 }
 
@@ -91,19 +91,18 @@ static void test_mapping(void)
     ei_api.region_get_width = fake_width;
     ei_api.region_get_height = fake_height;
     establish_canvas(1120, 410);
-    yyjson_doc *arguments = yyjson_read("{}", 2, 0);
     struct ei_device *mapped;
     double x, y;
-    assert(pointer_target(yyjson_doc_get_root(arguments), 240, 135, FALSE, &mapped, &x, &y));
+    assert(pointer_target(240, 135, FALSE, &mapped, &x, &y));
     assert(mapped == (struct ei_device *)&raw && x == -960 && y == 340);
-    assert(pointer_target(yyjson_doc_get_root(arguments), 800, 230, FALSE, &mapped, &x, &y));
+    assert(pointer_target(800, 230, FALSE, &mapped, &x, &y));
     assert(x == 1280 && y == 720);
-    assert(!pointer_target(yyjson_doc_get_root(arguments), 1000, 5, FALSE, &mapped, &x, &y));
+    assert(!pointer_target(1000, 5, FALSE, &mapped, &x, &y));
     assert(!strcmp(scu.code, "invalid_coordinates"));
     reset_error();
-    assert(pointer_target(yyjson_doc_get_root(arguments), 1000, 5, TRUE, &mapped, &x, &y));
+    assert(pointer_target(1000, 5, TRUE, &mapped, &x, &y));
     assert(mapped == NULL); /* Intermediate drag samples may cross a gap. */
-    assert(!pointer_target(yyjson_doc_get_root(arguments), 1120, 0, FALSE, &mapped, &x, &y));
+    assert(!pointer_target(1120, 0, FALSE, &mapped, &x, &y));
     reset_error();
     visual.displays[0].has_geometry = visual.displays[1].has_geometry = FALSE;
     CanvasLayout unavailable; char *unused = NULL;
@@ -113,15 +112,15 @@ static void test_mapping(void)
     visual.displays[0].has_geometry = visual.displays[1].has_geometry = TRUE;
     establish_canvas(1120, 410);
     raw.regions[1].mapping = "left";
-    assert(!validate_canvas(0));
+    assert(!validate_canvas());
     assert(!strcmp(scu.code, "stale_capture"));
     reset_error();
     establish_canvas(1120, 410);
-    assert(!pointer_target(yyjson_doc_get_root(arguments), 240, 135, FALSE, &mapped, &x, &y));
+    assert(!pointer_target(240, 135, FALSE, &mapped, &x, &y));
     assert(!strcmp(scu.code, "ambiguous_display_mapping"));
     reset_error();
     visual.displays[0].revision++;
-    assert(!validate_canvas(0));
+    assert(!validate_canvas());
     assert(!strcmp(scu.code, "stale_capture"));
     reset_error();
     /* Prefer a matching absolute pointer over an earlier relative/button device. */
@@ -129,7 +128,6 @@ static void test_mapping(void)
     InputDevice first = {.device = (struct ei_device *)&other, .resumed = TRUE};
     g_ptr_array_insert(visual.devices, 0, &first);
     assert(seat_device((struct ei_device *)&raw, EI_DEVICE_CAP_BUTTON) == &device);
-    yyjson_doc_free(arguments);
     g_ptr_array_unref(visual.devices);
     visual.devices = NULL;
 }

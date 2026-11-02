@@ -123,7 +123,7 @@ def main():
         def point(tree, label):
             frame = next(row["frame"] for row in tree["elements"] if row["label"] == label)
             assert frame, (label, tree)
-            return {"id": tree["id"], "x": frame["x"] + frame["width"] / 2,
+            return {"x": frame["x"] + frame["width"] / 2,
                     "y": frame["y"] + frame["height"] / 2}
 
         tree = snapshot(vision=True)

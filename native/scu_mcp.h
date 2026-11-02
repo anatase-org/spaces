@@ -15,7 +15,6 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <unistd.h>
-#define MAX_CAPTURE_ID G_GUINT64_CONSTANT(9007199254740991)
 #define MAX_IMAGE_DIMENSION 2048
 #define ELEMENT_CAPACITY 20000
 
@@ -140,7 +139,6 @@ static const Argument action_arguments[] = {
 static const Argument point_arguments[] = {
     {.name = "x", .type = ARG_NUMBER},
     {.name = "y", .type = ARG_NUMBER},
-    {.name = "id", .type = ARG_INTEGER, .minimum = 1, .maximum = MAX_CAPTURE_ID},
     {NULL},
 };
 static const Argument click_arguments[] = {
@@ -149,7 +147,6 @@ static const Argument click_arguments[] = {
     {NULL},
 };
 static const Argument drag_arguments[] = {
-    {.name = "id", .type = ARG_INTEGER, .minimum = 1, .maximum = MAX_CAPTURE_ID},
     {.name = "from_x", .type = ARG_NUMBER},
     {.name = "from_y", .type = ARG_NUMBER},
     {.name = "to_x", .type = ARG_NUMBER},
@@ -185,8 +182,6 @@ static const Argument vision_arguments[] = {
         .description = "Optional ordered {tool,args} actions. Omit or pass [] to observe without acting."},
     {.name = "observations", .type = ARG_OBSERVATION, .allow_false = TRUE,
         .description = "Window for a screenshot and tree after acting. Optional. Set to false to skip observation or do not provide for a desktop screenshot."},
-    {.name = "id", .type = ARG_INTEGER, .minimum = 1, .maximum = MAX_CAPTURE_ID,
-        .description = "Optional full-overview capture used for pixel steps. Omission uses the latest overview."},
     {NULL},
 };
 
@@ -508,7 +503,7 @@ static yyjson_doc *build_tool_schema(const Tool *tool)
     }
     if (tool->batch != BATCH_NONE) {
         /* Advertise the actual nested contract, not an opaque array of objects.
-         * Individual steps are validated again after defaults are merged. */
+         * Individual steps are validated again before desktop effects. */
         JsonResult *alternatives = result_array();
         for (unsigned index = 0; index < G_N_ELEMENTS(action_tools); index++) {
             Tool variant;
@@ -542,8 +537,6 @@ static yyjson_doc *build_tool_schema(const Tool *tool)
     }
     if (tool->required != NULL) {
         JsonResult *ordered = result_object();
-        JsonResult *capture = yyjson_mut_obj_get(properties, "id");
-        if (capture) result_member(ordered, "id", yyjson_mut_val_mut_copy(scu.doc, capture));
         for (const char *const *name = tool->required; *name != NULL; name++) {
             result_append(required, yyjson_mut_strcpy(scu.doc, *name));
             JsonResult *property = yyjson_mut_obj_get(properties, *name);
@@ -894,9 +887,8 @@ static char *tool_result_text(const Tool *tool, JsonResult *output)
     } else if (tool && !strcmp(tool->name, "status")) {
         g_string_append_printf(text, "Screen: %s\n", yyjson_mut_is_true(yyjson_mut_obj_get(output, "locked")) ? "locked" : "unlocked");
         JsonResult *canvas = yyjson_mut_obj_get(output, "canvas");
-        g_string_append_printf(text, "Canvas: %" G_GINT64_FORMAT " x %" G_GINT64_FORMAT "; id: %" G_GUINT64_FORMAT "\n",
-            yyjson_mut_get_sint(yyjson_mut_obj_get(canvas, "width")), yyjson_mut_get_sint(yyjson_mut_obj_get(canvas, "height")),
-            yyjson_mut_get_uint(yyjson_mut_obj_get(canvas, "id")));
+        g_string_append_printf(text, "Canvas: %" G_GINT64_FORMAT " x %" G_GINT64_FORMAT "\n",
+            yyjson_mut_get_sint(yyjson_mut_obj_get(canvas, "width")), yyjson_mut_get_sint(yyjson_mut_obj_get(canvas, "height")));
         g_string_append(text, "Windows:\n");
         JsonResult *app, *window;
         size_t i, n, j, m;
@@ -934,8 +926,6 @@ static char *tool_result_text(const Tool *tool, JsonResult *output)
             JsonResult *window = yyjson_mut_obj_get(observation, "window_id");
             if (window) g_string_append_printf(text, "\nWindow %" G_GINT64_FORMAT, yyjson_mut_get_sint(window));
             else g_string_append(text, "\nDesktop");
-            JsonResult *id = yyjson_mut_obj_get(observation, "id");
-            if (id) g_string_append_printf(text, "; id: %" G_GUINT64_FORMAT, yyjson_mut_get_uint(id));
             if (!window) g_string_append_printf(text, "; %" G_GINT64_FORMAT " x %" G_GINT64_FORMAT,
                 yyjson_mut_get_sint(yyjson_mut_obj_get(observation, "width")), yyjson_mut_get_sint(yyjson_mut_obj_get(observation, "height")));
             g_string_append_c(text, '\n');
