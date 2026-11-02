@@ -494,13 +494,13 @@ static guint cache_element(AtspiAccessible *node, Window *window)
     return (guint)(element - element_table->slots);
 }
 
-static JsonResult *accessible_frame(AtspiAccessible *o)
+static JsonResult *accessible_extents(AtspiAccessible *o, AtspiCoordType coordinates)
 {
     AtspiComponent *c = atspi.accessible_get_component_iface(o);
     if (!c) {
         return yyjson_mut_null(scu.doc);
     }
-    AtspiRect *r = atspi.component_get_extents(c, ATSPI_COORD_TYPE_WINDOW, NULL);
+    AtspiRect *r = atspi.component_get_extents(c, coordinates, NULL);
     g_object_unref(c);
     if (!r) {
         return yyjson_mut_null(scu.doc);
@@ -512,6 +512,11 @@ static JsonResult *accessible_frame(AtspiAccessible *o)
     result_integer(f, "height", r->height);
     g_free(r);
     return f;
+}
+
+static JsonResult *accessible_frame(AtspiAccessible *o)
+{
+    return accessible_extents(o, ATSPI_COORD_TYPE_WINDOW);
 }
 
 /* The AT-SPI bus name and object path identify a window more reliably than
@@ -561,7 +566,8 @@ static void discover_application_windows(AtspiAccessible *application)
         AtspiAccessible *window =
             atspi.accessible_get_child_at_index(application, index, NULL);
         if (window != NULL) {
-            register_window(window, process_id, name);
+            if (!accessible_has_state(window, ATSPI_STATE_DEFUNCT))
+                register_window(window, process_id, name);
             g_object_unref(window);
         }
     }
@@ -686,6 +692,9 @@ static JsonResult *list_apps(void)
         result_string(item, "title", title);
         result_string(item, "toolkit", window->toolkit);
         result_member(item, "bounds", accessible_frame(window->accessible));
+        /* Screen extents are association evidence only. Some Wayland toolkits
+         * report window-local or sentinel positions, so never export them. */
+        result_member(item, "screen_bounds", accessible_extents(window->accessible, ATSPI_COORD_TYPE_SCREEN));
         result_boolean(item, "shown",
             accessible_has_state(window->accessible, ATSPI_STATE_SHOWING));
         result_boolean(item, "active",
@@ -3142,9 +3151,15 @@ static gboolean accessibility_size(JsonValue *window, JsonValue *candidate,
  * retains the page title. Strip only this toolkit-owned suffix on both sides. */
 static char *accessibility_title(const char *title, gboolean chromium)
 {
-    const char *suffix = " - Audio playing - Chromium";
-    if (title && chromium && g_str_has_suffix(title, suffix))
-        return g_strdup_printf("%.*s - Chromium", (int)(strlen(title) - strlen(suffix)), title);
+    const char *brands[] = {"Chromium", "Google Chrome"};
+    for (guint i = 0; title && chromium && i < G_N_ELEMENTS(brands); i++) {
+        char *suffix = g_strdup_printf(" - Audio playing - %s", brands[i]);
+        gboolean matches = g_str_has_suffix(title, suffix);
+        char *normalized = matches ? g_strdup_printf("%.*s - %s",
+            (int)(strlen(title) - strlen(suffix)), title, brands[i]) : NULL;
+        g_free(suffix);
+        if (matches) return normalized;
+    }
     return g_strdup(title);
 }
 
@@ -3166,14 +3181,30 @@ static gboolean accessibility_geometry(JsonValue *window, JsonValue *candidate,
         accessibility_size(window, candidate, anchor, origin, ratio);
 }
 
+/* Absolute position can distinguish Plasma's per-output popup objects.
+ * Accept only a compositor rectangle at the exact reported position and scale;
+ * unsupported Wayland screen coordinates simply provide no extra evidence. */
+static gboolean accessibility_position(JsonValue *candidate,
+    const CanvasRect *anchor, const CanvasRect *client, double ratio)
+{
+    CanvasRect screen;
+    return read_rect(json_member(candidate, "screen_bounds"), &screen) &&
+        fabs(screen.width - anchor->width) <= 2 && fabs(screen.height - anchor->height) <= 2 &&
+        fabs(screen.x * ratio - client->x) <= 2 && fabs(screen.y * ratio - client->y) <= 2;
+}
+
 typedef struct {
     JsonValue *candidate;
     guint pid;
     CanvasRect anchor, client;
     double ratio;
-    guint matches, frames, titles, sizes;
+    guint matches, frames, titles, sizes, positions;
     gboolean ambiguous;
 } AccessibilityMatch;
+
+typedef struct {
+    gboolean title, size, position;
+} AccessibilityEvidence;
 
 static gboolean accessibility_has_pid(JsonValue *apps, gint64 pid)
 {
@@ -3186,10 +3217,27 @@ static gboolean accessibility_has_pid(JsonValue *apps, gint64 pid)
     return FALSE;
 }
 
-/* Check the reverse association too: one accessibility frame must not fit
- * several compositor windows. A zero PID filter searches all processes. */
+static gboolean accessibility_candidate_visible(JsonValue *window, JsonValue *candidate)
+{
+    return !json_boolean(window, "shown") || json_boolean(candidate, "shown");
+}
+
+static gboolean accessibility_evidence(JsonValue *window, JsonValue *candidate,
+    AccessibilityEvidence evidence)
+{
+    if (!accessibility_candidate_visible(window, candidate) ||
+        (evidence.title && !accessibility_titles_match(window, candidate))) return FALSE;
+    if (!evidence.size && !evidence.position) return TRUE;
+    CanvasRect anchor, client;
+    double ratio;
+    return accessibility_size(window, candidate, &anchor, &client, &ratio) &&
+        (!evidence.position || accessibility_position(candidate, &anchor, &client, ratio));
+}
+
+/* Every association must be unique in both inventories, including PID+title.
+ * Neither a repeated title nor an equally sized popup is a window identity. */
 static guint accessibility_compositor_matches(JsonValue *candidate,
-    gint64 pid_filter, gboolean require_title)
+    gint64 pid_filter, AccessibilityEvidence evidence)
 {
     guint matches = 0;
     size_t i, n;
@@ -3197,16 +3245,13 @@ static guint accessibility_compositor_matches(JsonValue *candidate,
     JsonValue *windows = json_member(yyjson_doc_get_root(visual.geometry), "windows");
     yyjson_arr_foreach(windows, i, n, window) {
         if (pid_filter && json_number(window, "pid", 0) != pid_filter) continue;
-        CanvasRect anchor, client;
-        double ratio;
-        if (accessibility_geometry(window, candidate, &anchor, &client, &ratio, require_title))
-            matches++;
+        if (accessibility_evidence(window, candidate, evidence)) matches++;
     }
     return matches;
 }
 
 static AccessibilityMatch find_accessibility_match(JsonValue *window,
-    JsonValue *apps, gint64 pid_filter, gboolean require_title)
+    JsonValue *apps, gint64 pid_filter, AccessibilityEvidence evidence)
 {
     AccessibilityMatch result = {0};
     size_t i, n, j, m;
@@ -3214,23 +3259,23 @@ static AccessibilityMatch find_accessibility_match(JsonValue *window,
     yyjson_arr_foreach(apps, i, n, app) {
         if (pid_filter && json_number(app, "pid", 0) != pid_filter) continue;
         yyjson_arr_foreach(json_member(app, "windows"), j, m, candidate) {
-            CanvasRect anchor, client;
-            double ratio;
+            if (!accessibility_candidate_visible(window, candidate)) continue;
+            CanvasRect anchor = {0}, client = {0};
+            double ratio = 1;
             gboolean title_matches = accessibility_titles_match(window, candidate);
             gboolean size_matches = accessibility_size(window, candidate, &anchor, &client, &ratio);
+            gboolean position_matches = size_matches && accessibility_position(candidate, &anchor, &client, ratio);
             result.frames++;
             result.titles += title_matches;
             result.sizes += size_matches;
-            if (!size_matches || (require_title && !title_matches)) continue;
+            result.positions += position_matches;
+            if ((evidence.title && !title_matches) || (evidence.size && !size_matches) ||
+                (evidence.position && !position_matches)) continue;
 
-            /* PID + title identifies the process and window. Size-only or
-             * cross-process fallback also needs a unique reverse association. */
-            if (!pid_filter || !require_title) {
-                guint reverse_matches = accessibility_compositor_matches(candidate, pid_filter, require_title);
-                if (reverse_matches != 1) {
-                    result.ambiguous |= reverse_matches > 1;
-                    continue;
-                }
+            guint reverse_matches = accessibility_compositor_matches(candidate, pid_filter, evidence);
+            if (reverse_matches != 1) {
+                result.ambiguous |= reverse_matches > 1;
+                continue;
             }
             result.candidate = candidate;
             result.pid = json_number(app, "pid", 0);
@@ -3252,6 +3297,7 @@ static JsonResult *window_tree(JsonValue *args, gboolean read_text)
     yyjson_doc *listing = NULL;
     AccessibilityMatch match = {0};
     gint64 until = g_get_monotonic_time() + G_USEC_PER_SEC;
+    gint64 pid_filter = 0;
     do {
         yyjson_doc_free(listing);
         listing = NULL;
@@ -3268,12 +3314,29 @@ static JsonResult *window_tree(JsonValue *args, gboolean read_text)
         /* Filter by process first. Search all applications only when AT-SPI
          * lacks the compositor PID, as can happen with sandboxed applications. */
         gint64 pid = json_number(window, "pid", 0);
-        gint64 pid_filter = accessibility_has_pid(apps, pid) ? pid : 0;
-        match = find_accessibility_match(window, apps, pid_filter, TRUE);
-        /* Titles can change during navigation. Try size alone only when
-         * title matching found no candidates and no ambiguity. */
-        if (!match.matches && !match.ambiguous)
-            match = find_accessibility_match(window, apps, pid_filter, FALSE);
+        pid_filter = accessibility_has_pid(apps, pid) ? pid : 0;
+        /* PID+title identifies a semantic tree without requiring screenshot
+         * geometry. Cross-process matches still need geometric evidence. */
+        AccessibilityEvidence evidence = {.title = TRUE, .size = !read_text || !pid_filter};
+        match = find_accessibility_match(window, apps, pid_filter, evidence);
+        /* Geometry may refine repeated names even though it is unnecessary
+         * for a unique semantic identity. */
+        if (!evidence.size && (match.matches > 1 || match.ambiguous)) {
+            AccessibilityMatch sized = find_accessibility_match(window, apps, pid_filter,
+                (AccessibilityEvidence){.title = TRUE, .size = TRUE});
+            if (sized.matches == 1 && !sized.ambiguous) match = sized;
+        }
+        if (match.matches != 1 || match.ambiguous) {
+            /* Refine repeated titles with position; never discard a conflicting
+             * title identity merely because another object has the same size. */
+            gboolean title = match.matches || match.ambiguous;
+            AccessibilityMatch positioned = find_accessibility_match(window, apps, pid_filter,
+                (AccessibilityEvidence){.title = title, .size = TRUE, .position = TRUE});
+            if (positioned.matches == 1 && !positioned.ambiguous) match = positioned;
+            else if (!title)
+                match = find_accessibility_match(window, apps, pid_filter,
+                    (AccessibilityEvidence){.size = TRUE});
+        }
         /* Navigation can briefly leave several equally sized frames with old
          * titles. Let both inventories settle before rejecting ambiguity. */
         if ((match.matches == 1 && !match.ambiguous) || g_get_monotonic_time() >= until) break;
@@ -3282,7 +3345,7 @@ static JsonResult *window_tree(JsonValue *args, gboolean read_text)
     if (match.matches != 1 || match.ambiguous) {
         const char *code = match.matches > 1 || match.ambiguous ? "accessibility_window_ambiguous"
             : match.titles && !match.sizes ? "accessibility_geometry_mismatch" : "accessibility_window_unmatched";
-        char *hint = g_strdup_printf(scu_text_window_association_failed, match.frames, match.titles, match.sizes);
+        char *hint = g_strdup_printf(scu_text_window_association_failed, pid_filter, match.frames, match.titles, match.sizes, match.positions);
         scu_fail(code, hint);
         g_free(hint);
         yyjson_doc_free(listing);

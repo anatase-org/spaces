@@ -239,6 +239,7 @@ class ScuTests(unittest.TestCase):
             if enabled: command.append(flag)
         self.atspi_state.with_suffix(".actions.json").unlink(missing_ok=True)
         self.atspi_state.with_suffix(".title").unlink(missing_ok=True)
+        self.atspi_state.with_suffix(".windows.json").unlink(missing_ok=True)
         self.atspi_state.with_suffix(".elements.json").unlink(missing_ok=True)
         self.atspi_state.with_suffix(".value.json").unlink(missing_ok=True)
         self.atspi_state.with_suffix(".apps.json").unlink(missing_ok=True)
@@ -2193,17 +2194,97 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.start_host()
         client = self.client()
         window = client.windows()[0]["window_id"]
-        for duplicate in (False, True):
-            with self.subTest(duplicate_compositor_window=duplicate):
-                requests = json.loads(self.state.read_text())["geometry_requests"]
-                self.configure(window_title="Loading", duplicate_identity=duplicate,
-                               duplicate_pid=self.atspi.pid,
-                               settled_title_after_request=requests + 4,
-                               settled_title="scu test window")
+        requests = json.loads(self.state.read_text())["geometry_requests"]
+        self.configure(window_title="Loading", settled_title_after_request=requests + 4,
+                       settled_title="scu test window")
+        result = client.tool("accessibility", observations={"window": window, "refresh": True})
+        self.assertFalse(result["isError"], result)
+        tree = read_result(result)["observations"][0]
+        self.assertEqual(tree["elements"][0]["label"], "scu test window")
+
+    def test_hidden_and_defunct_duplicates_do_not_compete_with_a_shown_window(self):
+        self.start_accessibility(duplicates=True)
+        self.start_host()
+        client = self.client()
+        window = client.windows()[0]["window_id"]
+        for properties in ({"shown": False}, {"defunct": True}):
+            with self.subTest(properties=properties):
+                self.atspi_state.with_suffix(".windows.json").write_text(json.dumps({"window2": properties}))
                 result = client.tool("accessibility", observations={"window": window, "refresh": True})
                 self.assertFalse(result["isError"], result)
-                tree = read_result(result)["observations"][0]
-                self.assertEqual(tree["elements"][0]["label"], "scu test window")
+                button = next(row for row in read_result(result)["observations"][0]["elements"]
+                              if row["label"] == "Fixture button")
+                result = client.tool("accessibility", steps=[{"tool": "activate", "args": {
+                    "element_id": button["element_id"]}}])
+                self.assertFalse(result["isError"], result)
+        self.assertEqual(json.loads(self.atspi_state.read_text())["clicks"], 2)
+
+    def test_screen_position_distinguishes_unnamed_per_output_popups(self):
+        self.start_accessibility(duplicates=True)
+        self.atspi_state.with_suffix(".windows.json").write_text(json.dumps({
+            "window": {"title": "", "screen": [10, 10, 40, 30]},
+            "window2": {"title": "", "screen": [100, 10, 40, 30]}}))
+        self.start_host(window_title="plasmashell")
+        tree = self.snapshot(self.client())
+        self.assertNotIn("accessibility_error", tree)
+        button = next(row for row in tree["elements"] if row["label"] == "Fixture button")
+        self.assertEqual(button["frame"], {"x": 30, "y": 30, "width": 20, "height": 10})
+
+    def test_screen_position_refines_repeated_titles_in_both_inventories(self):
+        self.start_accessibility(duplicates=True)
+        self.atspi_state.with_suffix(".windows.json").write_text(json.dumps({
+            "window": {"screen": [10, 10, 40, 30]},
+            "window2": {"screen": [15, 15, 40, 30]}}))
+        self.start_host(two_windows=True)
+        # Give the two compositor windows the same title too.
+        self.configure(second_window_title="scu test window")
+        client = self.client()
+        for window in client.windows():
+            result = client.tool("accessibility", observations={"window": window["window_id"], "refresh": True})
+            self.assertFalse(result["isError"], result)
+
+    def test_size_can_refine_repeated_titles_for_a_tree_only_read(self):
+        self.start_accessibility(duplicates=True)
+        self.atspi_state.with_suffix(".windows.json").write_text(json.dumps({
+            "window2": {"bounds": [0, 0, 20, 20]}}))
+        self.start_host()
+        client = self.client()
+        window = client.windows()[0]["window_id"]
+        result = client.tool("accessibility", observations={"window": window, "refresh": True})
+        self.assertFalse(result["isError"], result)
+        self.assertIn("Fixture button", [row["label"] for row in read_result(result)["observations"][0]["elements"]])
+
+    def test_pid_title_also_requires_a_unique_reverse_association(self):
+        self.start_accessibility()
+        self.start_host(duplicate_identity=True, duplicate_pid=self.atspi.pid)
+        client = self.client()
+        window = client.windows()[0]["window_id"]
+        result = client.tool("accessibility", observations={"window": window, "refresh": True})
+        self.assertEqual(read_result(result)["observations"][0]["error"]["code"],
+                         "accessibility_window_ambiguous")
+
+    def test_tree_identity_does_not_require_coordinate_geometry(self):
+        self.start_accessibility()
+        self.start_host(bad_client=True)
+        client = self.client()
+        window = client.windows()[0]["window_id"]
+        result = client.tool("accessibility", observations={"window": window, "refresh": True})
+        self.assertFalse(result["isError"], result)
+        tree = read_result(result)["observations"][0]
+        self.assertNotIn("frame=", tree["tree_markdown"])
+        button = next(row for row in tree["elements"] if row["label"] == "Fixture button")
+        result = client.tool("accessibility", steps=[{"tool": "activate", "args": {
+            "element_id": button["element_id"]}}])
+        self.assertFalse(result["isError"], result)
+        self.assertEqual(json.loads(self.atspi_state.read_text())["clicks"], 1)
+
+    def test_google_chrome_audio_title_matches_without_size_fallback(self):
+        self.start_accessibility(two_windows=True, browser=True)
+        self.atspi_state.with_suffix(".title").write_text("Video - Audio playing - Google Chrome")
+        self.start_host(window_title="Video - Google Chrome")
+        tree = self.snapshot(self.client())
+        self.assertNotIn("accessibility_error", tree)
+
 
     def test_literal_punctuation_keys_and_chords(self):
         self.start_host()

@@ -107,7 +107,7 @@ def geometry():
     if config.get("moving_window"):
         windows[0]["frame"]["x"] = windows[0]["client"]["x"] = 10 + state["geometry_requests"]
     if config.get("two_windows"):
-        windows.append({**windows[0], "key": "window-2", "title": "scu second window",
+        windows.append({**windows[0], "key": "window-2", "title": config.get("second_window_title", "scu second window"),
                         "frame": {"x": 15, "y": 15, "width": 40, "height": 30},
                         "client": {"x": 15, "y": 15, "width": 40, "height": 30}})
     if config.get("bad_client"):

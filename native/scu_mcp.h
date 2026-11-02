@@ -245,7 +245,7 @@ static const char scu_text_status_geometry_changed[] =
 
 /* Window association. */
 static const char scu_text_window_association_failed[] =
-    "Could not uniquely associate this window (%u frames, %u matching titles, %u matching sizes). Use screenshot input if the window cannot be matched.";
+    "Could not uniquely associate this window (PID filter %" G_GINT64_FORMAT ", %u eligible AT-SPI objects, %u matching titles, %u matching sizes, %u matching positions). Use screenshot input if the window cannot be matched.";
 static const char scu_text_kwin_window_unavailable[] =
     "KWin window is unavailable. Call status again.";
 

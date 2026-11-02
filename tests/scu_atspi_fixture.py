@@ -397,6 +397,10 @@ def main():
             values += ["org.a11y.atspi.Value"]
         return values
 
+    def window_properties(path):
+        settings = Path(state_path).with_suffix(".windows.json")
+        return json.loads(settings.read_text()).get(path.rsplit("/", 1)[-1], {}) if settings.exists() else {}
+
     def method(connection, sender, path, interface, name, parameters, invocation):
         nonlocal selection_queries, activation_pending, focused, frame_ready
         args = parameters.unpack()
@@ -416,6 +420,8 @@ def main():
                 if path == BUTTON and offscreen: rectangle = (5, 300, 10, 5)
                 if browser and path in (DOCUMENT, BUTTON, ENTRY, PASSWORD):
                     rectangle = tuple(v * 2 for v in rectangle)
+            if path in window_paths:
+                rectangle = tuple(window_properties(path).get("screen" if args[0] == 0 else "bounds", rectangle))
             reply = GLib.Variant("((iiii))", (rectangle,))
         elif name == "GrabFocus":
             focused = not refuse_focus
@@ -457,6 +463,10 @@ def main():
                 bits |= 1 << Atspi.StateType.FOCUSABLE
             if element_ids and original_path.rsplit("/accessible/", 1)[-1] in element_config().get("defunct", []):
                 bits |= 1 << Atspi.StateType.DEFUNCT
+            if path in window_paths:
+                properties = window_properties(path)
+                if not properties.get("shown", True): bits &= ~(1 << Atspi.StateType.SHOWING)
+                if properties.get("defunct", False): bits |= 1 << Atspi.StateType.DEFUNCT
             still_focused = focused
             if lose_focus:
                 oracle = Path(state_path).with_name("kwin-state.json")
@@ -562,6 +572,8 @@ def main():
 
     def property_get(connection, sender, path, interface, name):
         if name == "Name":
+            if path in window_paths and "title" in window_properties(path):
+                return GLib.Variant("s", window_properties(path)["title"])
             if path in reading_names: return GLib.Variant("s", reading_names[path])
             if element_ids:
                 label = element_config().get("labels", {}).get(path.rsplit("/accessible/", 1)[-1])
