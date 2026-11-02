@@ -142,11 +142,15 @@ static JsonResult *scu_action(
     return r;
 }
 
+#ifndef SCU_STATUS_TIMEOUT_MS
+#define SCU_STATUS_TIMEOUT_MS 30000
+#endif
+
 /* Status is an observation: it must establish a real canvas, not merely
  * report cached dimensions. Discovery remains available through MCP itself. */
 static JsonResult *scu_status(void)
 {
-    scu.deadline = MIN(scu.deadline, g_get_monotonic_time() + 30 * G_USEC_PER_SEC);
+    scu.deadline = MIN(scu.deadline, g_get_monotonic_time() + (gint64)SCU_STATUS_TIMEOUT_MS * 1000);
     return kwin_status();
 }
 

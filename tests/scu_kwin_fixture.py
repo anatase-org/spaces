@@ -7,6 +7,7 @@ FDs. State records independently delivered libeis events, not scu submissions.
 import argparse
 import array
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -221,22 +222,28 @@ def method(connection, sender, path, interface, name, parameters, invocation):
             x, y, w, h = bounds(data) if name == "CaptureWorkspace" else values[:4]
         scale = max(item["scale"] for item in data["outputs"]) if options.get("native-resolution") else 1
         width, height = int(w * scale), int(h * scale)
-        raw = bytearray(width * height * 4)
-        for py in range(height):
-            for px in range(width):
-                gx, gy = x + (px + .5) / scale, y + (py + .5) / scale
-                inside = any(r["geometry"]["x"] <= gx < r["geometry"]["x"] + r["geometry"]["width"]
-                             and r["geometry"]["y"] <= gy < r["geometry"]["y"] + r["geometry"]["height"]
-                             for r in data["outputs"])
-                offset = (py * width + px) * 4
-                if inside:
-                    raw[offset:offset+4] = bytes((int(gx * 2) % 256, int(gy * 2) % 256,
-                                                123 if name == "CaptureWindow" else (px % 2) * 255, 255))
-                else:
-                    raw[offset:offset+4] = b"\0\0\0\xff"
         if config.get("large_capture"):
             raw = bytearray(random.Random(0).randbytes(width * height * 4))
             raw[3::4] = b"\xff" * (width * height)
+        else:
+            # Construct scanlines in bulk; per-pixel Python geometry checks
+            # dominated the high-resolution screenshot tests.
+            raw = bytearray(width * height * 4)
+            raw[3::4] = b"\xff" * (width * height)
+            red = bytes(int((x + (px + .5) / scale) * 2) % 256 for px in range(width))
+            blue = bytes(123 if name == "CaptureWindow" else (px % 2) * 255 for px in range(width))
+            for output in data["outputs"]:
+                rect = output["geometry"]
+                left = max(0, math.ceil((rect["x"] - x) * scale - .5))
+                right = min(width, math.ceil((rect["x"] + rect["width"] - x) * scale - .5))
+                top = max(0, math.ceil((rect["y"] - y) * scale - .5))
+                bottom = min(height, math.ceil((rect["y"] + rect["height"] - y) * scale - .5))
+                if right <= left: continue
+                for py in range(top, bottom):
+                    start, end = (py * width + left) * 4, (py * width + right) * 4
+                    raw[start:end:4] = red[left:right]
+                    raw[start + 1:end:4] = bytes([int((y + (py + .5) / scale) * 2) % 256]) * (right - left)
+                    raw[start + 2:end:4] = blue[left:right]
         # Transfer the received descriptor rather than retaining an extra writer
         # in the invocation. Truncation must produce EOF for the host reader.
         descriptors = invocation.get_message().get_unix_fd_list().steal_fds()

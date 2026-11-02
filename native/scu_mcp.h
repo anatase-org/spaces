@@ -16,7 +16,9 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 #define MAX_IMAGE_DIMENSION 2048
+#ifndef ELEMENT_CAPACITY
 #define ELEMENT_CAPACITY 20000
+#endif
 
 /* Public catalog: usage, descriptions, argument variants, membership and observations. */
 static const char usage[] =

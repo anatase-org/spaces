@@ -20,6 +20,7 @@ import unittest
 
 from PIL import Image
 
+from tests.native_build import compile_native
 from tests.scu_tree import read_result
 from tests.test_scu_diff import apply_tree_diff
 
@@ -92,36 +93,33 @@ class ScuTests(unittest.TestCase):
         cls.directory = Path(cls.temporary.name)
         cls.socket_path = cls.directory / "accessibility"
         cls.computer_path = cls.directory / "computer"
-        cls.binary = cls.directory / "scu"
-        cls.host_binary = cls.directory / "scu-host"
-        cls.backend = cls.directory / "backend"
-        common = ["cc", "-O1", "-g", "-std=gnu11", "-Wall", "-Wextra", "-Werror",
-            "-DYYJSON_READER_DEPTH_LIMIT=64",
+        common = ["-O0", "-std=gnu11", "-Wall", "-Wextra", "-Werror",
+            "-DYYJSON_READER_DEPTH_LIMIT=64"]
+        glib = shlex.split(subprocess.check_output(["pkg-config", "--cflags", "--libs", "glib-2.0"], text=True))
+        gio = shlex.split(subprocess.check_output(["pkg-config", "--libs", "gio-unix-2.0"], text=True))
+        # Compile the large JSON translation unit once rather than once per binary.
+        json_object = compile_native("yyjson.o", [ROOT / "native/vendor/yyjson.c"], [*common, "-c"])
+        settings = ["-include", str(ROOT / "tests/scu_test_config.h"),
             f'-DSCU_SCREEN_QUERY="{ROOT / "tests/scu_display_fixture.py"}"',
-            f'-DSCU_VIRTUAL_MONITOR="{ROOT / "tests/scu_display_fixture.py"}"',
-            f'-DSCU_COMPUTER_SOCKET="{cls.computer_path}"']
-        libraries = shlex.split(subprocess.check_output(["pkg-config", "--libs", "gio-unix-2.0"], text=True))
-        for source, binary in ((ROOT / "native/scu.c", cls.binary), (ROOT / "native/scu_host.c", cls.host_binary),
-                               (ROOT / "tests/scu_backend_fixture.c", cls.backend)):
-            headers = shlex.split(flags.stdout)
-            if binary == cls.binary:
-                headers = shlex.split(subprocess.check_output(["pkg-config", "--cflags", "glib-2.0"], text=True))
-                link = [str(ROOT / "native/vendor/yyjson.c"),
-                        *shlex.split(subprocess.check_output(["pkg-config", "--libs", "glib-2.0"], text=True))]
-            else:
-                link = [str(ROOT / "native/vendor/yyjson.c"), *libraries]
-            extra = (["-Wl,--wrap=__libc_start_main"] if binary == cls.binary else ["-ldl"])
-            if binary == cls.backend:
-                extra += ["-leis", "-lxkbcommon"]
-            build = subprocess.run([*common, *headers, str(source), *link, *extra, "-o", str(binary)],
-                capture_output=True, text=True)
-            if build.returncode:
-                raise AssertionError(build.stderr)
+            f'-DSCU_VIRTUAL_MONITOR="{ROOT / "tests/scu_display_fixture.py"}"']
+        cls.binary = compile_native("scu", [ROOT / "native/scu.c", json_object],
+            [*common, *settings, *glib, "-Wl,--wrap=__libc_start_main"])
+        host_flags = [*common, *settings, *shlex.split(flags.stdout), *gio, "-ldl"]
+        # The host and oracle include large translation units. Build independent
+        # binaries concurrently; compile_native serializes identical cache misses
+        # across unittest workers and publishes each binary atomically.
+        with ThreadPoolExecutor(max_workers=3) as builds:
+            host = builds.submit(compile_native, "scu-host", [ROOT / "native/scu_host.c", json_object], host_flags)
+            ring = builds.submit(compile_native, "scu-host-ring", [ROOT / "native/scu_host.c", json_object],
+                [*host_flags, "-DELEMENT_CAPACITY=64"])
+            backend = builds.submit(compile_native, "backend", [ROOT / "tests/scu_backend_fixture.c", json_object],
+                [*common, *shlex.split(flags.stdout), *gio, "-ldl", "-leis", "-lxkbcommon"])
+            cls.host_binary, cls.ring_host_binary, cls.backend = host.result(), ring.result(), backend.result()
 
     def setUp(self):
         self.socket_path.unlink(missing_ok=True)
         self.computer_path.unlink(missing_ok=True)
-        self.environment = os.environ.copy()
+        self.environment = {**os.environ, "SCU_TEST_COMPUTER_SOCKET": str(self.computer_path)}
         for key in ("DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "WAYLAND_DISPLAY", "DISPLAY", "SPACES_NAME", "AT_SPI_BUS_ADDRESS", "LD_LIBRARY_PATH"):
             self.environment.pop(key, None)
         self.state = self.directory / "kwin-state.json"
@@ -900,13 +898,16 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertFalse(second.tool("accessibility", steps=[{"tool": "activate", "args": {"element_id": 1}}])["isError"])
 
     def check_element_ring(self, *, keyboard):
+        # Full production capacity is checked locally by the native harness.
+        # The smaller ring keeps all end-to-end zero-ID/action/eviction checks.
+        self.host_binary = self.ring_host_binary
         self.start_accessibility(element_ids=True, keyboard=keyboard)
         self.start_host()
         client = self.client()
         window = client.windows()[0]["window_id"]
-        # Fill the actual capacity: one window root plus 19999 distinct buttons.
-        for start in range(0, 19999, 1000):
-            stop = min(start + 1000, 19999)
+        # Fill this integration build: one window root plus 63 distinct buttons.
+        for start in range(0, 63, 16):
+            stop = min(start + 16, 63)
             rows = self.element_tree(client, window, one=[f"button/{i}" for i in range(start, stop)])
             self.assertEqual(rows[0]["element_id"], 0)
             self.assertEqual([row["element_id"] for row in rows[1:]], list(range(start + 1, stop + 1)))
@@ -1603,12 +1604,14 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertEqual(self.observe_tree(client, window, "vision")["tree_diff"], "No Changes.\n")
 
     def test_truncated_observations_always_return_full_trees(self):
-        self.start_accessibility(element_ids=True, long_labels=True)
+        # Hit the depth budget with a small tree. The byte-budget test below
+        # separately covers large responses; this test covers baseline handling.
+        self.start_accessibility(element_ids=True, deep=100)
         self.start_host()
         client = self.client()
         window = client.windows()[0]["window_id"]
         path = self.atspi_state.with_suffix(".elements.json")
-        path.write_text(json.dumps({"one": [f"button/{i}" for i in range(2000)]}))
+        path.write_text(json.dumps({"one": ["panel/0"]}))
         for _ in range(2):
             response = self.observe_tree(client, window)
             self.assertTrue(response["truncated"])
@@ -2950,7 +2953,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertEqual((state["captures"], state["connections"]), (0, 0))
 
     def test_backend_invariants(self):
-        for case in ("mapping", "images"):
+        for case in ("mapping", "images", "elements"):
             with self.subTest(case=case):
                 result = subprocess.run([str(self.backend), case], capture_output=True, timeout=10)
                 self.assertEqual(result.returncode, 0, result.stderr.decode())
@@ -2992,18 +2995,20 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         client.process.stdin.flush()
         self.assertFalse(select.select([client.process.stdout], [], [], .3)[0], "cancelled request emitted a late response")
 
-    def test_status_deadline_is_thirty_seconds_and_can_recover(self):
+    def test_status_deadline_expires_and_can_recover(self):
+        # The native harness checks the production 30-second default. Exercise
+        # the real timeout/recovery path here with a shorter private build setting.
+        self.environment["SCU_TEST_STATUS_TIMEOUT_MS"] = "250"
         self.start_host(hold_geometry=True)
         client = self.client()
         start = time.monotonic()
         result = client.call("tools/call", {"name": "status", "arguments": {}}, timeout=34)["result"]
         elapsed = time.monotonic() - start
         self.assertTrue(result["isError"], result)
-        self.assertGreaterEqual(elapsed, 29)
-        self.assertLess(elapsed, 32)
+        self.assertGreaterEqual(elapsed, .24)
+        self.assertLess(elapsed, 2)
         self.assertEqual(read_result(result)["code"], "timeout")
         self.configure(hold_geometry=False)
-        time.sleep(.2)
         self.status(client)
 
     def test_cancelled_cross_monitor_drag_releases_button(self):

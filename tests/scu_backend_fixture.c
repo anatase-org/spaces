@@ -9,6 +9,55 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 
+/* Allocation/eviction needs object identity, not 20,000 D-Bus round trips.
+ * Use plain GObjects with the public AtspiAccessible layout and no bus peer. */
+static AtspiStateSet *no_states(AtspiAccessible *node)
+{
+    (void)node;
+    return NULL;
+}
+
+static void free_test_accessible(gpointer pointer)
+{
+    AtspiObject *node = pointer;
+    g_free(node->path);
+    g_object_unref(node);
+}
+
+static void test_elements(void)
+{
+    assert(ELEMENT_CAPACITY == 20000);
+    assert(SCU_STATUS_TIMEOUT_MS == 30000);
+    GType type = g_type_register_static_simple(G_TYPE_OBJECT, "FixtureAccessible",
+        sizeof(GObjectClass), NULL, sizeof(AtspiAccessible), NULL, 0);
+    GPtrArray *nodes = g_ptr_array_new_with_free_func(free_test_accessible);
+    element_table = g_new0(ElementTable, 1);
+    element_table->by_object = g_hash_table_new(g_str_hash, g_str_equal);
+    atspi.accessible_get_state_set = no_states;
+    Window window = {.id = 7, .pid = 42};
+    for (guint i = 0; i < ELEMENT_CAPACITY + 2; i++) {
+        AtspiObject *node = g_object_new(type, NULL);
+        node->path = g_strdup_printf("/fixture/%u", i);
+        g_ptr_array_add(nodes, node);
+        assert(cache_element((AtspiAccessible *)node, &window) == i % ELEMENT_CAPACITY);
+        if (i == ELEMENT_CAPACITY - 1) {
+            // Reads/re-observation must not turn FIFO allocation into LRU.
+            assert(cache_element(g_ptr_array_index(nodes, 0), &window) == 0);
+            assert(element_table->next == 0);
+        }
+    }
+    assert(g_hash_table_size(element_table->by_object) == ELEMENT_CAPACITY);
+    assert(!g_hash_table_contains(element_table->by_object, ":/fixture/0"));
+    assert(!g_hash_table_contains(element_table->by_object, ":/fixture/1"));
+    assert(element_table->slots[0].window == 7);
+    assert(element_table->slots[0].pid == 42);
+    assert(element_table->slots[0].accessible == g_ptr_array_index(nodes, ELEMENT_CAPACITY));
+    assert(cache_element(g_ptr_array_index(nodes, 0), &window) == 2);
+    free_element_table(element_table);
+    element_table = NULL;
+    g_ptr_array_unref(nodes);
+}
+
 typedef struct {
     const char *mapping;
     int x, y;
@@ -416,6 +465,7 @@ int main(int argc,char **argv)
     assert(argc==2);
     if(!strcmp(argv[1],"mapping"))test_mapping();
     else if(!strcmp(argv[1],"images"))test_images();
+    else if(!strcmp(argv[1],"elements"))test_elements();
     else return 2;
     return 0;
 }

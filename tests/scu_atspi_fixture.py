@@ -1,6 +1,7 @@
 """A real private AT-SPI registry/application for scu integration tests."""
 
 import json
+from functools import lru_cache
 import sys
 from pathlib import Path
 
@@ -305,6 +306,14 @@ def main():
         return GLib.SOURCE_REMOVE
 
     def children(connection, path):
+        # libatspi asks for individual children. Building the entire sibling
+        # list for every index made the wide-tree tests quadratic.
+        if element_ids:
+            element_config()
+        return cached_children(connection, path, element_version, exposed, window_exposed)
+
+    @lru_cache(maxsize=8192)
+    def cached_children(connection, path, version, app_exposed, frame_exposed):
         nonlocal window_pending
         if connection == registry:
             return [(app.get_unique_name(), ROOT)]

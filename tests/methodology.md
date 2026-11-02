@@ -1,3 +1,39 @@
+# Automated suite
+
+Run all automated tests with process isolation and automatic parallelism:
+
+```sh
+PYTHONPATH=src python3 -m tests
+```
+
+The runner uses up to 24 available CPUs, schedules longer tests first, and
+records per-test timings and worker logs under `.build/test-runs/`. Use `-j N`
+to set the number of workers, `-v` for individual results, or pass unittest
+names to select a module, class, or method. For example:
+
+```sh
+PYTHONPATH=src python3 -m tests -j 4 tests.test_scu
+```
+
+The standard serial runner still works for debugging:
+
+```sh
+PYTHONPATH=src python3 -m unittest discover -s tests --durations=25
+```
+
+Native SCU fixtures use content-addressed builds under `.build/tests/` with
+file locks and atomic publication across workers. Source/header, compiler, and
+flag changes invalidate the cache. The JSON parser is compiled once; independent
+binaries build concurrently without optimization passes. Remove `.build/tests/`
+to measure a clean build.
+
+The native harness checks allocation/eviction at the production 20,000-element
+capacity and asserts the production 30-second status timeout. A separate host
+fixture uses 64 slots for end-to-end wraparound, zero-ID actions, and keyboard
+fallback; the deadline/recovery test uses a short private compile-time setting.
+Production defaults and installed binaries are unchanged. Wide-tree size-limit
+coverage remains; baseline truncation uses the cheaper depth limit.
+
 # Portal and desktop bridge test methodology
 
 This document describes the manual integration tests for the public portal
@@ -174,7 +210,7 @@ Automated fake-bus and packaging coverage lives primarily in `test_portal.py`
 and `test_packaging.py`.  Run the complete suite before the live probes:
 
 ```sh
-PYTHONPATH=src python3 -m unittest discover -s tests
+PYTHONPATH=src python3 -m tests
 make -C native clean all
 make -C native check-guest-abi
 ```
