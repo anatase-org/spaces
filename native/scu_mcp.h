@@ -111,7 +111,7 @@ static const char scu_text_accessibility_registry_disconnected[] =
 
 /* Accessibility observations. */
 static const char scu_text_tree_response_budget[] =
-    "This window exceeds the accessibility response budget. The partial tree's elements remain usable; use screenshot input for omitted controls.";
+    "This window exceeds the accessibility response budget. The partial tree's elements remain usable.";
 static const char scu_text_window_identity_unavailable[] =
     "Window is absent or belongs to a different process. Call status "
     "again.";
@@ -247,7 +247,7 @@ static const char scu_text_status_geometry_changed[] =
 static const char scu_text_window_geometry_changed[] =
     "Window changed during observation. Observe again.";
 static const char scu_text_window_association_failed[] =
-    "Could not uniquely associate this window after refreshing accessibility metadata (%u frames, %u matching titles, %u matching sizes). Use screenshot input if the window has no unique accessibility match.";
+    "Could not uniquely associate this window (%u frames, %u matching titles, %u matching sizes). Use screenshot input if the window cannot be matched.";
 static const char scu_text_kwin_window_unavailable[] =
     "KWin window is unavailable. Call status again.";
 
@@ -286,13 +286,13 @@ static const char scu_text_clipboard_unavailable[] =
 static const char scu_text_empty_text[] =
     "Empty text: no input sent.";
 static const char scu_text_utf8_input_submitted[] =
-    "UTF-8 input submitted through EIS text; verify the visible result.";
+    "UTF-8 input submitted through EIS text. Verify the visible result.";
 static const char scu_text_text_keyboard_map_unavailable[] =
     "No compositor XKB map is available for text input.";
 static const char scu_text_clipboard_replaced[] =
     "Clipboard and primary selection text replaced.";
 static const char scu_text_keyboard_text_submitted[] =
-    "Text submitted using the compositor's keyboard map; verify the visible "
+    "Text submitted using the compositor's keyboard map. Verify the visible "
     "result.";
 
 /* Verified keyboard readback. */
@@ -351,9 +351,9 @@ static const char scu_text_host_initialization_failed[] =
 
 /* Space-side connection. */
 static const char scu_text_host_service_disconnected[] =
-    "The host computer-use service disconnected. Call status again; no action was replayed.";
+    "The host computer-use service disconnected. Call status again.";
 static const char scu_text_computer_use_not_forwarded[] =
-    "Computer use is not forwarded. On the host, run `spaces configure <space>` and enable Plus Accessibility and Agent computer use. If enabled, check the graphical login and Spaces service log.";
+    "Computer use is not forwarded. The user needs to run `spaces configure <space>` on the host and enable Plus Accessibility and Agent computer use or use the Development preset.";
 static const char scu_text_socket_path_too_long[] =
     "The host socket path is too long.";
 static const char scu_text_host_connect_failed[] =
