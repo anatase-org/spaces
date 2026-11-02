@@ -17,6 +17,14 @@
 #include <xkbcommon/xkbcommon-keysyms.h>
 #include <xkbcommon/xkbcommon.h>
 #include "scu_mcp.h"
+#include "scu_diff.h"
+typedef struct {
+    gint64 window;
+    char *tree;
+    gboolean truncated;
+} TreeBaseline;
+static TreeBaseline *host_tree_baseline(BatchKind kind);
+static void host_clear_tree_baselines(void);
 static JsonResult *scu_fail(const char *code, const char *hint);
 static JsonResult *error_payload(void);
 static void clear_tool_error(void);
@@ -1632,7 +1640,7 @@ static JsonResult *operate_on_element(const char *tool, JsonValue *arguments)
     if (element == NULL) {
         return scu_fail("stale_element",
             "Element ID is unallocated or stale. Read a window tree with accessibility "
-            "observations:[window_id] and use its element ID.");
+            "observations:{window:window_id} and use its element ID.");
     }
 
     AtspiAccessible *node = g_object_ref(element->accessible);
@@ -1830,6 +1838,7 @@ static guint atspi_worker_base = 1;
 
 static void stop_atspi_worker(void)
 {
+    host_clear_tree_baselines();
     if (atspi_worker_input >= 0) {
         close(atspi_worker_input);
         atspi_worker_input = -1;
@@ -4395,15 +4404,15 @@ static JsonResult *run_batch(const Tool *batch, JsonValue *args)
         }
         if (!ready) {
             JsonResult *item = result_object();
-            if (yyjson_arr_size(requested))
-                result_member(item, "window_id", yyjson_val_mut_copy(scu.doc, yyjson_arr_get_first(requested)));
+            if (yyjson_is_obj(requested))
+                result_member(item, "window_id", yyjson_val_mut_copy(scu.doc, json_member(requested, "window")));
             result_member(item, "error", error_payload());
             result_append(observations, item);
             failed = TRUE;
             clear_tool_error();
             goto observed;
         }
-        if (!yyjson_arr_size(requested)) {
+        if (!requested) {
             JsonResult *value = capture_desktop();
             if (value) {
                 result_append(observations, compact_observation(value));
@@ -4416,15 +4425,8 @@ static JsonResult *run_batch(const Tool *batch, JsonValue *args)
             }
         }
     }
-    JsonValue *window_id;
-    gint64 seen[64];
-    size_t seen_count = 0;
-    yyjson_arr_foreach(requested, index, length, window_id) {
-        gint64 id = yyjson_get_sint(window_id);
-        gboolean duplicate = FALSE;
-        for (size_t i = 0; i < seen_count; i++) duplicate |= seen[i] == id;
-        if (duplicate) continue;
-        seen[seen_count++] = id;
+    if (yyjson_is_obj(requested)) {
+        gint64 id = yyjson_get_sint(json_member(requested, "window"));
         if (!scu_tick() || !require_computer_access() || !desktop_refresh_lock()) {
             JsonResult *item = result_object();
             result_integer(item, "window_id", id);
@@ -4432,7 +4434,7 @@ static JsonResult *run_batch(const Tool *batch, JsonValue *args)
             result_append(observations, item);
             failed = TRUE;
             clear_tool_error();
-            break;
+            goto observed;
         }
         yyjson_mut_doc *document = yyjson_mut_doc_new(NULL);
         JsonResult *arguments = yyjson_mut_obj(document);
@@ -4451,11 +4453,7 @@ static JsonResult *run_batch(const Tool *batch, JsonValue *args)
             result_member(item, "error", error_payload());
             result_append(observations, item);
             failed = TRUE;
-            /* Window-local failures preserve later observations. Authority,
-             * session or deadline loss stops without repairing the session. */
-            gboolean proceed = scu_tick() && require_computer_access();
             clear_tool_error();
-            if (!proceed) break;
         }
     }
 observed:
@@ -4471,6 +4469,27 @@ observed:
         }
         failed = TRUE;
         clear_tool_error();
+    }
+    /* Shape only the final, deliverable window tree. Nested desktop calls may
+     * cancel/revoke a client or retire the semantic worker before this point. */
+    if (!g_atomic_int_get(&scu.cancelled) && !g_atomic_int_get(&scu.stopping) &&
+        (accessibility || (!scu.lock_seen && visual.bus != NULL)) && yyjson_is_obj(requested)) {
+        JsonResult *observation = yyjson_mut_arr_get_first(observations);
+        const char *tree = yyjson_mut_get_str(yyjson_mut_obj_get(observation, "tree_markdown"));
+        TreeBaseline *baseline = host_tree_baseline(batch->batch);
+        if (tree && baseline && atspi_worker_pid != 0) {
+            gint64 window = yyjson_get_sint(json_member(requested, "window"));
+            gboolean truncated = yyjson_mut_is_true(yyjson_mut_obj_get(observation, "truncated"));
+            char *full = g_strdup(tree), *diff = NULL;
+            if (baseline->tree && baseline->window == window && !json_boolean(requested, "refresh") &&
+                !baseline->truncated && !truncated)
+                diff = tree_diff(baseline->tree, tree);
+            result_boolean(observation, "tree_full", diff == NULL);
+            if (diff) result_string(observation, "tree_markdown", diff);
+            g_free(diff);
+            g_free(baseline->tree);
+            *baseline = (TreeBaseline){.window = window, .tree = full, .truncated = truncated};
+        }
     }
     result_string(result, "status", failed ? "failed" : "ok");
     goto done;

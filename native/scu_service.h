@@ -13,6 +13,7 @@ typedef struct {
     GString *input, *output;
     gsize sent;
     gboolean closed, oversized;
+    TreeBaseline vision_tree, accessibility_tree;
 } HostClient;
 
 struct HostLease {
@@ -43,6 +44,23 @@ static const guint host_max_clients = 32, host_max_pending = 64;
 static gboolean desktop_bind(const char *session, const char *wayland, GError **error);
 static void desktop_maintain(guint clients);
 static void desktop_close(void);
+
+/* The host connection owns the two last-window views. No response-arena or
+ * AT-SPI pointers survive a call; the worker's element namespace is separate. */
+static TreeBaseline *host_tree_baseline(BatchKind kind)
+{
+    if (!host_current || host_current->closed) return NULL;
+    return kind == BATCH_VISION ? &host_current->vision_tree : &host_current->accessibility_tree;
+}
+
+static void host_clear_tree_baselines(void)
+{
+    for (guint i = 0; host_clients && i < host_clients->len; i++) {
+        HostClient *client = g_ptr_array_index(host_clients, i);
+        g_clear_pointer(&client->vision_tree.tree, g_free);
+        g_clear_pointer(&client->accessibility_tree.tree, g_free);
+    }
+}
 
 /* Only this private envelope supplies the worker's per-MCP namespace. */
 static void atspi_request_clients(JsonResult *request)
@@ -299,6 +317,8 @@ static void host_collect(void)
     for (guint i = host_clients->len; i > 0; i--) {
         HostClient *client = g_ptr_array_index(host_clients, i - 1);
         if (client->closed && !client->pending && client != host_current) {
+            g_free(client->vision_tree.tree);
+            g_free(client->accessibility_tree.tree);
             g_string_free(client->input, TRUE);
             g_string_free(client->output, TRUE);
             g_free(client);

@@ -68,21 +68,24 @@ static const char vision_description[] =
     "Insert {tool:delay_ms,args:{ms:500}} to pause anywhere, the final "
     "observations wait for all steps including trailing delays (there are "
     "some default delays if not provided). "
-    "Use observations:false to skip observation or observations:[window_id,...] "
-    "for screenshots and accessibility trees of Windows. "
-    "Omit observations or pass [] for a desktop screenshot. "
-    "Prefer the accessibility tree to locate controls when working with a "
-    "single application without the need for vision feedback, especially browsers. "
-    "When the tree provides the controls you need, use accessibility with "
-    "observations:[window_id] for subsequent trees for faster navigation. "
+    "Use observations:false to skip observation or observations:{window:window_id,refresh:false} "
+    "for screenshots and accessibility trees of a window. "
+    "Omit observations for a desktop screenshot. "
+    "When the tree provides the controls you need, prefer the accessibility tool. "
+    "I.e., working with a single application without the need for vision, especially browsers. "
+    "When possible, a zero-context unified diff against the last returned tree is provided. "
+    "Set refresh:true to force a full tree. "
     "All pixel coordinates are global to the full overview. ";
 static const char accessibility_description[] =
     "Execute up to 64 JSON steps shaped {tool,args}, in order and stop "
     "on failure. Responses report status:ok/failed and the completed step count. "
     "Insert {tool:delay_ms,args:{ms:500}} to pause anywhere. "
-    "Use observations:[window_id,...] for accessibility trees that also include text content"
-    "after all steps, including trailing delays. Omit observations or pass [] to skip tree reads. "
-    "Returns observations without images. Element actions can target offscreen controls. ";
+    "Use observations:{window:window_id,refresh:false} for accessibility trees that also include text content "
+    "after all steps, including trailing delays. Omit observations to skip tree reads. "
+    "When possible, a zero-context unified diff against the last returned tree is provided. "
+    "Set refresh:true to force a full tree. "
+    "A different window or large diff returns Full tree. Set refresh:true for a full tree. "
+    "Element actions can target offscreen controls. ";
 
 typedef enum {
     ARG_STRING,
@@ -94,6 +97,7 @@ typedef enum {
     ARG_OBJECT_ARRAY,
     ARG_NUMBER_ARRAY,
     ARG_INTEGER_ARRAY,
+    ARG_OBSERVATION,
 } ArgumentType;
 
 typedef struct {
@@ -179,8 +183,8 @@ static const Argument delay_arguments[] = {
 static const Argument vision_arguments[] = {
     {.name = "steps", .type = ARG_OBJECT_ARRAY, .maximum = 64,
         .description = "Optional ordered {tool,args} actions. Omit or pass [] to observe without acting."},
-    {.name = "observations", .type = ARG_INTEGER_ARRAY, .maximum = 64, .allow_false = TRUE,
-        .description = "Window IDs for screenshots and trees after acting, once per distinct ID in input order. Omit or pass [] for a desktop screenshot; false skips observation."},
+    {.name = "observations", .type = ARG_OBSERVATION, .allow_false = TRUE,
+        .description = "Window for a screenshot and tree after acting. Optional. Set to false to skip observation or do not provide for a desktop screenshot."},
     {.name = "id", .type = ARG_INTEGER, .minimum = 1, .maximum = MAX_CAPTURE_ID,
         .description = "Optional full-overview capture used for pixel steps. Omission uses the latest overview."},
     {NULL},
@@ -189,8 +193,8 @@ static const Argument vision_arguments[] = {
 static const Argument accessibility_arguments[] = {
     {.name = "steps", .type = ARG_OBJECT_ARRAY, .maximum = 64,
         .description = "Optional ordered {tool,args} actions."},
-    {.name = "observations", .type = ARG_INTEGER_ARRAY, .maximum = 64,
-        .description = "Window IDs to read after acting, once per distinct ID in input order. Omit or pass [] to skip tree reads."},
+    {.name = "observations", .type = ARG_OBSERVATION,
+        .description = "Window for a tree after acting. Omit to skip observation."},
     {NULL},
 };
 static const char *const require_point[] = {"x", "y", NULL};
@@ -425,6 +429,7 @@ static void add_argument_schemas(JsonResult *properties, const Argument *argumen
         case ARG_INTEGER_ARRAY:
             type = "array";
             break;
+        case ARG_OBSERVATION:
         case ARG_OBJECT:
             type = "object";
             break;
@@ -460,6 +465,20 @@ static void add_argument_schemas(JsonResult *properties, const Argument *argumen
         } else if (argument->maximum != 0) {
             result_number(property, "minimum", argument->minimum);
             result_number(property, "maximum", argument->maximum);
+        }
+        if (argument->type == ARG_OBSERVATION) {
+            JsonResult *fields = result_object(), *window = result_object(), *refresh = result_object();
+            JsonResult *required = result_array();
+            result_string(window, "type", "integer");
+            result_string(window, "description", "Window ID from status.");
+            result_string(refresh, "type", "boolean");
+            result_boolean(refresh, "default", FALSE);
+            result_member(fields, "window", window);
+            result_member(fields, "refresh", refresh);
+            result_append(required, yyjson_mut_str(scu.doc, "window"));
+            result_member(property, "properties", fields);
+            result_member(property, "required", required);
+            result_boolean(property, "additionalProperties", FALSE);
         }
         if (argument->allow_false) {
             JsonResult *alternatives = result_array(), *off = result_object(), *values = result_array();
@@ -932,7 +951,11 @@ static char *tool_result_text(const Tool *tool, JsonResult *output)
             append_result_error(text, "Screenshot", yyjson_mut_obj_get(observation, "screenshot_error"));
             if (yyjson_mut_is_true(yyjson_mut_obj_get(observation, "truncated"))) g_string_append(text, "Tree truncated; listed element IDs remain usable.\n");
             const char *tree = yyjson_mut_get_str(yyjson_mut_obj_get(observation, "tree_markdown"));
-            if (tree) g_string_append(text, tree);
+            if (tree) {
+                if (yyjson_mut_is_true(yyjson_mut_obj_get(observation, "tree_full")))
+                    g_string_append(text, "Full tree.\n");
+                g_string_append(text, tree);
+            }
         }
     }
     return g_string_free(text, FALSE);

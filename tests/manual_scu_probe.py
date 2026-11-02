@@ -65,17 +65,17 @@ def main():
         target = next({"window_id": window["window_id"]}
                       for app in status["apps"] for window in app["windows"]
                       if window["title"] == title)
-        snapshot = tool("vision", observations=[target["window_id"]])["observations"][0]
+        snapshot = tool("vision", observations={"window": target["window_id"], "refresh": True})["observations"][0]
         rows = {item["label"]: item for item in snapshot["elements"]}
         expected = "Héllo 世界 " + args.token
         semantic = tool("accessibility", steps=[
             {"tool": "activate", "args": {"element_id": rows["Spaces fixture button"]["element_id"]}},
             {"tool": "set_value", "args": {"element_id": rows["Spaces fixture entry"]["element_id"], "value": expected}},
             {"tool": "activate", "args": {"element_id": rows["Spaces fixture checkbox"]["element_id"]}},
-        ], observations=[target["window_id"]])
+        ], observations={"window": target["window_id"], "refresh": True})
         rows = {item["label"]: item for item in semantic["observations"][0]["elements"]}
         if args.capture or args.visual_actions:
-            first = tool("vision", observations=[])["observations"][0]
+            first = tool("vision")["observations"][0]
             if args.visual_actions:
                 if args.entry_point is None:
                     raise AssertionError("Inspect a capture and supply --entry-point X Y for visual tests")
@@ -83,7 +83,7 @@ def main():
                 x, y = args.entry_point
                 tool("accessibility", steps=[
                     {"tool": "set_value", "args": {"element_id": rows["Spaces fixture entry"]["element_id"], "value": ""}}])
-                performed = tool("vision", observations=[], steps=[
+                performed = tool("vision", steps=[
                     {"tool": "click", "args": {"id": image["id"], "x": x, "y": y}},
                     {"tool": "type_text", "args": {"text": "replace me"}},
                     {"tool": "press_keys", "args": {"keys": ["ctrl", "a"]}},
@@ -96,14 +96,14 @@ def main():
                 image = performed["observations"][0]
                 if args.surface_point is not None:
                     x, y = args.surface_point
-                    tool("vision", observations=[], steps=[
+                    tool("vision", steps=[
                         {"tool": "scroll", "args": {"id": image["id"],
                                     "x": x, "y": y, "direction": "down", "amount": 2}},
                         {"tool": "drag", "args": {"id": image["id"],
                                   "from_x": x - 40, "from_y": y,
                                   "to_x": x + 40, "to_y": y + 20, "duration_ms": 300}},
                     ])
-                tool("vision", observations=[])
+                tool("vision")
         print("probe completed; verify the independent host fixture state", flush=True)
     finally:
         process.stdin.close()

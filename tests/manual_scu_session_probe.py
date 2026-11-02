@@ -169,7 +169,7 @@ def main():
         target = next({"window_id": window["window_id"]}
                       for app in status["apps"] for window in app["windows"]
                       if window["title"] == "Spaces AT-SPI fixture " + token)
-        tree = probe.tool("vision", observations=[target["window_id"]])["observations"][0]
+        tree = probe.tool("vision", observations={"window": target["window_id"], "refresh": True})["observations"][0]
         rows = {item["label"]: item for item in tree["elements"]}
         return status, rows
 
@@ -267,7 +267,7 @@ def main():
             rows = focus_entry(first)
             window = next(window["window_id"] for app in first.tool("status")["apps"]
                           for window in app["windows"] if window["title"] == "Spaces AT-SPI fixture " + token)
-            tree = first.tool("accessibility", observations=[window])["observations"][0]
+            tree = first.tool("accessibility", observations={"window": window, "refresh": True})["observations"][0]
             original_ids = {row["label"]: row["element_id"] for row in tree["elements"]}
             assert 0 in original_ids.values(), original_ids
             clicks = fixture_state()["clicks"]
@@ -287,16 +287,17 @@ def main():
             first.tool("accessibility", steps=[
                 {"tool": "activate", "args": {"element_id": rows["Spaces fixture button"]["element_id"]}},
                 {"tool": "set_value", "args": {"element_id": rows["Spaces fixture entry"]["element_id"], "value": "Locked " + token}},
-                {"tool": "delay_ms", "args": {"ms": 10}}], observations=[window])
+                {"tool": "delay_ms", "args": {"ms": 10}}], observations={"window": window, "refresh": True})
             assert fixture_state()["clicks"] == clicks + 1
             assert fixture_state()["text"] == "Locked " + token
             assert locked(), "accessibility action unlocked the session"
             record("native-accessibility-stayed-locked", fixture=fixture_state())
-            for observation in ({}, {"observations": []}, {"observations": False}, {"observations": [window]}):
+            for observation in ({}, {"observations": {"window": window}}, {"observations": False},
+                                {"observations": {"window": window, "refresh": True}}):
                 first.tool("vision", expect_error="desktop_locked", steps=[
                     {"tool": "delay_ms", "args": {"ms": 1}},
                     {"tool": "type_text", "args": {"text": "Must not reach locker"}}], **observation)
-            current = first.tool("accessibility", observations=[window])["observations"][0]
+            current = first.tool("accessibility", observations={"window": window, "refresh": True})["observations"][0]
             assert {row["label"]: row["element_id"] for row in current["elements"]} == original_ids
             assert fixture_state()["text"] == "Locked " + token
             record("locked-status-and-vision-rejection", preserved_ids=original_ids)
@@ -304,7 +305,7 @@ def main():
             host("loginctl", "unlock-session", session)
             wait(lambda: not locked(), "external unlock did not complete")
             assert not first.tool("status")["locked"]
-            current = first.tool("accessibility", observations=[window])["observations"][0]
+            current = first.tool("accessibility", observations={"window": window, "refresh": True})["observations"][0]
             assert {row["label"]: row["element_id"] for row in current["elements"]} == original_ids
             focus_entry(first)
             expected = "Recovered EIS " + token
@@ -320,7 +321,7 @@ def main():
             window = next(window["window_id"] for app in current_status["apps"]
                           for window in app["windows"] if window["title"] == "Spaces AT-SPI fixture " + token)
             main_pid = host_pid()
-            current = first.tool("accessibility", observations=[window])
+            current = first.tool("accessibility", observations={"window": window, "refresh": True})
             assert current["observations"][0]["elements"]
             record("cold-locked-status", host_pid=int(main_pid))
             assert not virtuals(), "lock test created a fallback despite the enabled physical screen"

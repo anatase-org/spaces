@@ -551,7 +551,9 @@ def main():
             if path.startswith(PANEL + "/"): return GLib.Variant("s", "")
             if path.startswith(BUTTON + "/empty_"): return GLib.Variant("s", "")
             if path.startswith(BUTTON + "/"):
-                return GLib.Variant("s", "Repeated button " + path.rsplit("/", 1)[1] + (" x" * 110 if long_labels else ""))
+                # Exercise escaped response bytes before the independent walk
+                # deadline, even on slower hosts. Stay below the name limit.
+                return GLib.Variant("s", "Repeated button " + path.rsplit("/", 1)[1] + (' "\\' * 70 if long_labels else ""))
             return GLib.Variant("s", {ROOT: "scu fixture", WINDOW: "scu test window", WINDOW_TWO: "scu test window" if duplicate_windows else "scu second window",
                 BUTTON: "Fixture button", ENTRY: "Fixture entry", PASSWORD: "Fixture password", PANEL: "Hidden container", SLIDER: "Fixture volume",
                 DOCUMENT: "Fixture document", TOOLTIP: "tooltip", PROSE: "Article paragraph", CAPTION: "Caption", HEADING: "Article heading", LINK: "Article link",

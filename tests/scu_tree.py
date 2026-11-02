@@ -113,6 +113,13 @@ def read_result(response):
                 result.setdefault('warnings', []).append(dict(index=int(match[1]), tool=match[2], warning=match[3]))
             elif line.startswith('Tree truncated;'):
                 observation['truncated'] = True
+            elif line == 'Full tree.':
+                observation['tree_markdown'] = ''
+                observation['elements'] = []
+            elif line == 'No Changes.':
+                observation['tree_diff'] = 'No Changes.\n'
+            elif line.startswith(('@@ ', '+', '-')) and observation is not None:
+                observation['tree_diff'] = observation.get('tree_diff', '') + line + '\n'
             elif observation is not None:
                 if ROW.fullmatch(line) is None:
                     raise ValueError(f'Unknown SCU response line: {line!r}')
