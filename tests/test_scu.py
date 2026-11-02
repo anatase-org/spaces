@@ -2061,12 +2061,80 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         tree = self.snapshot(self.client())
         self.assertEqual(tree["accessibility_error"]["code"], "accessibility_window_ambiguous")
 
-    def test_other_toolkits_keep_exact_title_matching(self):
+    def test_changed_title_falls_back_to_unique_size_for_other_toolkits(self):
         self.start_accessibility()
-        self.atspi_state.with_suffix(".title").write_text("Video - YouTube - Audio playing - Chromium")
-        self.start_host(window_title="Video - YouTube - Chromium")
+        self.atspi_state.with_suffix(".title").write_text("New page title")
+        self.start_host(window_title="Old page title")
         tree = self.snapshot(self.client())
-        self.assertEqual(tree["accessibility_error"]["code"], "accessibility_window_unmatched")
+        self.assertNotIn("accessibility_error", tree)
+        self.assertIn("Fixture button", [row["label"] for row in tree["elements"]])
+
+    def test_changed_title_with_mismatched_pid_falls_back_to_unique_size(self):
+        self.start_accessibility(browser=True)
+        self.start_host(window_title="New page title", app_pid=self.atspi.pid + 100000)
+        tree = self.snapshot(self.client())
+        self.assertNotIn("accessibility_error", tree)
+        button = next(row for row in tree["elements"] if row["label"] == "Fixture button")
+        self.assertEqual(button["frame"], {"x": 30, "y": 30, "width": 20, "height": 10})
+
+    def test_size_fallback_rejects_multiple_accessibility_candidates(self):
+        self.start_accessibility(duplicates=True)
+        self.start_host(window_title="Changed title")
+        tree = self.snapshot(self.client())
+        self.assertEqual(tree["accessibility_error"]["code"], "accessibility_window_ambiguous")
+        self.assertNotIn("elements", tree)
+
+    def test_size_fallback_rejects_multiple_compositor_candidates(self):
+        self.start_accessibility()
+        self.start_host(window_title="Changed title", duplicate_identity=True, duplicate_pid=self.atspi.pid)
+        # Only one accessibility frame fits, but both compositor windows fit
+        # it within the same process.
+        tree = self.snapshot(self.client())
+        self.assertEqual(tree["accessibility_error"]["code"], "accessibility_window_ambiguous")
+        self.assertNotIn("elements", tree)
+
+    def test_size_fallback_with_mismatched_pid_rejects_multiple_compositor_candidates(self):
+        self.start_accessibility()
+        self.start_host(window_title="Changed title", app_pid=self.atspi.pid + 100000, duplicate_identity=True)
+        tree = self.snapshot(self.client())
+        self.assertEqual(tree["accessibility_error"]["code"], "accessibility_window_ambiguous")
+        self.assertNotIn("elements", tree)
+
+    def test_title_match_disambiguates_equal_sizes(self):
+        self.start_accessibility(two_windows=True)
+        self.start_host()
+        tree = self.snapshot(self.client())
+        self.assertNotIn("accessibility_error", tree)
+        self.assertEqual(tree["elements"][0]["label"], "scu test window")
+
+    def test_observations_refresh_metadata_without_another_status_call(self):
+        self.start_host()
+        client = self.client()
+        window = client.windows()[0]["window_id"]
+        for tool, title in (("vision", "First new title"), ("accessibility", "Second new title")):
+            with self.subTest(tool=tool):
+                self.atspi_state.with_suffix(".title").write_text(title)
+                self.configure(window_title=title, window_x=12)
+                before = json.loads(self.atspi_state.read_text())["attribute_queries"]
+                result = client.tool(tool, observations={"window": window, "refresh": True})
+                self.assertFalse(result["isError"], result)
+                tree = read_result(result)["observations"][0]
+                self.assertNotIn("accessibility_error", tree)
+                self.assertEqual(tree["elements"][0]["label"], title)
+                self.assertGreater(json.loads(self.atspi_state.read_text())["attribute_queries"], before)
+                if tool == "vision":
+                    self.assertEqual(tree["screenshot"]["bounds"]["x"], 24)
+
+    def test_keyboard_text_uses_size_fallback_after_title_changes(self):
+        self.start_accessibility(keyboard=True)
+        self.start_host(app_pid=self.atspi.pid + 100000)
+        client = self.client()
+        row = next(row for row in self.snapshot(client)["elements"] if row["label"] == "Fixture entry")
+        self.configure(window_title="New page title")
+        result = client.tool("accessibility", steps=[{"tool": "set_value", "args": {
+            "element_id": row["element_id"], "value": "hello"}}])
+        self.assertFalse(result["isError"], result)
+        self.assertEqual(json.loads(self.state.read_text())["input"]["text"], "hello")
 
     def test_keyboard_text_requires_active_window(self):
         self.start_accessibility(keyboard=True)
@@ -2257,12 +2325,12 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertEqual(json.loads(self.state.read_text())["input"]["keys"], 0)
 
     def test_window_without_accessibility_still_returns_an_image(self):
-        self.start_host(window_title="No accessibility tree")
+        self.start_host(window_title="No accessibility tree", bad_client=True)
         client = self.client()
         window = client.windows()[0]
         result = client.tool("vision", observations={"window": window["window_id"], "refresh": True})
         self.assertFalse(result["isError"], result)
-        self.assertEqual(self.image(result).size, (80, 60))
+        self.assertEqual(self.image(result).size, (54, 60))
         observation = read_result(result)["observations"][0]
         self.assertNotIn("elements", observation)
         self.assertEqual(observation["accessibility_error"]["code"], "accessibility_window_unmatched")
@@ -2305,7 +2373,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertEqual(state["connections"], 0)
 
     def test_tree_only_window_does_not_fall_back_to_a_screenshot(self):
-        self.start_host(window_title="No accessibility tree")
+        self.start_host(window_title="No accessibility tree", bad_client=True)
         client = self.client()
         window = client.windows()[0]
         before = json.loads(self.state.read_text())["captures"]

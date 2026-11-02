@@ -1620,6 +1620,7 @@ static JsonResult *accessible_target_input(AtspiAccessible *node, Element *eleme
         for (guint i = 0; i < windows->len; i++) {
             Window *window = g_ptr_array_index(windows, i);
             if (window->id != element->window) continue;
+            request_accessible_attributes(window->accessible);
             char *title = atspi.accessible_get_name(window->accessible, NULL);
             result_string(result, "title", title);
             result_integer(result, "pid", window->pid);
@@ -3182,9 +3183,9 @@ static gboolean accessibility_titles_match(JsonValue *window, JsonValue *candida
 }
 
 static gboolean accessibility_geometry(JsonValue *window, JsonValue *candidate,
-    CanvasRect *anchor, CanvasRect *origin, double *ratio)
+    CanvasRect *anchor, CanvasRect *origin, double *ratio, gboolean require_title)
 {
-    return accessibility_titles_match(window, candidate) &&
+    return (!require_title || accessibility_titles_match(window, candidate)) &&
         accessibility_size(window, candidate, anchor, origin, ratio);
 }
 
@@ -3235,41 +3236,51 @@ static JsonResult *window_tree(JsonValue *args, JsonValue *window, gboolean read
         }
         matches = best = frames = titles = sizes = 0;
         ambiguous = FALSE;
-        JsonValue *app;
-        yyjson_arr_foreach(json_member(yyjson_doc_get_root(listing), "apps"), i, n, app) {
-            guint score = json_number(app, "pid", -1) == json_number(window, "pid", -2) ? 2 : 1;
-            size_t j, m;
-            yyjson_arr_foreach(json_member(app, "windows"), j, m, candidate) {
-                CanvasRect root, origin;
-                double scale;
-                frames++;
-                titles += accessibility_titles_match(window, candidate);
-                sizes += accessibility_size(window, candidate, &root, &origin, &scale);
-                if (score < best || !accessibility_geometry(window, candidate, &root, &origin, &scale))
-                    continue;
-                /* Flatpak bus credentials and compositor PIDs can differ.
-                 * Require uniqueness in both inventories for that fallback. */
-                if (score == 1) {
-                    guint alternatives = 0;
-                    size_t w, total;
-                    JsonValue *other;
-                    yyjson_arr_foreach(json_member(yyjson_doc_get_root(visual.geometry), "windows"), w, total, other) {
-                        CanvasRect unused_anchor, unused_origin;
-                        double unused_ratio;
-                        alternatives += accessibility_geometry(other, candidate, &unused_anchor, &unused_origin, &unused_ratio);
+        /* Titles are mutable metadata. Prefer title + size, then accept a
+         * unique size association from these freshly queried inventories. */
+        for (guint pass = 0; pass < 2 && !matches && !ambiguous; pass++) {
+            gboolean require_title = pass == 0;
+            JsonValue *app;
+            yyjson_arr_foreach(json_member(yyjson_doc_get_root(listing), "apps"), i, n, app) {
+                guint score = json_number(app, "pid", -1) == json_number(window, "pid", -2) ? 2 : 1;
+                size_t j, m;
+                yyjson_arr_foreach(json_member(app, "windows"), j, m, candidate) {
+                    CanvasRect root, origin;
+                    double scale;
+                    if (require_title) {
+                        frames++;
+                        titles += accessibility_titles_match(window, candidate);
+                        sizes += accessibility_size(window, candidate, &root, &origin, &scale);
                     }
-                    if (alternatives != 1) {
-                        ambiguous |= alternatives > 1;
+                    if (score < best || !accessibility_geometry(window, candidate, &root, &origin, &scale, require_title))
                         continue;
+                    /* Flatpak bus credentials and compositor PIDs can differ.
+                     * Size-only matching also requires a unique reverse match,
+                     * restricted to this process when its identity is known. */
+                    if (score == 1 || !require_title) {
+                        guint alternatives = 0;
+                        size_t w, total;
+                        JsonValue *other;
+                        yyjson_arr_foreach(json_member(yyjson_doc_get_root(visual.geometry), "windows"), w, total, other) {
+                            if (score == 2 && json_number(other, "pid", -1) != json_number(app, "pid", -2))
+                                continue;
+                            CanvasRect unused_anchor, unused_origin;
+                            double unused_ratio;
+                            alternatives += accessibility_geometry(other, candidate, &unused_anchor, &unused_origin, &unused_ratio, require_title);
+                        }
+                        if (alternatives != 1) {
+                            ambiguous |= alternatives > 1;
+                            continue;
+                        }
                     }
+                    if (score > best) { best = score; matches = 0; }
+                    match = candidate;
+                    match_pid = json_number(app, "pid", 0);
+                    anchor = root;
+                    client = origin;
+                    ratio = scale;
+                    matches++;
                 }
-                if (score > best) { best = score; matches = 0; }
-                match = candidate;
-                match_pid = json_number(app, "pid", 0);
-                anchor = root;
-                client = origin;
-                ratio = scale;
-                matches++;
             }
         }
         if (matches || ambiguous || g_get_monotonic_time() >= until) break;
@@ -3279,7 +3290,7 @@ static JsonResult *window_tree(JsonValue *args, JsonValue *window, gboolean read
     if (matches != 1) {
         const char *code = matches > 1 || ambiguous ? "accessibility_window_ambiguous"
             : titles && !sizes ? "accessibility_geometry_mismatch" : "accessibility_window_unmatched";
-        char *hint = g_strdup_printf("Could not uniquely associate this window after refreshing accessibility metadata (%u frames, %u matching titles, %u matching sizes). Observe again or use screenshot input.", frames, titles, sizes);
+        char *hint = g_strdup_printf("Could not uniquely associate this window after refreshing accessibility metadata (%u frames, %u matching titles, %u matching sizes). Use screenshot input if the window has no unique accessibility match.", frames, titles, sizes);
         scu_fail(code, hint);
         g_free(hint);
         yyjson_doc_free(listing);
@@ -4095,12 +4106,17 @@ static gboolean verify_target_input(void)
     if (!visual_step() || !refresh_geometry()) return FALSE;
     guint matches = 0;
     gboolean active = FALSE;
-    size_t index, count;
-    JsonValue *window;
-    yyjson_arr_foreach(json_member(yyjson_doc_get_root(visual.geometry), "windows"), index, count, window) {
-        CanvasRect anchor, origin;
-        double ratio;
-        if (accessibility_geometry(window, target_input_window, &anchor, &origin, &ratio)) {
+    for (guint pass = 0; pass < 2 && !matches; pass++) {
+        guint best = 0;
+        size_t index, count;
+        JsonValue *window;
+        yyjson_arr_foreach(json_member(yyjson_doc_get_root(visual.geometry), "windows"), index, count, window) {
+            CanvasRect anchor, origin;
+            double ratio;
+            guint score = json_number(window, "pid", -1) == json_number(target_input_window, "pid", -2) ? 2 : 1;
+            if (score < best || !accessibility_geometry(window, target_input_window, &anchor, &origin, &ratio, pass == 0))
+                continue;
+            if (score > best) { best = score; matches = 0; }
             matches++;
             active = json_boolean(window, "active");
         }

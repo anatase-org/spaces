@@ -113,7 +113,7 @@ def geometry():
         windows[0]["client"] = {"x": 12, "y": 14, "width": 32, "height": 20}
         windows[0]["frame"] = windows[0]["client"]
     if config.get("duplicate_identity"):
-        windows.append({**windows[0], "key": "window-duplicate", "pid": 999999})
+        windows.append({**windows[0], "key": "window-duplicate", "pid": config.get("duplicate_pid", 999999)})
     return {"outputs": outputs, "windows": windows}
 
 
