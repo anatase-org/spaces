@@ -4746,7 +4746,7 @@ static const char geometry_script[] =
     "if(w.deleted||w.desktopWindow||w.dock)continue;"
     "var shown=!w.minimized&&(!w.desktops.length||w.desktops.indexOf(workspace.currentDesktop)>=0)"
     "&&(!w.activities.length||w.activities.indexOf(workspace.currentActivity)>=0);"
-    "result.windows.push({key:String(w.internalId),pid:w.pid,app_name:w.resourceClass||w.resourceName,"
+    "result.windows.push({key:String(w.internalId),pid:w.pid,desktop_file:w.desktopFileName,app_name:w.resourceClass||w.resourceName,"
     "title:w.caption,frame:rect(w.frameGeometry),client:rect(w.clientGeometry),buffer:rect(w.bufferGeometry),shown:shown,active:w===workspace.activeWindow});}\n"
     "callDBus('%s','" GEOMETRY_PATH "','" GEOMETRY_INTERFACE "','Publish','%s',JSON.stringify(result));\n";
 

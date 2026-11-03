@@ -118,8 +118,13 @@ static JsonResult *search_applications(JsonValue *args)
 static GDesktopAppInfo *application_resolve(JsonValue *args, char **uri, const char **action)
 {
     const char *id = json_string(args, "application"), *arg = json_string(args, "arg");
+    const char *requested_action = json_string(args, "action");
     if (!id || !*id || strchr(id, '/') || !g_str_has_suffix(id, ".desktop")) {
         scu_fail("invalid_application", "Use an installed desktop ID including .desktop.");
+        return NULL;
+    }
+    if (requested_action && (arg || !*requested_action)) {
+        scu_fail("invalid_arguments", "action must be a non-empty desktop action ID and cannot be combined with arg.");
         return NULL;
     }
     GDesktopAppInfo *app = g_desktop_app_info_new(id);
@@ -128,17 +133,17 @@ static GDesktopAppInfo *application_resolve(JsonValue *args, char **uri, const c
         scu_fail("application_not_found", "The host desktop application is missing or Hidden.");
         return NULL;
     }
-    if (!arg) return app;
-    if (!*arg) goto invalid;
-    if (g_str_has_prefix(arg, "action://")) {
+    if (requested_action) {
         const char *const *actions = g_desktop_app_info_list_actions(app);
         for (guint i = 0; actions && actions[i]; i++) {
-            if (!strcmp(actions[i], arg + 9)) { *action = arg + 9; return app; }
+            if (!strcmp(actions[i], requested_action)) { *action = requested_action; return app; }
         }
         scu_fail("unknown_application_action", "Use an action ID returned by search_applications.");
         g_object_unref(app);
         return NULL;
     }
+    if (!arg) return app;
+    if (!*arg) goto invalid;
     GFile *file = NULL;
     if (g_path_is_absolute(arg)) file = g_file_new_for_path(arg);
     else {
@@ -162,7 +167,7 @@ static GDesktopAppInfo *application_resolve(JsonValue *args, char **uri, const c
     return app;
 invalid:
     g_object_unref(app);
-    scu_fail("invalid_arguments", "arg must be an absolute host path, an absolute URI, or action://<action-id>.");
+    scu_fail("invalid_arguments", "arg must be an absolute host path or an absolute URI.");
     return NULL;
 }
 
@@ -274,6 +279,121 @@ static gboolean application_scope(GSubprocess *worker, GError **error)
     return active;
 }
 
+/* Desktop identity establishes app membership; only a new/changed window is
+ * evidence to return early. Existing unchanged windows require the full wait. */
+static JsonValue *application_windows(void)
+{
+    return visual.geometry ? json_member(yyjson_doc_get_root(visual.geometry), "windows") : NULL;
+}
+
+static gboolean application_window_matches(JsonValue *window, const char *application)
+{
+    const char *desktop_file = json_string(window, "desktop_file");
+    if (!desktop_file || !*desktop_file) return FALSE;
+    char *base = g_path_get_basename(desktop_file);
+    if (g_str_has_suffix(base, ".desktop")) base[strlen(base) - 8] = '\0';
+    gboolean matches = strlen(application) == strlen(base) + 8 &&
+        !strncmp(application, base, strlen(base));
+    g_free(base);
+    return matches;
+}
+
+static gboolean application_window_changed(JsonValue *window, JsonValue *before)
+{
+    size_t i, n;
+    JsonValue *old;
+    yyjson_arr_foreach(before, i, n, old) {
+        if (g_strcmp0(json_string(window, "key"), json_string(old, "key"))) continue;
+        return g_strcmp0(json_string(window, "title"), json_string(old, "title")) ||
+            (!json_boolean(old, "active") && json_boolean(window, "active"));
+    }
+    return TRUE;
+}
+
+static gboolean application_geometry(gint64 until)
+{
+    gint64 deadline = scu.deadline;
+    scu.deadline = deadline ? MIN(deadline, until) : until;
+    gboolean ok = refresh_geometry();
+    scu.deadline = deadline;
+    return ok;
+}
+
+static void application_observe(JsonResult *result, const char *application, yyjson_doc *baseline)
+{
+    gint64 until = g_get_monotonic_time() + 5 * G_USEC_PER_SEC, changed_since = 0;
+    JsonValue *before = baseline ? yyjson_doc_get_root(baseline) : NULL;
+    /* Poll only compositor metadata; one final status supplies coordinates and
+     * accessibility availability. No tree reads or screenshots in this loop. */
+    while (scu_tick()) {
+        if (!application_geometry(until)) break;
+        gboolean changed = FALSE;
+        size_t i, n;
+        JsonValue *window;
+        yyjson_arr_foreach(application_windows(), i, n, window) {
+            if (baseline && application_window_matches(window, application) &&
+                application_window_changed(window, before)) changed = TRUE;
+        }
+        gint64 now = g_get_monotonic_time();
+        if (!changed) changed_since = 0;
+        else if (!changed_since) changed_since = now;
+        if (now >= until || (changed_since && now - changed_since >= 300000)) break;
+        if (!scu_pause((unsigned)MIN((until - now + 999) / 1000, 200))) break;
+        while (g_main_context_iteration(NULL, FALSE)) {}
+    }
+    if (!scu_tick()) return;
+    /* A window-observation failure must not turn an already submitted launch
+     * into a failed launch that the caller might replay. */
+    clear_tool_error();
+    gint64 deadline = scu.deadline, observation_until = g_get_monotonic_time() + 3 * G_USEC_PER_SEC;
+    scu.deadline = deadline ? MIN(deadline, observation_until) : observation_until;
+    JsonResult *status = kwin_status(FALSE);
+    scu.deadline = deadline;
+    scu.images = result_array();
+    if (!status) {
+        if (scu_tick()) {
+            result_member(result, "window_error", error_payload());
+            clear_tool_error();
+        }
+        return;
+    }
+    GHashTable *matched = g_hash_table_new(g_direct_hash, g_direct_equal);
+    GHashTable *changed = g_hash_table_new(g_direct_hash, g_direct_equal);
+    size_t i, n;
+    JsonValue *window;
+    yyjson_arr_foreach(application_windows(), i, n, window) {
+        const char *key = json_string(window, "key");
+        if (!key || !application_window_matches(window, application)) continue;
+        gpointer id = GUINT_TO_POINTER(kwin_window_id(key));
+        g_hash_table_add(matched, id);
+        if (baseline && application_window_changed(window, before)) g_hash_table_add(changed, id);
+    }
+    if (g_hash_table_size(matched)) {
+        GHashTable *selected = g_hash_table_size(changed) ? changed : matched;
+        JsonResult *apps = result_array(), *app, *item;
+        size_t j, m;
+        yyjson_mut_arr_foreach(yyjson_mut_obj_get(status, "apps"), i, n, app) {
+            JsonResult *windows = result_array();
+            yyjson_mut_arr_foreach(yyjson_mut_obj_get(app, "windows"), j, m, item) {
+                gpointer id = GUINT_TO_POINTER((guint)yyjson_mut_get_uint(yyjson_mut_obj_get(item, "window_id")));
+                if (g_hash_table_contains(selected, id)) result_append(windows, yyjson_mut_val_mut_copy(scu.doc, item));
+            }
+            if (!yyjson_mut_arr_size(windows)) continue;
+            JsonResult *filtered = result_object();
+            result_member(filtered, "app_name", yyjson_mut_val_mut_copy(scu.doc, yyjson_mut_obj_get(app, "app_name")));
+            result_member(filtered, "windows", windows);
+            result_append(apps, filtered);
+        }
+        result_member(result, "apps", apps);
+    } else {
+        result_member(result, "apps", yyjson_mut_val_mut_copy(scu.doc, yyjson_mut_obj_get(status, "apps")));
+        result_string(result, "window_notice", "Could not identify the launched window; showing all windows.");
+    }
+    result_member(result, "canvas", yyjson_mut_val_mut_copy(scu.doc, yyjson_mut_obj_get(status, "canvas")));
+    result_member(result, "locked", yyjson_mut_val_mut_copy(scu.doc, yyjson_mut_obj_get(status, "locked")));
+    g_hash_table_unref(matched); g_hash_table_unref(changed);
+}
+
 static JsonResult *launch_application(JsonValue *args)
 {
     char *uri = NULL;
@@ -286,9 +406,15 @@ static JsonResult *launch_application(JsonValue *args)
         free(request);
         return scu_fail("invalid_arguments", "Application launch request exceeds its size limit.");
     }
+    yyjson_doc *baseline = NULL;
+    if (application_geometry(g_get_monotonic_time() + G_USEC_PER_SEC))
+        baseline = yyjson_mut_val_imut_copy(yyjson_val_mut_copy(scu.doc, application_windows()), NULL);
+    else if (scu_tick()) clear_tool_error();
+    if (!scu_tick()) { free(request); yyjson_doc_free(baseline); return NULL; }
     int sockets[2];
     if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sockets) < 0) {
         free(request);
+        yyjson_doc_free(baseline);
         return scu_fail("application_launch_failed", "Could not create the application worker channel.");
     }
     GError *error = NULL;
@@ -335,6 +461,10 @@ static JsonResult *launch_application(JsonValue *args)
     if (value && json_boolean(value, "ok") && scu_tick()) {
         GString *text = g_string_new("Launch requested: ");
         application_quoted(text, json_string(args, "application"));
+        if (json_string(args, "action")) {
+            g_string_append(text, " action=");
+            application_quoted(text, json_string(args, "action"));
+        }
         if (json_string(args, "arg")) {
             g_string_append(text, " arg=");
             application_quoted(text, json_string(args, "arg"));
@@ -352,5 +482,7 @@ static JsonResult *launch_application(JsonValue *args)
         g_object_unref(worker);
     }
     yyjson_doc_free(reply); g_string_free(response, TRUE); g_clear_error(&error);
+    if (result) application_observe(result, json_string(args, "application"), baseline);
+    yyjson_doc_free(baseline);
     return result;
 }

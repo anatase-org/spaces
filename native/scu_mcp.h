@@ -491,7 +491,9 @@ static const Argument launch_application_arguments[] = {
     {.name = "application", .type = ARG_STRING,
         .description = "Installed host desktop ID from search_applications, including .desktop."},
     {.name = "arg", .type = ARG_STRING, .allow_null = TRUE,
-        .description = "Absolute host path or URI to open, or action://<action-id> for a declared desktop action. Omit for a normal launch."},
+        .description = "Absolute host path or URI to open. Cannot be combined with action. Omit for a normal launch."},
+    {.name = "action", .type = ARG_STRING, .allow_null = TRUE,
+        .description = "Desktop action ID from search_applications, such as new-window."},
     {NULL},
 };
 static const char *const require_application[] = {"application", NULL};
@@ -534,7 +536,7 @@ static const Tool tools[] = {
         "Search installed host desktop applications. Returns desktop ID, name, role, additional actions, and File/URI argument support.",
         .arguments = search_application_arguments},
     {.name = "launch_application",
-        "Launch an installed application on the host. If supported by the application, you can pass a file/URI or invoke a desktop action.",
+        "Launch an installed application on the host. If supported by the application, you can pass a file/URI or invoke a desktop action. Waits up to 5 seconds for a window and returns matching status-style windows, or all windows if unidentified.",
         .arguments = launch_application_arguments, .required = require_application, .action = TRUE},
 };
 
@@ -821,7 +823,9 @@ static yyjson_doc *build_tool_schema(const Tool *tool)
     JsonResult *schema = result_object();
     JsonResult *properties = result_object();
     JsonResult *required = result_array();
-    add_argument_schemas(properties, tool->arguments);
+    if (!(no_vision && !strcmp(tool->name, "status"))) {
+        add_argument_schemas(properties, tool->arguments);
+    }
     if (tool->groups & ARGS_ACTION) {
         add_argument_schemas(properties, action_arguments);
     }
@@ -1207,6 +1211,38 @@ static void append_result_error(GString *text, const char *label, JsonResult *er
     g_string_append_c(text, '\n');
 }
 
+static void append_status_result(GString *text, JsonResult *output)
+{
+    g_string_append_printf(text, "Screen: %s\n", yyjson_mut_is_true(yyjson_mut_obj_get(output, "locked")) ? "locked" : "unlocked");
+    JsonResult *canvas = yyjson_mut_obj_get(output, "canvas");
+    g_string_append_printf(text, "Canvas: %" G_GINT64_FORMAT " x %" G_GINT64_FORMAT "\n",
+        yyjson_mut_get_sint(yyjson_mut_obj_get(canvas, "width")), yyjson_mut_get_sint(yyjson_mut_obj_get(canvas, "height")));
+    g_string_append(text, "Windows:\n");
+    JsonResult *app, *window;
+    size_t i, n, j, m;
+    yyjson_mut_arr_foreach(yyjson_mut_obj_get(output, "apps"), i, n, app) {
+        g_string_append(text, "  ");
+        append_result_value(text, yyjson_mut_obj_get(app, "app_name"));
+        g_string_append(text, ":\n");
+        yyjson_mut_arr_foreach(yyjson_mut_obj_get(app, "windows"), j, m, window) {
+            g_string_append_printf(text, "    window_id=%" G_GINT64_FORMAT " ", yyjson_mut_get_sint(yyjson_mut_obj_get(window, "window_id")));
+            append_result_value(text, yyjson_mut_obj_get(window, "title"));
+            if (yyjson_mut_is_true(yyjson_mut_obj_get(window, "active"))) g_string_append(text, " active");
+            if (yyjson_mut_is_false(yyjson_mut_obj_get(window, "shown"))) g_string_append(text, " hidden");
+            g_string_append(text, " bounds=");
+            append_result_frame(text, yyjson_mut_obj_get(window, "bounds"));
+            gboolean available = yyjson_mut_is_true(yyjson_mut_obj_get(window, "accessibility_available"));
+            g_string_append_printf(text, " accessibility=%s", available ? "yes" : "no");
+            if (!available) {
+                JsonResult *error = yyjson_mut_obj_get(window, "accessibility_error");
+                const char *reason = yyjson_mut_get_str(yyjson_mut_obj_get(error, "hint"));
+                if (reason) g_string_append_printf(text, " (%s)", reason);
+            }
+            g_string_append_c(text, '\n');
+        }
+    }
+}
+
 static char *tool_result_text(const Tool *tool, JsonResult *output)
 {
     GString *text = g_string_new(NULL);
@@ -1214,35 +1250,12 @@ static char *tool_result_text(const Tool *tool, JsonResult *output)
         append_result_error(text, "Error", error_payload());
     } else if (tool && (!strcmp(tool->name, "search_applications") || !strcmp(tool->name, "launch_application"))) {
         g_string_append(text, yyjson_mut_get_str(yyjson_mut_obj_get(output, "text")));
+        const char *notice = yyjson_mut_get_str(yyjson_mut_obj_get(output, "window_notice"));
+        if (notice) g_string_append_printf(text, "%s\n", notice);
+        append_result_error(text, "Window listing unavailable", yyjson_mut_obj_get(output, "window_error"));
+        if (yyjson_mut_obj_get(output, "apps")) append_status_result(text, output);
     } else if (tool && !strcmp(tool->name, "status")) {
-        g_string_append_printf(text, "Screen: %s\n", yyjson_mut_is_true(yyjson_mut_obj_get(output, "locked")) ? "locked" : "unlocked");
-        JsonResult *canvas = yyjson_mut_obj_get(output, "canvas");
-        g_string_append_printf(text, "Canvas: %" G_GINT64_FORMAT " x %" G_GINT64_FORMAT "\n",
-            yyjson_mut_get_sint(yyjson_mut_obj_get(canvas, "width")), yyjson_mut_get_sint(yyjson_mut_obj_get(canvas, "height")));
-        g_string_append(text, "Windows:\n");
-        JsonResult *app, *window;
-        size_t i, n, j, m;
-        yyjson_mut_arr_foreach(yyjson_mut_obj_get(output, "apps"), i, n, app) {
-            g_string_append(text, "  ");
-            append_result_value(text, yyjson_mut_obj_get(app, "app_name"));
-            g_string_append(text, ":\n");
-            yyjson_mut_arr_foreach(yyjson_mut_obj_get(app, "windows"), j, m, window) {
-                g_string_append_printf(text, "    window_id=%" G_GINT64_FORMAT " ", yyjson_mut_get_sint(yyjson_mut_obj_get(window, "window_id")));
-                append_result_value(text, yyjson_mut_obj_get(window, "title"));
-                if (yyjson_mut_is_true(yyjson_mut_obj_get(window, "active"))) g_string_append(text, " active");
-                if (yyjson_mut_is_false(yyjson_mut_obj_get(window, "shown"))) g_string_append(text, " hidden");
-                g_string_append(text, " bounds=");
-                append_result_frame(text, yyjson_mut_obj_get(window, "bounds"));
-                gboolean available = yyjson_mut_is_true(yyjson_mut_obj_get(window, "accessibility_available"));
-                g_string_append_printf(text, " accessibility=%s", available ? "yes" : "no");
-                if (!available) {
-                    JsonResult *error = yyjson_mut_obj_get(window, "accessibility_error");
-                    const char *reason = yyjson_mut_get_str(yyjson_mut_obj_get(error, "hint"));
-                    if (reason) g_string_append_printf(text, " (%s)", reason);
-                }
-                g_string_append_c(text, '\n');
-            }
-        }
+        append_status_result(text, output);
     } else {
         const char *status = yyjson_mut_get_str(yyjson_mut_obj_get(output, "status"));
         g_string_append_printf(text, "Status: %s. completed: %" G_GINT64_FORMAT "\n", status ? status : "ok",

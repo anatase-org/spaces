@@ -120,6 +120,11 @@ def geometry():
     if config.get("duplicate_identity"):
         windows.append({**windows[0], "key": "window-duplicate", "pid": config.get("duplicate_pid", 999999),
                         "app_name": config.get("duplicate_app_name", windows[0]["app_name"])})
+    if "application_windows_before" in config:
+        record = Path(config["application_record"])
+        launched = record.exists() and time.time() - record.stat().st_mtime >= config.get("application_window_delay", 0)
+        changes = config["application_windows_after" if launched else "application_windows_before"]
+        windows = [{**windows[0], **window} for window in changes]
     return {"outputs": outputs, "windows": windows}
 
 
@@ -153,13 +158,15 @@ def method(connection, sender, path, interface, name, parameters, invocation):
         script = Path(values[0]).read_text()
         assert "workspace.windowList()" in script and "frameGeometry" in script
         assert "clientGeometry" in script and "callDBus(" in script
+        assert "desktopFileName" in script
         script_id = len(scripts) + 1
         scripts[script_id] = script
         connection.register_object(f"/Scripting/Script{script_id}", node.interfaces[1], method, None, None)
         invocation.return_value(GLib.Variant("(i)", (script_id,)))
     elif name == "run":
         state["geometry_requests"] += 1
-        if config.get("hold_geometry"):
+        if config.get("hold_geometry") or (config.get("hold_geometry_after_application") and
+                Path(config["application_record"]).exists()):
             held.append(invocation)
             save()
             return

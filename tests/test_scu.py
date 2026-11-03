@@ -30,6 +30,7 @@ PACKAGES = ("gio-unix-2.0", "atspi-2", "libei-1.0", "xkbcommon", "gdk-pixbuf-2.0
 
 class Client:
     def __init__(self, binary, environment=None, *, no_vision=False):
+        self.no_vision = no_vision
         self.process = subprocess.Popen([str(binary), "mcp", *(["--no-vision"] if no_vision else [])], stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)
         self.serial = 0
@@ -792,7 +793,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertTrue(self.display_state.exists())
 
     def status(self, client):
-        result = client.tool("status", observation=True)
+        result = client.tool("status", **({} if client.no_vision else {"observation": True}))
         self.assertFalse(result["isError"], result)
         return result
 
@@ -1161,7 +1162,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.computer_path.chmod(0o600)
         self.status(client)
 
-    def application_catalog(self, *, shared=False, **config):
+    def application_catalog(self, *, shared=False, system_data=False, **config):
         temporary = tempfile.TemporaryDirectory(prefix="apps-", dir=self.directory)
         self.addCleanup(temporary.cleanup)
         self.app_directory = Path(temporary.name)
@@ -1172,7 +1173,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         configuration.mkdir()
         self.application_records = self.app_directory / "records.jsonl"
         self.application_state = self.app_directory / "systemd.json"
-        self.environment.update(XDG_DATA_HOME=str(data), XDG_DATA_DIRS=str(self.app_directory / "empty"),
+        self.environment.update(XDG_DATA_HOME=str(data), XDG_DATA_DIRS="/usr/share" if system_data else str(self.app_directory / "empty"),
                                 XDG_CONFIG_HOME=str(configuration), XDG_CONFIG_DIRS=str(self.app_directory / "empty"),
                                 XDG_CURRENT_DESKTOP="KDE", LC_ALL="C.UTF-8")
         recorder = f'/usr/bin/python3 "{ROOT / "tests/scu_applications_fixture.py"}" --record "{self.application_records}"'
@@ -1240,16 +1241,19 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         client = self.client(no_vision=True)
         path = self.app_directory / "file with spaces.txt"
         path.write_text("contents")
-        cases = [("org.example.Visible.desktop", None, []),
-                 ("org.example.Visible.desktop", "https://example.invalid/a?b=1&c=2", ["https://example.invalid/a?b=1&c=2"]),
-                 ("org.example.File.desktop", str(path), [str(path)]),
-                 ("org.example.File.desktop", path.as_uri(), [str(path)]),
-                 ("org.example.Visible.desktop", "action://new-window", ["action"]),
-                 ("org.example.NoDisplay.desktop", None, [])]
-        for i, (app, arg, expected) in enumerate(cases):
-            result = client.tool("launch_application", application=app, arg=arg)
+        cases = [("org.example.Visible.desktop", {"arg": None, "action": None}, []),
+                 ("org.example.Visible.desktop", {"arg": "https://example.invalid/a?b=1&c=2"}, ["https://example.invalid/a?b=1&c=2"]),
+                 ("org.example.File.desktop", {"arg": str(path)}, [str(path)]),
+                 ("org.example.File.desktop", {"arg": path.as_uri()}, [str(path)]),
+                 ("org.example.Visible.desktop", {"action": "new-window", "arg": None}, ["action"]),
+                 ("org.example.NoDisplay.desktop", {}, [])]
+        for i, (app, arguments, expected) in enumerate(cases):
+            result = client.tool("launch_application", application=app, **arguments)
             self.assertFalse(result["isError"], result)
             self.assertIn("Launch requested:", result["content"][0]["text"])
+            if arguments.get("action"):
+                self.assertIn(' action="new-window"', result["content"][0]["text"])
+                self.assertNotIn(" arg=", result["content"][0]["text"])
             self.wait_until(lambda: self.application_records.exists() and len(self.application_records.read_text().splitlines()) > i)
             record = json.loads(self.application_records.read_text().splitlines()[i])
             self.assertEqual(record["args"], expected)
@@ -1258,13 +1262,106 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertEqual(len(scopes), len(cases))
         self.assertEqual(len({scope["name"] for scope in scopes}), len(cases))
         self.assertTrue(all(scope["properties"]["Slice"] == "app.slice" and scope["properties"]["PIDs"] for scope in scopes))
-        self.assertEqual(json.loads(self.state.read_text())["geometry_requests"], 0)
+        self.assertGreater(json.loads(self.state.read_text())["geometry_requests"], 0)
+
+    def application_launch_windows(self, **arguments):
+        result = self.client(no_vision=True).tool("launch_application", application="org.example.Visible.desktop", **arguments)
+        self.assertFalse(result["isError"], result)
+        self.assertTrue(all(block["type"] == "text" for block in result["content"]))
+        text = result["content"][0]["text"]
+        self.assertIn("Launch requested:", text)
+        self.assertIn("Screen:", text)
+        listing = text[text.index("Screen:"):]
+        data = read_result({"content": [{"type": "text", "text": listing}]})
+        return text, data
+
+    def test_application_readiness_waits_for_new_matching_window_while_locked(self):
+        self.application_catalog(shared=True, locked=True, system_data=True)
+        background = dict(key="background", desktop_file="other", app_name="Other", title="Existing other app")
+        target = dict(key="launched", desktop_file="org.example.Visible", app_name="Different runtime class", title="New application")
+        self.configure(application_record=str(self.application_records), application_window_delay=.4,
+                       application_windows_before=[background], application_windows_after=[background, target])
+        start = time.monotonic()
+        text, data = self.application_launch_windows()
+        elapsed = time.monotonic() - start
+        self.assertGreaterEqual(elapsed, .6)
+        self.assertLess(elapsed, 4)
+        self.assertTrue(data["locked"])
+        self.assertEqual([a["app_name"] for a in data["apps"]], ["Different runtime class"])
+        self.assertEqual(data["apps"][0]["windows"][0]["title"], "New application")
+        self.assertNotIn("showing all windows", text)
+        self.assertGreater(json.loads(self.state.read_text())["geometry_requests"], 3)
+
+    def test_application_readiness_selects_changed_existing_window(self):
+        self.application_catalog(system_data=True)
+        target = dict(key="reused", desktop_file="/usr/share/applications/org.example.Visible.desktop",
+                      app_name="Runtime class", title="Old document", active=False)
+        unchanged = {**target, "key": "unchanged", "title": "Other document"}
+        self.configure(application_record=str(self.application_records),
+                       application_windows_before=[target, unchanged],
+                       application_windows_after=[{**target, "title": "Opened document", "active": True}, unchanged])
+        start = time.monotonic()
+        text, data = self.application_launch_windows(arg="https://example.invalid/")
+        self.assertLess(time.monotonic() - start, 4)
+        self.assertEqual([w["title"] for a in data["apps"] for w in a["windows"]], ["Opened document"])
+        self.assertNotIn("showing all windows", text)
+
+    def test_application_readiness_unknown_identity_returns_exact_status_after_timeout(self):
+        self.application_catalog(system_data=True)
+        background = dict(key="other", desktop_file="other", app_name="Other", title="Other app")
+        # A matching runtime class alone must not be guessed to be our desktop entry.
+        unknown = dict(key="unknown", app_name="org.example.Visible", title="Unidentified app")
+        self.configure(application_record=str(self.application_records),
+                       application_windows_before=[background], application_windows_after=[background, unknown])
+        start = time.monotonic()
+        text, data = self.application_launch_windows()
+        self.assertGreaterEqual(time.monotonic() - start, 5)
+        self.assertLess(time.monotonic() - start, 9)
+        self.assertIn("Could not identify the launched window; showing all windows.", text)
+        status = self.client().tool("status")
+        self.assertEqual(text[text.index("Screen:"):], status["content"][0]["text"])
+        self.assertEqual(sum(len(a["windows"]) for a in data["apps"]), 2)
+
+    def test_application_readiness_preserves_launch_success_if_observation_fails(self):
+        self.application_catalog(refuse=True, system_data=True)
+        target = dict(key="target", desktop_file="org.example.Visible", app_name="Runtime", title="Launched")
+        self.configure(application_record=str(self.application_records),
+                       application_windows_before=[], application_windows_after=[target])
+        result = self.client().tool("launch_application", application="org.example.Visible.desktop")
+        self.assertFalse(result["isError"], result)
+        self.assertTrue(self.application_records.exists())
+        text = result["content"][0]["text"]
+        self.assertIn("Launch requested:", text)
+        self.assertIn("Window listing unavailable:", text)
+        self.assertTrue(all(block["type"] == "text" for block in result["content"]))
+
+    def test_application_readiness_unchanged_existing_window_waits_full_interval(self):
+        self.application_catalog(system_data=True)
+        target = dict(key="unchanged", desktop_file="org.example.Visible", title="Existing application")
+        other = dict(key="other", desktop_file="other", title="Other application")
+        self.configure(application_record=str(self.application_records),
+                       application_windows_before=[target, other], application_windows_after=[target, other])
+        start = time.monotonic()
+        text, data = self.application_launch_windows()
+        self.assertGreaterEqual(time.monotonic() - start, 5)
+        self.assertEqual([w["title"] for a in data["apps"] for w in a["windows"]], ["Existing application"])
+        self.assertNotIn("showing all windows", text)
+
+    def test_application_readiness_stalled_compositor_is_bounded_after_launch(self):
+        self.application_catalog(system_data=True)
+        self.configure(application_record=str(self.application_records), hold_geometry_after_application=True)
+        start = time.monotonic()
+        result = self.client().tool("launch_application", application="org.example.Visible.desktop")
+        self.assertLess(time.monotonic() - start, 11)
+        self.assertFalse(result["isError"], result)
+        self.assertTrue(self.application_records.exists())
+        self.assertIn("Window listing unavailable:", result["content"][0]["text"])
 
     def test_application_dbus_dispatch_survives_worker_exit(self):
         self.application_catalog()
         client = self.client()
-        for arg in (None, "https://example.invalid/", "action://new-window"):
-            result = client.tool("launch_application", application="org.example.ScuApp.desktop", arg=arg)
+        for arguments in ({}, {"arg": "https://example.invalid/", "action": None}, {"action": "new-window"}):
+            result = client.tool("launch_application", application="org.example.ScuApp.desktop", **arguments)
             self.assertFalse(result["isError"], result)
         self.wait_until(lambda: len(json.loads(self.application_state.read_text())["calls"]) == 3)
         calls = json.loads(self.application_state.read_text())["calls"]
@@ -1280,13 +1377,20 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
             ("org.example.Visible", None, "invalid_application"),
             ("missing.desktop", None, "application_not_found"),
             ("org.example.Hidden.desktop", None, "application_not_found"),
-            ("org.example.Visible.desktop", "action://missing", "unknown_application_action"),
             ("org.example.Visible.desktop", "", "invalid_arguments"),
             ("org.example.Visible.desktop", "relative.txt", "invalid_arguments"),
             ("org.example.None.desktop", "/tmp/anything", "unsupported_application_argument"),
             ("org.example.File.desktop", "https://example.invalid/", "unsupported_application_argument"),
         ]:
             result = client.tool("launch_application", application=app, arg=arg)
+            self.assertEqual(read_result(result)["code"], code, result)
+        for arguments, code in [
+            ({"action": "missing"}, "unknown_application_action"),
+            ({"action": ""}, "invalid_arguments"),
+            ({"action": "new-window", "arg": "https://example.invalid/"}, "invalid_arguments"),
+            ({"action": "new-window", "arg": ""}, "invalid_arguments"),
+        ]:
+            result = client.tool("launch_application", application="org.example.Visible.desktop", **arguments)
             self.assertEqual(read_result(result)["code"], code, result)
         self.assertEqual(json.loads(self.application_state.read_text())["scopes"], [])
         self.configure(scope_error=True)
@@ -1318,8 +1422,13 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
             self.assertTrue(tools["search_applications"]["annotations"]["readOnlyHint"])
             self.assertFalse(tools["launch_application"]["annotations"]["readOnlyHint"])
             self.assertEqual(tools["launch_application"]["inputSchema"]["required"], ["application"])
+            properties = tools["launch_application"]["inputSchema"]["properties"]
+            self.assertEqual(set(properties), {"application", "arg", "action"})
+            self.assertEqual([v["type"] for v in properties["action"]["anyOf"]], ["string", "null"])
             for name, args in [("search_applications", {"pattern": 5}), ("launch_application", {}),
                                ("launch_application", {"application": "org.example.Visible.desktop", "arg": []}),
+                               ("launch_application", {"application": "org.example.Visible.desktop", "action": []}),
+                               ("launch_application", {"application": "org.example.Visible.desktop", "action": 5}),
                                ("launch_application", {"application": None}),
                                ("launch_application", {"application": "org.example.Visible.desktop", "args": []})]:
                 self.assertEqual(read_result(client.tool(name, **args))["code"], "invalid_arguments")
@@ -1359,17 +1468,21 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
             self.assertNotIn('"apps":', text)
             self.assertFalse(any(b["type"] == "image" for b in response["content"]))
 
-    def test_status_observation_is_an_optional_boolean(self):
+    def test_status_observation_is_only_available_with_vision(self):
         self.start_host()
         for no_vision in (False, True):
             client = self.client(no_vision=no_vision)
             tools = client.call("tools/list", {})["result"]["tools"]
             schema = next(tool for tool in tools if tool["name"] == "status")["inputSchema"]
-            self.assertEqual(schema["properties"]["observation"], {
-                "type": "boolean", "default": False,
-                "description": "Return a desktop screenshot. Defaults to false."})
+            if no_vision:
+                self.assertEqual(schema["properties"], {})
+            else:
+                self.assertEqual(schema["properties"]["observation"], {
+                    "type": "boolean", "default": False,
+                    "description": "Return a desktop screenshot. Defaults to false."})
             self.assertNotIn("observation", schema.get("required", []))
-            for arguments in ({}, {"observation": False}, {"observation": True}, {}):
+            arguments_list = ({}, {}) if no_vision else ({}, {"observation": False}, {"observation": True}, {})
+            for arguments in arguments_list:
                 with self.subTest(no_vision=no_vision, arguments=arguments):
                     response = client.tool("status", **arguments)
                     self.assertFalse(response["isError"], response)
@@ -1378,7 +1491,8 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
                                      arguments.get("observation", False) and not no_vision)
                     if arguments.get("observation") and not no_vision:
                         self.assertEqual(self.image(response).size, (160, 120))
-            for value in (None, 0, "true", {}, []):
+            invalid_values = (False, True, None, 0, "true", {}, []) if no_vision else (None, 0, "true", {}, [])
+            for value in invalid_values:
                 response = client.tool("status", observation=value)
                 self.assertTrue(response["isError"], response)
                 self.assertEqual(read_result(response)["code"], "invalid_arguments")
@@ -1779,7 +1893,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
     def test_no_vision_status_initializes_canvas_and_is_frontend_local(self):
         self.start_shared()
         hidden, normal = self.client(no_vision=True), self.client()
-        response = hidden.tool("status", observation=True)
+        response = hidden.tool("status")
         self.assertFalse(response["isError"], response)
         self.assertEqual([block["type"] for block in response["content"]], ["text"])
         data = read_result(response)
