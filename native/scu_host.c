@@ -1200,7 +1200,7 @@ static void append_accessible(Walk *state, AtspiAccessible *node,
         if (accessible_has_state(node, ATSPI_STATE_SELECTED)) result_boolean(row, "selected", TRUE);
         if (accessible_has_state(node, ATSPI_STATE_CHECKED)) result_boolean(row, "checked", TRUE);
         if (password) result_boolean(row, "protected", TRUE);
-        else if (value && g_strcmp0(value, name)) result_string(row, "value", value);
+        else if (value && *value && g_strcmp0(value, name)) result_string(row, "value", value);
         gboolean shortened = value && value_shortened;
         if (!prose || !prose_value_covers_label(name, value, type == ATSPI_ROLE_PARAGRAPH))
             shortened |= name_shortened;
