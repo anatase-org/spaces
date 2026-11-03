@@ -1200,6 +1200,13 @@ static char *tool_result_text(const Tool *tool, JsonResult *output)
                 if (yyjson_mut_is_false(yyjson_mut_obj_get(window, "shown"))) g_string_append(text, " hidden");
                 g_string_append(text, " bounds=");
                 append_result_frame(text, yyjson_mut_obj_get(window, "bounds"));
+                gboolean available = yyjson_mut_is_true(yyjson_mut_obj_get(window, "accessibility_available"));
+                g_string_append_printf(text, " accessibility=%s", available ? "yes" : "no");
+                if (!available) {
+                    JsonResult *error = yyjson_mut_obj_get(window, "accessibility_error");
+                    const char *reason = yyjson_mut_get_str(yyjson_mut_obj_get(error, "hint"));
+                    if (reason) g_string_append_printf(text, " (%s)", reason);
+                }
                 g_string_append_c(text, '\n');
             }
         }

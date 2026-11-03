@@ -870,7 +870,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertEqual(state()["registrations"], 0, "schema discovery activated accessibility")
         window = first.windows()[0]["window_id"]
         self.status(second)
-        self.assertEqual(state()["registrations"], 0, "status activated accessibility")
+        self.assertEqual(state()["registrations"], 1, "status must initialize the shared accessibility consumer")
         self.snapshot_accessibility(first, window)
         self.snapshot_accessibility(second, window)
         self.assertEqual(state()["registrations"], 1)
@@ -1066,12 +1066,12 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertIn("Fixture button", [row["label"] for row in tree["elements"]])
         self.assertLess(time.monotonic() - started, 3)
         state = json.loads(self.atspi_state.read_text())
-        # Refresh once before association and once before the selected snapshot.
-        self.assertEqual(state["attribute_queries"], 2)
+        # Refresh for status, association, and the selected snapshot.
+        self.assertEqual(state["attribute_queries"], 3)
         self.assertNotIn("snapshot_id", tree)
         self.assertEqual([row["element_id"] for row in self.snapshot(client)["elements"]],
                          [row["element_id"] for row in tree["elements"]])
-        self.assertEqual(json.loads(self.atspi_state.read_text())["attribute_queries"], 4)
+        self.assertEqual(json.loads(self.atspi_state.read_text())["attribute_queries"], 6)
 
     def test_unsupported_frame_attributes_preserve_existing_tree(self):
         self.start_accessibility(unsupported=True)
@@ -1097,12 +1097,13 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.start_host()
         client = self.client()
         windows = client.windows()
+        queries = json.loads(self.atspi_state.read_text())["attribute_queries"]
         client.serial += 1
         client.process.stdin.write(json.dumps({"jsonrpc": "2.0", "id": client.serial,
             "method": "tools/call", "params": {"name": "accessibility", "arguments": {
                 "observations": {"window": windows[0]["window_id"]}}}}) + "\n")
         client.process.stdin.flush()
-        self.wait_until(lambda: json.loads(self.atspi_state.read_text())["attribute_queries"] > 0)
+        self.wait_until(lambda: json.loads(self.atspi_state.read_text())["attribute_queries"] > queries)
         client.process.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/cancelled",
             "params": {"requestId": client.serial}}) + "\n")
         client.process.stdin.flush()
@@ -1110,7 +1111,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertFalse(select.select([client.process.stdout], [], [], .1)[0])
         self.assertEqual(json.loads(self.atspi_state.read_text())["registrations"], 1)
         self.status(client)
-        self.assertEqual(json.loads(self.atspi_state.read_text())["registrations"], 1)
+        self.assertEqual(json.loads(self.atspi_state.read_text())["registrations"], 2)
         self.snapshot_accessibility(client, windows[0]["window_id"])
         self.assertEqual(json.loads(self.atspi_state.read_text())["registrations"], 2)
 
@@ -1189,8 +1190,154 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
             self.assertIn("Canvas: 160 x 120\n", text)
             self.assertNotIn("; id:", text)
             self.assertIn(f'window_id={window["window_id"]} {json.dumps(window["title"])} active bounds=', text)
+            self.assertTrue(window["accessibility_available"])
+            self.assertNotIn("accessibility_error", window)
+            self.assertIn(" accessibility=yes\n", text)
             self.assertNotIn('"apps":', text)
             self.assertEqual(any(b["type"] == "image" for b in response["content"]), not no_vision)
+
+    def test_status_accessibility_reports_short_matching_failures(self):
+        self.start_host()
+        cases = ((dict(window_title="Missing", bad_client=True), "no match"),
+                 (dict(duplicate_identity=True, duplicate_pid=self.atspi.pid), "ambiguous"),
+                 (dict(app_pid=self.atspi.pid + 100000, bad_client=True), "geometry mismatch"))
+        for settings, reason in cases:
+            self.configure(window_title="scu test window", bad_client=False,
+                           app_pid=self.atspi.pid, duplicate_identity=False)
+            self.configure(**settings)
+            for no_vision in (False, True):
+                with self.subTest(reason=reason, no_vision=no_vision):
+                    client = self.client(no_vision=no_vision)
+                    result = self.status(client)
+                    for app in read_result(result)["apps"]:
+                        for window in app["windows"]:
+                            self.assertFalse(window["accessibility_available"])
+                            self.assertEqual(window["accessibility_error"]["hint"], reason)
+                    text = result["content"][0]["text"]
+                    self.assertIn(f" accessibility=no ({reason})\n", text)
+                    self.assertNotIn("eligible AT-SPI", text)
+                    self.assertNotIn("accessibility_window_", text)
+
+    def test_status_accessibility_uses_one_inventory_for_mixed_windows(self):
+        self.start_accessibility(two_windows=True, reading_text=True)
+        self.start_host(duplicate_identity=True, duplicate_pid=self.atspi.pid)
+        client = self.client()
+        for request in range(1, 3):
+            windows = read_result(self.status(client))["apps"][0]["windows"]
+            self.assertEqual([w["accessibility_available"] for w in windows], [False, True, False])
+            self.assertEqual(windows[0]["accessibility_error"]["hint"], "ambiguous")
+            state = json.loads(self.atspi_state.read_text())
+            self.assertEqual(state["attribute_queries"], 2 * request)
+            self.assertEqual(state["reading_text_reads"], 0)
+            self.assertEqual(state["registrations"], 1)
+
+    def test_status_accessibility_preserves_element_handles_and_tree_baseline(self):
+        self.start_accessibility(reading_text=True)
+        self.start_host()
+        client = self.client()
+        window = client.windows()[0]["window_id"]
+        tree = read_result(client.tool("accessibility", observations={"window": window, "refresh": True}))["observations"][0]
+        button = next(row for row in tree["elements"] if row["label"] == "Fixture button")
+        self.assertEqual(button["element_id"], 1, "status must not allocate element handles")
+        before = json.loads(self.atspi_state.read_text())
+        self.status(client)
+        after = json.loads(self.atspi_state.read_text())
+        self.assertEqual(after["reading_text_reads"], before["reading_text_reads"])
+        self.assertEqual(after["attribute_queries"], before["attribute_queries"] + 1)
+        unchanged = read_result(client.tool("accessibility", observations={"window": window}))["observations"][0]
+        self.assertEqual(unchanged["tree_diff"], "No Changes.\n")
+        result = client.tool("accessibility", steps=[{"tool": "activate", "args": {
+            "element_id": button["element_id"]}}])
+        self.assertFalse(result["isError"], result)
+        self.assertEqual(json.loads(self.atspi_state.read_text())["clicks"], 1)
+
+    def test_status_accessibility_backend_failure_preserves_visual_status(self):
+        self.start_host(accessibility=False, two_windows=True)
+        for no_vision in (False, True):
+            result = self.status(self.client(no_vision=no_vision))
+            windows = read_result(result)["apps"][0]["windows"]
+            self.assertEqual(len(windows), 2)
+            for window in windows:
+                self.assertFalse(window["accessibility_available"])
+                self.assertEqual(window["accessibility_error"]["hint"], "backend unavailable")
+            self.assertEqual(any(b["type"] == "image" for b in result["content"]), not no_vision)
+        self.start_accessibility()
+        self.assertTrue(self.client().windows()[0]["accessibility_available"])
+
+    def test_status_accessibility_missing_library_preserves_visual_status(self):
+        self.start_host()
+        self.stop(self.host)
+        library_dir = self.directory / "status-missing-atspi"
+        library_dir.mkdir()
+        (library_dir / "libatspi.so.0").write_bytes(b"invalid ELF")
+        self.environment["LD_LIBRARY_PATH"] = str(library_dir)
+        self.start_service()
+        result = self.status(self.client())
+        window = read_result(result)["apps"][0]["windows"][0]
+        self.assertFalse(window["accessibility_available"])
+        self.assertEqual(window["accessibility_error"]["hint"], "missing library")
+        self.assertEqual(self.image(result).size, (160, 120))
+
+    def test_status_accessibility_discovery_timeout_is_bounded_and_recovers(self):
+        self.start_accessibility()
+        peers = [self.add_accessibility_application() for _ in range(3)]
+        self.start_host()
+        client = self.client()
+        self.status(client)
+        holds = [path.with_suffix(".hold-attributes")
+                 for path in [self.atspi_state, *(state for _, state in peers)]]
+        try:
+            for hold in holds:
+                hold.touch()
+            started = time.monotonic()
+            result = self.status(client)
+            elapsed = time.monotonic() - started
+            self.assertGreaterEqual(elapsed, 1.9)
+            self.assertLess(elapsed, 3.5)
+            window = read_result(result)["apps"][0]["windows"][0]
+            self.assertFalse(window["accessibility_available"])
+            self.assertEqual(window["accessibility_error"]["hint"], "timeout")
+            self.assertEqual(self.image(result).size, (160, 120))
+        finally:
+            for hold in holds:
+                hold.unlink(missing_ok=True)
+        self.assertTrue(read_result(self.status(client))["apps"][0]["windows"][0]["accessibility_available"])
+
+    def test_status_accessibility_preserves_the_outer_status_deadline(self):
+        self.environment["SCU_TEST_STATUS_TIMEOUT_MS"] = "250"
+        self.start_host()
+        hold = self.atspi_state.with_suffix(".hold-attributes")
+        hold.touch()
+        try:
+            client = self.client()
+            result = client.tool("status")
+            self.assertTrue(result["isError"], result)
+            self.assertEqual(read_result(result)["code"], "timeout")
+        finally:
+            hold.unlink(missing_ok=True)
+        self.status(client)
+
+    def test_status_accessibility_discovery_remains_cancellable(self):
+        self.start_host()
+        client = self.client()
+        self.status(client)
+        before = json.loads(self.atspi_state.read_text())["attribute_queries"]
+        hold = self.atspi_state.with_suffix(".hold-attributes")
+        hold.touch()
+        try:
+            client.serial += 1
+            client.process.stdin.write(json.dumps({"jsonrpc": "2.0", "id": client.serial,
+                "method": "tools/call", "params": {"name": "status", "arguments": {}}}) + "\n")
+            client.process.stdin.flush()
+            self.wait_until(lambda: json.loads(self.atspi_state.read_text())["attribute_queries"] > before)
+            client.process.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/cancelled",
+                "params": {"requestId": client.serial}}) + "\n")
+            client.process.stdin.flush()
+            self.assertFalse(select.select([client.process.stdout], [], [], .3)[0],
+                             "cancelled discovery returned a successful status")
+        finally:
+            hold.unlink(missing_ok=True)
+        self.status(client)
 
     def test_blocklisted_compositor_windows_are_absent_from_discovery_and_matching(self):
         self.start_accessibility()
@@ -2519,6 +2666,8 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.start_host(bad_client=True)
         client = self.client()
         app = read_result(self.status(client))["apps"][0]
+        self.assertTrue(app["windows"][0]["accessibility_available"],
+                        "semantic availability does not require vision coordinates")
         result = client.tool("vision", observations={"window": app["windows"][0]["window_id"], "refresh": True})
         self.assertFalse(result["isError"], result)
         self.assertEqual(read_result(result)["observations"][0]["accessibility_error"]["code"], "accessibility_geometry_mismatch")

@@ -78,10 +78,19 @@ def read_result(response):
                 match = re.match(r'    window_id=(\d+) ', line)
                 title, end = DECODER.raw_decode(line[match.end():])
                 rest = line[match.end() + end:]
-                bounds = json.loads(rest.split(' bounds=', 1)[1])
-                app['windows'].append(dict(window_id=int(match[1]), title=title,
+                frame_text = rest.split(' bounds=', 1)[1]
+                bounds, end = DECODER.raw_decode(frame_text)
+                accessibility = re.fullmatch(r' accessibility=(yes|no)(?: \(([^)]+)\))?',
+                                             frame_text[end:])
+                if accessibility is None:
+                    raise ValueError(f'Missing accessibility status: {line!r}')
+                window = dict(window_id=int(match[1]), title=title,
                     active=' active' in rest, shown=' hidden' not in rest,
-                    bounds=dict(zip(('x', 'y', 'width', 'height'), bounds))))
+                    bounds=dict(zip(('x', 'y', 'width', 'height'), bounds)),
+                    accessibility_available=accessibility[1] == 'yes')
+                if accessibility[2]:
+                    window['accessibility_error'] = dict(hint=accessibility[2])
+                app['windows'].append(window)
             elif match := re.fullmatch(r'Status: (\w+). completed: (\d+)', line):
                 result.update(status=match[1], completed=int(match[2]), observations=[])
             elif match := re.fullmatch(r'(Window (\d+)|Desktop)(?:; (\d+) x (\d+))?', line):

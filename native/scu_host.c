@@ -36,6 +36,7 @@ static void *scu_library(const char *soname);
 static JsonResult *scu_status(void);
 static JsonResult *canvas_status(void);
 static JsonResult *kwin_status(void);
+static gboolean status_accessibility(JsonResult *apps);
 static gboolean require_computer_access(void);
 static void stop_atspi_worker(void);
 static int run_atspi_worker(guint base);
@@ -3131,7 +3132,9 @@ static JsonResult *kwin_status(void)
         return scu_fail("stale_capture", scu_text_status_geometry_changed);
     }
     result_member(result, "canvas", canvas);
-    result_member(result, "apps", kwin_apps());
+    JsonResult *apps = kwin_apps();
+    if (!status_accessibility(apps)) return NULL;
+    result_member(result, "apps", apps);
     if (!desktop_refresh_lock()) return NULL;
     gboolean locked = desktop_is_locked() || scu.lock_seen;
     result_boolean(result, "locked", locked);
@@ -3307,9 +3310,105 @@ static AccessibilityMatch find_accessibility_match(JsonValue *window,
     return result;
 }
 
+/* Status and observations must agree on which semantic subtree is selected. */
+static AccessibilityMatch select_accessibility_match(JsonValue *window,
+    JsonValue *apps, gboolean read_text, gint64 *filtered_pid)
+{
+    /* Filter by process first. Search all applications only when AT-SPI
+     * lacks the compositor PID, as can happen with sandboxed applications. */
+    gint64 pid = json_number(window, "pid", 0);
+    gint64 pid_filter = accessibility_has_pid(apps, pid) ? pid : 0;
+    if (filtered_pid) *filtered_pid = pid_filter;
+    /* PID+title identifies a semantic tree without requiring screenshot
+     * geometry. Cross-process matches still need geometric evidence. */
+    AccessibilityEvidence evidence = {.title = TRUE, .size = !read_text || !pid_filter};
+    AccessibilityMatch match = find_accessibility_match(window, apps, pid_filter, evidence);
+    /* Geometry may refine repeated names even though it is unnecessary
+     * for a unique semantic identity. */
+    if (!evidence.size && (match.matches > 1 || match.ambiguous)) {
+        AccessibilityMatch sized = find_accessibility_match(window, apps, pid_filter,
+            (AccessibilityEvidence){.title = TRUE, .size = TRUE});
+        if (sized.matches == 1 && !sized.ambiguous) match = sized;
+    }
+    if (match.matches != 1 || match.ambiguous) {
+        /* Refine repeated titles with position; never discard a conflicting
+         * title identity merely because another object has the same size. */
+        gboolean title = match.matches || match.ambiguous;
+        AccessibilityMatch positioned = find_accessibility_match(window, apps, pid_filter,
+            (AccessibilityEvidence){.title = title, .size = TRUE, .position = TRUE});
+        if (positioned.matches == 1 && !positioned.ambiguous) match = positioned;
+        else if (!title)
+            match = find_accessibility_match(window, apps, pid_filter,
+                (AccessibilityEvidence){.size = TRUE});
+    }
+    return match;
+}
+
+static const char *accessibility_match_error(const AccessibilityMatch *match)
+{
+    return match->matches > 1 || match->ambiguous ? "accessibility_window_ambiguous"
+        : match->titles && !match->sizes ? "accessibility_geometry_mismatch" : "accessibility_window_unmatched";
+}
+
 /* Semantic rectangles are private window-relative coordinates until a unique
  * KWin association anchors them. Raw rectangles never cross the MCP boundary. */
+static JsonValue *kwin_window_for_id(gint64 id);
 static JsonValue *requested_kwin_window(JsonValue *args);
+
+/* One bounded inventory serves all status windows. This checks association,
+ * not tree traversal, so existing element handles and tree baselines survive. */
+static gboolean status_accessibility(JsonResult *apps)
+{
+    gint64 deadline = scu.deadline;
+    gint64 until = g_get_monotonic_time() + 2 * G_USEC_PER_SEC;
+    scu.deadline = deadline ? MIN(deadline, until) : until;
+    JsonResult *discovery = atspi_worker_call("list_apps", NULL);
+    scu.deadline = deadline;
+    char *backend_code = NULL;
+    if (!discovery) {
+        if (g_strcmp0(scu.code, "accessibility_unavailable") &&
+            g_strcmp0(scu.code, "missing_dependency") && g_strcmp0(scu.code, "timeout"))
+            return FALSE;
+        backend_code = g_strdup(scu.code);
+        clear_tool_error();
+    }
+    if (!require_computer_access()) { g_free(backend_code); return FALSE; }
+    yyjson_doc *listing = discovery ? yyjson_mut_val_imut_copy(discovery, NULL) : NULL;
+    JsonValue *inventory = listing ? json_member(yyjson_doc_get_root(listing), "apps") : NULL;
+    JsonResult *app, *item;
+    size_t i, n, j, m;
+    yyjson_mut_arr_foreach(apps, i, n, app) {
+        yyjson_mut_arr_foreach(yyjson_mut_obj_get(app, "windows"), j, m, item) {
+            const char *code = backend_code;
+            if (!code) {
+                JsonValue *window = kwin_window_for_id(yyjson_mut_get_sint(yyjson_mut_obj_get(item, "window_id")));
+                if (!window) {
+                    yyjson_doc_free(listing);
+                    g_free(backend_code);
+                    scu_fail("window_unavailable", scu_text_kwin_window_unavailable);
+                    return FALSE;
+                }
+                AccessibilityMatch match = select_accessibility_match(window, inventory, TRUE, NULL);
+                if (match.matches != 1 || match.ambiguous) code = accessibility_match_error(&match);
+            }
+            result_boolean(item, "accessibility_available", !code);
+            if (code) {
+                const char *reason = !strcmp(code, "accessibility_window_unmatched") ? "no match"
+                    : !strcmp(code, "accessibility_window_ambiguous") ? "ambiguous"
+                    : !strcmp(code, "accessibility_geometry_mismatch") ? "geometry mismatch"
+                    : !strcmp(code, "missing_dependency") ? "missing library"
+                    : !strcmp(code, "timeout") ? "timeout" : "backend unavailable";
+                JsonResult *error = result_object();
+                result_string(error, "code", code);
+                result_string(error, "hint", reason);
+                result_member(item, "accessibility_error", error);
+            }
+        }
+    }
+    yyjson_doc_free(listing);
+    g_free(backend_code);
+    return TRUE;
+}
 
 static JsonResult *window_tree(JsonValue *args, gboolean read_text)
 {
@@ -3330,40 +3429,14 @@ static JsonResult *window_tree(JsonValue *args, gboolean read_text)
             return scu_fail("window_unavailable", scu_text_kwin_window_unavailable);
         }
         JsonValue *apps = json_member(yyjson_doc_get_root(listing), "apps");
-        /* Filter by process first. Search all applications only when AT-SPI
-         * lacks the compositor PID, as can happen with sandboxed applications. */
-        gint64 pid = json_number(window, "pid", 0);
-        pid_filter = accessibility_has_pid(apps, pid) ? pid : 0;
-        /* PID+title identifies a semantic tree without requiring screenshot
-         * geometry. Cross-process matches still need geometric evidence. */
-        AccessibilityEvidence evidence = {.title = TRUE, .size = !read_text || !pid_filter};
-        match = find_accessibility_match(window, apps, pid_filter, evidence);
-        /* Geometry may refine repeated names even though it is unnecessary
-         * for a unique semantic identity. */
-        if (!evidence.size && (match.matches > 1 || match.ambiguous)) {
-            AccessibilityMatch sized = find_accessibility_match(window, apps, pid_filter,
-                (AccessibilityEvidence){.title = TRUE, .size = TRUE});
-            if (sized.matches == 1 && !sized.ambiguous) match = sized;
-        }
-        if (match.matches != 1 || match.ambiguous) {
-            /* Refine repeated titles with position; never discard a conflicting
-             * title identity merely because another object has the same size. */
-            gboolean title = match.matches || match.ambiguous;
-            AccessibilityMatch positioned = find_accessibility_match(window, apps, pid_filter,
-                (AccessibilityEvidence){.title = title, .size = TRUE, .position = TRUE});
-            if (positioned.matches == 1 && !positioned.ambiguous) match = positioned;
-            else if (!title)
-                match = find_accessibility_match(window, apps, pid_filter,
-                    (AccessibilityEvidence){.size = TRUE});
-        }
+        match = select_accessibility_match(window, apps, read_text, &pid_filter);
         /* Navigation can briefly leave several equally sized frames with old
          * titles. Let both inventories settle before rejecting ambiguity. */
         if ((match.matches == 1 && !match.ambiguous) || g_get_monotonic_time() >= until) break;
         if (!scu_pause(50)) { yyjson_doc_free(listing); return NULL; }
     } while (TRUE);
     if (match.matches != 1 || match.ambiguous) {
-        const char *code = match.matches > 1 || match.ambiguous ? "accessibility_window_ambiguous"
-            : match.titles && !match.sizes ? "accessibility_geometry_mismatch" : "accessibility_window_unmatched";
+        const char *code = accessibility_match_error(&match);
         char *hint = g_strdup_printf(scu_text_window_association_failed, pid_filter, match.frames, match.titles, match.sizes, match.positions);
         scu_fail(code, hint);
         g_free(hint);
@@ -3415,17 +3488,22 @@ static JsonResult *window_tree(JsonValue *args, gboolean read_text)
     return tree;
 }
 
-static JsonValue *requested_kwin_window(JsonValue *args)
+static JsonValue *kwin_window_for_id(gint64 id)
 {
     size_t i, n;
     JsonValue *window;
     yyjson_arr_foreach(json_member(yyjson_doc_get_root(visual.geometry), "windows"), i, n, window) {
         if (json_string(window, "key") && kwin_window_id(json_string(window, "key")) ==
-                json_number(args, "window_id", -1)) {
+                id) {
             return window;
         }
     }
     return NULL;
+}
+
+static JsonValue *requested_kwin_window(JsonValue *args)
+{
+    return kwin_window_for_id(json_number(args, "window_id", -1));
 }
 
 static JsonResult *window_image(JsonValue *window)
