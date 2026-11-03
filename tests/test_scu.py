@@ -792,7 +792,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertTrue(self.display_state.exists())
 
     def status(self, client):
-        result = client.tool("status")
+        result = client.tool("status", observation=True)
         self.assertFalse(result["isError"], result)
         return result
 
@@ -1194,7 +1194,31 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
             self.assertNotIn("accessibility_error", window)
             self.assertIn(" accessibility=yes\n", text)
             self.assertNotIn('"apps":', text)
-            self.assertEqual(any(b["type"] == "image" for b in response["content"]), not no_vision)
+            self.assertFalse(any(b["type"] == "image" for b in response["content"]))
+
+    def test_status_observation_is_an_optional_boolean(self):
+        self.start_host()
+        for no_vision in (False, True):
+            client = self.client(no_vision=no_vision)
+            tools = client.call("tools/list", {})["result"]["tools"]
+            schema = next(tool for tool in tools if tool["name"] == "status")["inputSchema"]
+            self.assertEqual(schema["properties"]["observation"], {
+                "type": "boolean", "default": False,
+                "description": "Return a desktop screenshot. Defaults to false."})
+            self.assertNotIn("observation", schema.get("required", []))
+            for arguments in ({}, {"observation": False}, {"observation": True}, {}):
+                with self.subTest(no_vision=no_vision, arguments=arguments):
+                    response = client.tool("status", **arguments)
+                    self.assertFalse(response["isError"], response)
+                    self.assertEqual(read_result(response)["canvas"], {"width": 160, "height": 120})
+                    self.assertEqual(sum(block["type"] == "image" for block in response["content"]),
+                                     arguments.get("observation", False) and not no_vision)
+                    if arguments.get("observation") and not no_vision:
+                        self.assertEqual(self.image(response).size, (160, 120))
+            for value in (None, 0, "true", {}, []):
+                response = client.tool("status", observation=value)
+                self.assertTrue(response["isError"], response)
+                self.assertEqual(read_result(response)["code"], "invalid_arguments")
 
     def test_status_groups_windows_by_application_name(self):
         self.start_accessibility()
@@ -1592,7 +1616,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
     def test_no_vision_status_initializes_canvas_and_is_frontend_local(self):
         self.start_shared()
         hidden, normal = self.client(no_vision=True), self.client()
-        response = hidden.tool("status")
+        response = hidden.tool("status", observation=True)
         self.assertFalse(response["isError"], response)
         self.assertEqual([block["type"] for block in response["content"]], ["text"])
         data = read_result(response)
@@ -1606,7 +1630,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertFalse(tree["isError"], tree)
         self.assertIn("elements", read_result(tree)["observations"][0])
         self.assertFalse(any(block["type"] == "image" for block in tree["content"]))
-        self.assertTrue(any(block["type"] == "image" for block in normal.tool("status")["content"]))
+        self.assertTrue(any(block["type"] == "image" for block in normal.tool("status", observation=True)["content"]))
         self.assertFalse(normal.tool("vision")["isError"])
         self.assertEqual(read_result(hidden.tool("vision"))["code"], "unknown_tool")
         hidden.close()

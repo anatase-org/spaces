@@ -57,7 +57,8 @@ static const char no_vision_instructions[] =
     "This MCP has no vision support.";
 
 static const char status_description[] =
-    "Run first for health checks, canvas metadata, apps/windows and a full desktop screenshot. "
+    "Run first for health checks, canvas metadata and apps/windows. "
+    "Set observation:true to return a desktop screenshot (default:false). "
     "Window bounds, element frames and pixel actions share the full screenshot's coordinates.";
 static const char no_vision_status_description[] =
     "Run first for health checks, canvas metadata, apps and windows.";
@@ -474,6 +475,11 @@ static const Argument delay_arguments[] = {
         .description = "Milliseconds to wait."},
     {NULL},
 };
+static const Argument status_arguments[] = {
+    {.name = "observation", .type = ARG_BOOLEAN,
+        .description = "Return a desktop screenshot. Defaults to false."},
+    {NULL},
+};
 static const Argument vision_arguments[] = {
     {.name = "steps", .type = ARG_OBJECT_ARRAY, .maximum = 64,
         .description = "Optional ordered {tool,args} actions. Omit or pass [] to observe without acting."},
@@ -502,7 +508,7 @@ static const char *const require_delay[] = {"ms", NULL};
 static const Tool tools[] = {
     {.name = "status",
         status_description,
-        ARGS_NONE},
+        .arguments = status_arguments},
     {.name = "vision",
         vision_description,
         .arguments = vision_arguments, .action = TRUE, .batch = BATCH_VISION},
@@ -714,6 +720,7 @@ static void add_argument_schemas(JsonResult *properties, const Argument *argumen
             break;
         case ARG_BOOLEAN:
             type = "boolean";
+            result_boolean(property, "default", FALSE);
             break;
         case ARG_STRING_ARRAY:
         case ARG_OBJECT_ARRAY:

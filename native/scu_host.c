@@ -33,9 +33,9 @@ static JsonResult *scu_action(
 static gboolean scu_tick(void);
 static gboolean scu_pause(unsigned ms);
 static void *scu_library(const char *soname);
-static JsonResult *scu_status(void);
+static JsonResult *scu_status(gboolean observation);
 static JsonResult *canvas_status(void);
-static JsonResult *kwin_status(void);
+static JsonResult *kwin_status(gboolean observation);
 static gboolean status_accessibility(JsonResult *apps);
 static gboolean require_computer_access(void);
 static void stop_atspi_worker(void);
@@ -164,10 +164,10 @@ static JsonResult *scu_action(
 
 /* Status is an observation: it must establish a real canvas, not merely
  * report cached dimensions. Discovery remains available through MCP itself. */
-static JsonResult *scu_status(void)
+static JsonResult *scu_status(gboolean observation)
 {
     scu.deadline = MIN(scu.deadline, g_get_monotonic_time() + (gint64)SCU_STATUS_TIMEOUT_MS * 1000);
-    return kwin_status();
+    return kwin_status(observation);
 }
 
 /* Host accessibility: discovery, snapshots and semantic actions. */
@@ -3118,7 +3118,7 @@ static JsonResult *kwin_apps(void)
     return apps;
 }
 
-static JsonResult *kwin_status(void)
+static JsonResult *kwin_status(gboolean observation)
 {
     if (!ensure_visual_session()) {
         return NULL;
@@ -3138,7 +3138,7 @@ static JsonResult *kwin_status(void)
     if (!desktop_refresh_lock()) return NULL;
     gboolean locked = desktop_is_locked() || scu.lock_seen;
     result_boolean(result, "locked", locked);
-    if (locked) scu.images = result_array();
+    if (locked || !observation) scu.images = result_array();
     return result;
 }
 
@@ -4645,7 +4645,7 @@ static JsonResult *execute_tool(const Tool *t, JsonValue *args)
         return NULL;
     }
     if (!strcmp(t->name, "status")) {
-        return scu_status();
+        return scu_status(json_boolean(args, "observation"));
     }
     if (t->batch != BATCH_NONE) {
         return run_batch(t, args);
