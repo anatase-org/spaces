@@ -449,7 +449,10 @@ class PermissionForm(
         ),
         "basic": PermissionOption(
             _("Basic desktop integration"),
-            _("Allow graphical applications to use the host login session."),
+            _(
+                "Allow graphical applications to use the host login session "
+                "and expose their accessibility trees to host tools."
+            ),
         ),
         "accessibility": PermissionOption(
             _("Plus Accessibility and Agent computer use"),

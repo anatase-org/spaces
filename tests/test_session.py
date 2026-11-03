@@ -767,6 +767,11 @@ class StatusAndEnvironmentTests(unittest.TestCase):
 
 class DesktopControllerTests(unittest.TestCase):
     def setUp(self) -> None:
+        discovery = mock.patch.object(
+            session, "discover_accessibility_bus", side_effect=core.SpacesError("no test accessibility bus")
+        )
+        discovery.start()
+        self.addCleanup(discovery.stop)
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.desktop_user = user(self.root)
@@ -1181,6 +1186,7 @@ class DesktopControllerTests(unittest.TestCase):
 
         with (
             mock.patch.object(self.controller, "_prepare_guest_root"),
+            mock.patch.object(self.controller, "_repair_accessibility"),
             mock.patch.object(
                 session,
                 "start_portal_proxy",
@@ -1213,6 +1219,10 @@ class DesktopControllerTests(unittest.TestCase):
                     ],
                     environment=plan.environment,
                 ),
+                mock.call(self.desktop_user, ["/run/spaces-host/bin/spaces-portal", "--install-accessibility"]),
+                mock.call(self.desktop_user, ["/usr/bin/systemctl", "--user", "stop", "at-spi-dbus-bus.service"]),
+                mock.call(self.desktop_user, ["/usr/bin/systemctl", "--user", "start", "spaces-portal.service"]),
+                mock.call(self.desktop_user, ["/run/spaces-host/bin/spaces-portal", "--check-accessibility"]),
                 mock.call(
                     self.desktop_user,
                     [
@@ -1224,7 +1234,7 @@ class DesktopControllerTests(unittest.TestCase):
                 ),
             ],
         )
-        self.assertEqual(events, ["mount", "environment", "start"])
+        self.assertEqual(events, ["mount", "environment", "start", "start", "start", "start", "start"])
         self.assertIs(active.portal, proxy)
         self.assertEqual(active.portal_binding, binding)
         self.assertTrue(active.graphical_session)

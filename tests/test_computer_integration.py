@@ -286,9 +286,9 @@ class ComputerLifecycleTests(unittest.TestCase):
         with self.assertRaisesRegex(session.DesktopSetupError, "planning failed"):
             self.reconcile_settings()
         self.service.close.assert_called_once()
-        self.a11y_proxy.close.assert_called_once()
+        self.a11y_proxy.close.assert_not_called()
         self.assertIsNone(self.current.computer)
-        self.assertIsNone(self.current.accessibility)
+        self.assertIs(self.current.accessibility, self.a11y_proxy)
 
     def test_session_replacement_still_revokes_before_settings_update(self):
         self.prepare_settings_update()

@@ -214,12 +214,12 @@ class AccessibilityLifecycleTests(unittest.TestCase):
         self.controller.reconcile_portals()
         self.assertEqual(self.start.call_count, 2)
 
-    def test_downgrade_closes_before_unmount_and_clears_environment(self):
+    def test_disabled_desktop_closes_before_unmount_and_clears_environment(self):
         self.controller.reconcile_portals()
         order = []
         self.proxy.close.side_effect = lambda: order.append("close")
         self.unmount.side_effect = lambda *_: order.append("unmount")
-        self.user.accessibility = False
+        self.user.desktop = False
         self.controller.reconcile_portals()
         self.assertEqual(order, ["close", "unmount"])
         self.assertIsNone(self.current.accessibility)
@@ -235,7 +235,7 @@ class AccessibilityLifecycleTests(unittest.TestCase):
 
     def test_failed_environment_clear_is_retried(self):
         self.controller.reconcile_portals()
-        self.user.accessibility = False
+        self.user.desktop = False
         self.command.side_effect = [RuntimeError("manager unavailable"), None]
         self.controller.reconcile_portals()
         self.assertTrue(self.current.accessibility_environment_dirty)
@@ -260,74 +260,55 @@ class AccessibilityLifecycleTests(unittest.TestCase):
                     self.addCleanup(self.listener.close)
                     self.listener.bind(str(self.path))
 
-    def test_basic_and_root_do_not_discover_host_bus(self):
-        for level, uid in ((False, 1000), (True, 0)):
-            self.user.accessibility = level
-            self.user.uid = uid
-            self.controller._repair_accessibility(self.user, self.current)
+    def test_basic_publishes_accessibility_but_root_does_not(self):
+        self.user.accessibility = False
+        self.current.plan = replace(self.current.plan, accessibility=False)
+        self.controller._repair_accessibility(self.user, self.current)
+        self.start.assert_called_once_with(
+            "test", self.user, "2", self.source, unrestricted=False
+        )
+        self.discover.reset_mock()
+        self.user.uid = 0
+        self.controller._repair_accessibility(self.user, self.current)
         self.discover.assert_not_called()
 
-    def test_downgrade_revokes_even_when_replanning_fails(self):
-        self.controller.reconcile_portals()
-        self.user.accessibility = False
-        login = session.LoginSession("2", True, False, "wayland", "user")
+    def test_forwarding_is_ready_before_guest_graphical_startup(self):
+        self.controller.portals_enabled = True
+        events = []
+        self.start.side_effect = lambda *args, **kwargs: (events.append("accessibility") or (self.proxy, self.binding))
+        portal = mock.Mock(socket_path=self.root / "portal")
         with (
-            mock.patch.object(
-                session,
-                "host_manager_environment",
-                return_value={"XDG_SESSION_ID": "2"},
-            ),
-            mock.patch.object(
-                session,
-                "_plan",
-                side_effect=RuntimeError("unrelated resource failed"),
-            ),
-            mock.patch.object(self.controller, "_remove_generated"),
+            mock.patch.object(self.controller, "_prepare_guest_root"),
+            mock.patch.object(self.controller, "_repair_computer"),
+            mock.patch.object(session, "start_portal_proxy", return_value=(portal, self.binding)),
+            mock.patch.object(self.controller, "_start_graphical_session",
+                              side_effect=lambda *args: events.append("graphical")) as graphical,
         ):
-            with self.assertRaises(session.DesktopSetupError):
-                self.controller.reconcile(self.user, (login,))
-        self.proxy.close.assert_called_once()
-        self.assertIsNone(self.current.accessibility)
+            active = self.controller._activate(self.user, self.current.plan)
+        self.assertEqual(events, ["accessibility", "graphical"])
+        self.assertEqual(graphical.call_args.args[1].environment["AT_SPI_BUS_ADDRESS"],
+                         "unix:path=" + self.binding.destination)
+        self.assertTrue(active.accessibility_activation)
 
-    def test_downgrade_revokes_before_reading_host_environment(self):
-        self.controller.reconcile_portals()
-        self.user.accessibility = False
-        with mock.patch.object(
-            session,
-            "host_manager_environment",
-            side_effect=RuntimeError("manager gone"),
-        ):
-            with self.assertRaises(RuntimeError):
-                self.controller.reconcile(self.user, ())
-        self.proxy.close.assert_called_once()
-        self.assertIsNone(self.current.accessibility)
+    def test_activation_environment_imports_accessibility_address_once(self):
+        plan = replace(self.current.plan, environment={
+            "SPACES_NAME": "test", "AT_SPI_BUS_ADDRESS": "unix:path=" + self.binding.destination
+        })
+        self.controller._start_graphical_session(self.user, plan)
+        command = self.command.call_args_list[0].args[1]
+        self.assertNotIn("AT_SPI_BUS_ADDRESS", command)
+        self.assertEqual(sum(arg.startswith("AT_SPI_BUS_ADDRESS=") for arg in command), 1)
+        self.assertIn("SPACES_NAME", command)
 
-    def test_failed_update_cannot_restore_revoked_permission(self):
+    def test_teardown_removes_activation_before_revoking_forwarding(self):
         self.controller.reconcile_portals()
-        self.user.accessibility = False
-        plan = replace(self.current.plan, accessibility=False)
-        login = session.LoginSession("2", True, False, "wayland", "user")
-        with (
-            mock.patch.object(
-                session,
-                "host_manager_environment",
-                return_value={"XDG_SESSION_ID": "2"},
-            ),
-            mock.patch.object(session, "_plan", return_value=plan),
-            mock.patch.object(self.controller, "_deactivate"),
-            mock.patch.object(
-                self.controller,
-                "_activate",
-                side_effect=[
-                    RuntimeError("mount failed"),
-                    session._ActiveDesktop(plan),
-                ],
-            ) as activate,
-        ):
-            with self.assertRaises(session.DesktopSetupError):
-                self.controller.reconcile(self.user, (login,))
-        self.assertFalse(activate.call_args_list[-1].args[1].accessibility)
-        self.assertIsNone(self.current.accessibility)
+        self.current.accessibility_activation = True
+        events = []
+        self.command.side_effect = lambda user, command, **kwargs: events.append(command[-1])
+        self.proxy.close.side_effect = lambda: events.append("close-proxy")
+        self.controller._deactivate(self.user, self.current)
+        self.assertLess(events.index("spaces-portal.service"), events.index("--remove-accessibility"))
+        self.assertLess(events.index("--remove-accessibility"), events.index("close-proxy"))
 
     def test_logout_closes_the_bridge(self):
         self.controller.reconcile_portals()
@@ -345,7 +326,11 @@ class AccessibilityLifecycleTests(unittest.TestCase):
             session, "start_portal_proxy", return_value=(portal, self.binding)
         ):
             self.controller._repair_portal(self.user, self.current)
-        command = self.command.call_args_list[-2].args[1]
+        command = next(
+            call.args[1] for call in self.command.call_args_list
+            if call.args[1][0] == session.DBUS_UPDATE_ACTIVATION_ENVIRONMENT
+            and any(arg.startswith("AT_SPI_BUS_ADDRESS=unix:") for arg in call.args[1])
+        )
         self.assertIn(
             "AT_SPI_BUS_ADDRESS=unix:path=" + self.binding.destination, command
         )
@@ -423,6 +408,11 @@ class AccessibilityProxyIntegrationTests(unittest.TestCase):
         )
         self.start_proxy()
 
+    @classmethod
+    def setUpClass(cls):
+        subprocess.run(["make", "-C", str(Path(__file__).resolve().parents[1] / "native"),
+                        "spaces-portal"], check=True, stdout=subprocess.DEVNULL)
+
     def start_proxy(self):
         real_popen = subprocess.Popen
 
@@ -497,6 +487,227 @@ class AccessibilityProxyIntegrationTests(unittest.TestCase):
             None,
         ).unpack()
 
+    def test_basic_provider_registration_callbacks_and_host_isolation(self):
+        self.proxy.close()
+        self.proxy.socket_path.unlink(missing_ok=True)
+        real_popen = subprocess.Popen
+
+        def proxy_popen(command, **kwargs):
+            return real_popen(command[command.index(session.XDG_DBUS_PROXY):], **kwargs)
+
+        with mock.patch.object(session, "RUNTIME_ROOT", self.root / "runtime"), mock.patch.object(
+            session.subprocess, "Popen", side_effect=proxy_popen
+        ):
+            self.proxy, self.binding = session.start_accessibility_proxy(
+                "test", self.user, "2", self.source, unrestricted=False
+            )
+        self.addCleanup(self.proxy.close)
+        self.client = self.connect("unix:path=" + str(self.proxy.socket_path))
+        self.client.set_exit_on_close(False)
+        self.addCleanup(lambda: self.client.close_sync(None) if not self.client.is_closed() else None)
+        root = "/org/a11y/atspi/accessible/root"
+        # A provider can register but cannot enumerate or operate host trees.
+        self.call("org.a11y.atspi.Registry", root, "org.a11y.atspi.Socket", "Embed",
+                  "((so))", ((self.client.get_unique_name(), "/guest"),))
+        for destination, interface, method, signature, args in (
+            ("org.a11y.atspi.Registry", "org.a11y.atspi.Accessible", "GetChildren", None, ()),
+            (self.application, "org.a11y.atspi.Action", "DoAction", "(i)", (0,)),
+            ("org.a11y.atspi.Registry", "org.a11y.atspi.Registry", "RegisterEvent", "(s)", ("object:state-changed",)),
+        ):
+            with self.subTest(method=method), self.assertRaises(self.GLib.Error):
+                self.call(destination, root, interface, method, signature, args)
+
+        # Real host -> proxied guest calls, including a reply and a signal.
+        guest_info = self.Gio.DBusNodeInfo.new_for_xml("""<node><interface name='org.a11y.atspi.Action'>
+        <method name='DoAction'><arg type='i' direction='in'/><arg type='b' direction='out'/></method>
+        </interface></node>""").interfaces[0]
+        actions = []
+
+        def act(connection, sender, path, interface, method, parameters, invocation):
+            actions.append(parameters.unpack()[0])
+            connection.emit_signal(None, path, "org.a11y.atspi.Event.Object", "StateChanged",
+                                   self.GLib.Variant("(s)", ("checked",)))
+            invocation.return_value(self.GLib.Variant("(b)", (True,)))
+
+        registration = self.client.register_object("/guest", guest_info, act, None, None)
+        self.addCleanup(self.client.unregister_object, registration)
+        host = self.connect(self.buses[1][0])
+        self.addCleanup(host.close_sync, None)
+        events = []
+        subscription = host.signal_subscribe(None, "org.a11y.atspi.Event.Object", "StateChanged",
+                                             "/guest", None, self.Gio.DBusSignalFlags.NONE,
+                                             lambda *args: events.append(args[5].unpack()))
+        self.addCleanup(host.signal_unsubscribe, subscription)
+        result = []
+
+        def finished(connection, reply):
+            try:
+                result.append(connection.call_finish(reply).unpack())
+            except self.GLib.Error as error:
+                result.append(error)
+
+        # The registry records the host-side unique name, as the real registry does.
+        state = host.call_sync("org.a11y.atspi.Registry", root, "org.spaces.Test", "State",
+                               None, None, self.Gio.DBusCallFlags.NONE, 3000, None).unpack()
+        provider = json.loads(state[0])["providers"][-1][0]
+        host.call(provider, "/guest", "org.a11y.atspi.Action", "DoAction",
+                  self.GLib.Variant("(i)", (0,)), None, self.Gio.DBusCallFlags.NONE,
+                  3000, None, finished)
+        deadline = time.monotonic() + 4
+        while (not result or not events) and time.monotonic() < deadline:
+            self.GLib.MainContext.default().iteration(False)
+            time.sleep(0.005)
+        self.assertEqual(result, [(True,)])
+        self.assertEqual(actions, [0])
+        self.assertEqual(events, [("checked",)])
+
+    def start_relay(self):
+        guest_address, guest_bus = self.buses[0]
+        # Use a separate private guest session, leaving the fixture on the host session.
+        path = self.root / "guest-session"
+        process = subprocess.Popen(["dbus-daemon", "--session", "--nofork", "--address=unix:path=" + str(path)],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        self.addCleanup(self.stop, process)
+        self.wait_path(path, process)
+        guest_address = "unix:path=" + str(path)
+        native = subprocess.Popen([sys.executable, str(Path(__file__).with_name("atspi_bus_fixture.py")),
+                                   guest_address, self.buses[1][0], "--native"],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(self.stop, native)
+        self.assertTrue(select.select([native.stdout], [], [], 5)[0])
+        self.assertTrue(native.stdout.readline())
+        guest = self.connect(guest_address)
+        self.addCleanup(guest.close_sync, None)
+        self.assertEqual(guest.call_sync("org.a11y.Bus", "/org/a11y/bus", "org.freedesktop.DBus.Properties",
+                                        "Get", self.GLib.Variant("(ss)", ("org.a11y.Status", "IsEnabled")),
+                                        None, self.Gio.DBusCallFlags.NONE, 3000, None).unpack(), (False,))
+        status_socket = self.root / "status-proxy"
+        status_proxy = subprocess.Popen([session.XDG_DBUS_PROXY, self.buses[0][0], str(status_socket),
+                                         *session._portal_policy_arguments()],
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        self.addCleanup(self.stop, status_proxy)
+        self.wait_path(status_socket, status_proxy)
+        filtered = self.connect("unix:path=" + str(status_socket))
+        self.addCleanup(filtered.close_sync, None)
+        with self.assertRaises(self.GLib.Error):
+            filtered.call_sync("org.a11y.Bus", "/org/a11y/bus", "org.freedesktop.DBus.Properties", "Set",
+                               self.GLib.Variant("(ssv)", ("org.a11y.Status", "IsEnabled", self.GLib.Variant("b", False))),
+                               None, self.Gio.DBusCallFlags.NONE, 3000, None)
+        binary = Path(__file__).resolve().parents[1] / "native" / "spaces-portal"
+        runtime = self.root / "guest-runtime"
+        runtime.mkdir()
+        environment = {**os.environ, "DBUS_SESSION_BUS_ADDRESS": guest_address,
+                       "XDG_RUNTIME_DIR": str(runtime), "SPACES_NAME": "test",
+                       "SPACES_PORTAL_TEST_ADDRESS": "unix:path=" + str(status_socket),
+                       "AT_SPI_BUS_ADDRESS": "unix:path=" + str(self.proxy.socket_path)}
+        router = subprocess.Popen([binary], env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        self.addCleanup(self.stop, router)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                value = guest.call_sync("org.a11y.Bus", "/org/a11y/bus", "org.freedesktop.DBus.Properties", "Get",
+                                        self.GLib.Variant("(ss)", ("org.a11y.Status", "IsEnabled")),
+                                        None, self.Gio.DBusCallFlags.NONE, 500, None).unpack()
+                if value == (True,):
+                    return guest, binary, environment, router
+            except self.GLib.Error:
+                pass
+            if router.poll() is not None:
+                self.fail(router.stderr.read().decode())
+            time.sleep(0.01)
+        self.fail("guest accessibility did not relay enabled host status")
+
+    def test_relay_address_status_signals_owner_replacement_and_restart(self):
+        guest, binary, environment, router = self.start_relay()
+
+        def call(interface, method, signature=None, args=()):
+            return guest.call_sync("org.a11y.Bus", "/org/a11y/bus", interface, method,
+                                   self.GLib.Variant(signature, args) if signature else None,
+                                   None, self.Gio.DBusCallFlags.NONE, 3000, None).unpack()
+
+        self.assertEqual(call("org.a11y.Bus", "GetAddress"), (environment["AT_SPI_BUS_ADDRESS"],))
+        self.assertEqual(call("org.freedesktop.DBus.Properties", "GetAll", "(s)", ("org.a11y.Status",)),
+                         ({"IsEnabled": True},))
+        with self.assertRaises(self.GLib.Error):
+            call("org.freedesktop.DBus.Properties", "Set", "(ssv)",
+                 ("org.a11y.Status", "IsEnabled", self.GLib.Variant("b", False)))
+        changes = []
+        subscription = guest.signal_subscribe("org.a11y.Bus", "org.freedesktop.DBus.Properties", "PropertiesChanged",
+                                              "/org/a11y/bus", None, self.Gio.DBusSignalFlags.NONE,
+                                              lambda *args: changes.append(args[5].unpack()))
+        self.addCleanup(guest.signal_unsubscribe, subscription)
+        host = self.connect(self.buses[0][0])
+        self.addCleanup(host.close_sync, None)
+        host.call_sync("org.a11y.Bus", "/org/a11y/bus", "org.spaces.Test", "SetEnabled",
+                       self.GLib.Variant("(b)", (False,)), None, self.Gio.DBusCallFlags.NONE, 3000, None)
+        deadline = time.monotonic() + 3
+        while not changes and time.monotonic() < deadline:
+            self.GLib.MainContext.default().iteration(False)
+            time.sleep(0.005)
+        self.assertTrue(changes)
+        self.assertEqual(changes[-1][1], {"IsEnabled": False})
+        self.assertEqual(call("org.freedesktop.DBus.Properties", "Get", "(ss)", ("org.a11y.Status", "IsEnabled")), (False,))
+        # GetAddress remains valid even when host accessibility is disabled.
+        self.assertEqual(call("org.a11y.Bus", "GetAddress"), (environment["AT_SPI_BUS_ADDRESS"],))
+        host_owner = host.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
+                                   "GetNameOwner", self.GLib.Variant("(s)", ("org.a11y.Bus",)),
+                                   None, self.Gio.DBusCallFlags.NONE, 3000, None).unpack()[0]
+        for method in ("ReleaseStatus", "SetEnabled", "AcquireStatus"):
+            host.call_sync(host_owner, "/org/a11y/bus", "org.spaces.Test", method,
+                           self.GLib.Variant("(b)", (True,)) if method == "SetEnabled" else None,
+                           None, self.Gio.DBusCallFlags.NONE, 3000, None)
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            try:
+                if call("org.freedesktop.DBus.Properties", "Get", "(ss)", ("org.a11y.Status", "IsEnabled")) == (True,):
+                    break
+            except self.GLib.Error:
+                pass
+            time.sleep(0.01)
+        else:
+            self.fail("host status owner replacement was not recovered")
+        self.stop(router)
+        router = subprocess.Popen([binary], env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        self.addCleanup(self.stop, router)
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            checked = subprocess.run([binary, "--check-accessibility"], env=environment, capture_output=True)
+            if checked.returncode == 0:
+                break
+            time.sleep(0.01)
+        else:
+            self.fail(checked.stderr.decode())
+        self.proxy.socket_path.unlink()
+        with self.assertRaises(self.GLib.Error):
+            call("org.a11y.Bus", "GetAddress")
+
+    def test_relay_optional_screen_reader_property(self):
+        self.stop(self.fixture)
+        self.fixture = subprocess.Popen([*self.fixture.args, "--screen-reader"],
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(self.stop, self.fixture)
+        self.assertTrue(select.select([self.fixture.stdout], [], [], 5)[0])
+        self.assertTrue(self.fixture.stdout.readline())
+        guest, binary, environment, router = self.start_relay()
+        status = guest.call_sync("org.a11y.Bus", "/org/a11y/bus", "org.freedesktop.DBus.Properties", "GetAll",
+                                self.GLib.Variant("(s)", ("org.a11y.Status",)), None,
+                                self.Gio.DBusCallFlags.NONE, 3000, None).unpack()[0]
+        self.assertEqual(status, {"IsEnabled": True, "ScreenReaderEnabled": True})
+
+    def test_runtime_activation_install_cleanup_and_conflicts(self):
+        guest, binary, environment, router = self.start_relay()
+        for option in ("--install-accessibility", "--install-accessibility"):
+            subprocess.run([binary, option], env=environment, check=True, capture_output=True)
+        service = Path(environment["XDG_RUNTIME_DIR"]) / "dbus-1/services/org.a11y.Bus.service"
+        self.assertIn("SystemdService=spaces-portal.service", service.read_text())
+        subprocess.run([binary, "--remove-accessibility"], env=environment, check=True, capture_output=True)
+        self.assertFalse(service.exists())
+        service.write_text("user-owned service")
+        for option in ("--install-accessibility", "--remove-accessibility"):
+            result = subprocess.run([binary, option], env=environment, capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(service.read_text(), "user-owned service")
+
     def test_unique_references_actions_text_events_and_reverse_calls(self):
         root = "/org/a11y/atspi/accessible/root"
         registry = "org.a11y.atspi.Registry"
@@ -565,7 +776,7 @@ class AccessibilityProxyIntegrationTests(unittest.TestCase):
             self.call(registry, root, "org.spaces.Test", "State")[0]
         )
         self.assertEqual(
-            state,
+            {key: state[key] for key in ("clicks", "text", "events")},
             {
                 "clicks": 1,
                 "text": "Héllo 世界",

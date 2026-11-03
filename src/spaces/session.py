@@ -285,6 +285,7 @@ class _ActiveDesktop:
     accessibility_binding: DesktopBind | None = None
     accessibility_source: DesktopBind | None = None
     accessibility_environment_dirty: bool = False
+    accessibility_activation: bool = False
     computer: ComputerLease | None = None
     computer_binding: DesktopBind | None = None
 
@@ -664,6 +665,13 @@ def _portal_policy_arguments(broker_name: str | None = None) -> list[str]:
                 ),
             )
         )
+    for method in ("Get", "GetAll"):
+        arguments.append(
+            f"--call=org.a11y.Bus=org.freedesktop.DBus.Properties.{method}@/org/a11y/bus"
+        )
+    arguments.append(
+        "--broadcast=org.a11y.Bus=org.freedesktop.DBus.Properties.PropertiesChanged@/org/a11y/bus"
+    )
     for interface in HOST_PORTAL_INTERFACES:
         arguments.append(
             f"--call={name}=org.freedesktop.portal.{interface}.*@{desktop}"
@@ -1247,13 +1255,37 @@ def discover_accessibility_bus(user: DesktopUser) -> DesktopBind:
     return DesktopBind(str(source), source, metadata.st_dev, metadata.st_ino)
 
 
+def accessibility_provider_policy() -> list[str]:
+    """Flatpak's provider-only AT-SPI policy; host clients may call back."""
+    registry = "org.a11y.atspi.Registry"
+    root = "/org/a11y/atspi/accessible/root"
+    path = "/org/a11y/atspi/registry"
+    arguments = ["--filter", "--sloppy-names"]
+    for signal_name in ("EventListenerRegistered", "EventListenerDeregistered"):
+        arguments.append(f"--broadcast={registry}={registry}.{signal_name}@{path}")
+    for method in ("Embed", "Unembed"):
+        arguments.append(f"--call={registry}=org.a11y.atspi.Socket.{method}@{root}")
+    arguments.append(f"--call={registry}={registry}.GetRegisteredEvents@{path}")
+    for method in (
+        "GetKeystrokeListeners", "GetDeviceEventListeners",
+        "NotifyListenersSync", "NotifyListenersAsync",
+    ):
+        arguments.append(
+            f"--call={registry}=org.a11y.atspi.DeviceEventController.{method}"
+            f"@{path}/deviceeventcontroller"
+        )
+    return arguments
+
+
 def start_accessibility_proxy(
     space_name: str,
     user: DesktopUser,
     session_id: str,
     source: DesktopBind,
+    *,
+    unrestricted: bool = True,
 ) -> tuple[PortalProxy, DesktopBind]:
-    """Forward a dedicated AT-SPI bus, including bidirectional callbacks."""
+    """Forward AT-SPI providers, optionally permitting host inspection too."""
     metadata = source.source.lstat()
     if (
         not stat.S_ISSOCK(metadata.st_mode)
@@ -1280,6 +1312,7 @@ def start_accessibility_proxy(
                 address,
                 str(socket_path),
                 f"--fd={control_write}",
+                *([] if unrestricted else accessibility_provider_policy()),
             ],
             env={
                 "DBUS_SESSION_BUS_ADDRESS": f"unix:path=/run/user/{user.uid}/bus",
@@ -2429,7 +2462,8 @@ class DesktopController:
             not user.desktop or not getattr(user, "accessibility", False)
         ):
             self._revoke_computer(user, current)
-            self._revoke_accessibility(user, current)
+            if not user.desktop:
+                self._revoke_accessibility(user, current)
         environment = host_manager_environment(user)
         selected = (
             select_graphical_session(sessions, environment)
@@ -2510,8 +2544,8 @@ class DesktopController:
         if current is not None and (
             current.plan == plan or self._refresh_settings(user, current, plan)
         ):
-            self._repair_portal(user, current)
             self._repair_accessibility(user, current)
+            self._repair_portal(user, current)
             self._repair_computer(user, current)
             return
         set_status(self.space_name, user.uid, "pending")
@@ -2668,8 +2702,8 @@ class DesktopController:
         for uid, current in tuple(self.active.items()):
             user = self.users.get(uid)
             if user is not None:
-                self._repair_portal(user, current)
                 self._repair_accessibility(user, current)
+                self._repair_portal(user, current)
                 self._repair_computer(user, current)
 
     def computer_descriptors(self) -> tuple[int, ...]:
@@ -2730,19 +2764,6 @@ class DesktopController:
                     )
                     self._mount(user.uid, portal_binding)
                     mounted.append(portal_binding)
-                    try:
-                        self._start_graphical_session(user, plan)
-                        graphical_session = True
-                    except Exception as error:
-                        logger.warning(
-                            _(
-                                "Could not activate the guest graphical "
-                                "session for {user}; portal reconciliation "
-                                "will retry: {error}",
-                                user=user.name,
-                                error=error,
-                            )
-                        )
                 except Exception as error:
                     if portal is not None:
                         portal.close()
@@ -2791,6 +2812,18 @@ class DesktopController:
             graphical_session=graphical_session,
         )
         self._repair_accessibility(user, current)
+        if portal is not None:
+            current.accessibility_activation = True
+            try:
+                self._start_graphical_session(
+                    user, replace(plan, environment=self._active_environment(current))
+                )
+                current.graphical_session = True
+            except Exception as error:
+                logger.warning(
+                    _("Could not activate the guest graphical session for {user}; retrying later: {error}",
+                      user=user.name, error=error)
+                )
         self._repair_computer(user, current)
         return current
 
@@ -2844,7 +2877,7 @@ class DesktopController:
             return
         if current.accessibility is not None:
             # Closing the proxy revokes already-open connections, even if
-            # unmounting fails. Never roll this back during a downgrade.
+            # unmounting the old generation fails.
             current.accessibility.close()
             current.accessibility.socket_path.unlink(missing_ok=True)
             current.accessibility = None
@@ -2883,8 +2916,7 @@ class DesktopController:
     ) -> None:
         if not (
             current.plan.desktop
-            and current.plan.accessibility
-            and getattr(user, "accessibility", False)
+            and user.desktop
             and user.uid != 0
         ):
             try:
@@ -2922,6 +2954,7 @@ class DesktopController:
                 user,
                 current.plan.session_id,
                 source,
+                unrestricted=current.plan.accessibility,
             )
             self._mount(user.uid, binding)
             current.accessibility = proxy
@@ -3032,6 +3065,7 @@ class DesktopController:
                 )
             ):
                 if not current.graphical_session:
+                    current.accessibility_activation = True
                     try:
                         self._start_graphical_session(
                             user,
@@ -3097,6 +3131,7 @@ class DesktopController:
             )
             return
         graphical_session = False
+        current.accessibility_activation = True
         try:
             self._start_graphical_session(
                 user,
@@ -3126,6 +3161,20 @@ class DesktopController:
         remove_generated: bool = True,
     ) -> None:
         self._revoke_computer(user, current)
+        if current.accessibility_activation:
+            try:
+                self._machine_user(
+                    user, ["/usr/bin/systemctl", "--user", "stop", "spaces-portal.service"]
+                )
+                self._machine_user(
+                    user, ["/run/spaces-host/bin/spaces-portal", "--remove-accessibility"]
+                )
+                current.accessibility_activation = False
+            except Exception as error:
+                logger.warning(
+                    _("Could not restore native guest accessibility for {user}: {error}",
+                      user=user.name, error=error)
+                )
         self._revoke_accessibility(user, current)
         if self.portals_enabled and current.plan.desktop:
             try:
@@ -3180,12 +3229,35 @@ class DesktopController:
             [
                 DBUS_UPDATE_ACTIVATION_ENVIRONMENT,
                 "--systemd",
-                *sorted(plan.environment),
+                *sorted(name for name in plan.environment if name != "AT_SPI_BUS_ADDRESS"),
                 "AT_SPI_BUS_ADDRESS="
                 + plan.environment.get("AT_SPI_BUS_ADDRESS", ""),
             ],
             environment=plan.environment,
         )
+        self._machine_user(
+            user, ["/run/spaces-host/bin/spaces-portal", "--install-accessibility"]
+        )
+        try:
+            self._machine_user(
+                user, ["/usr/bin/systemctl", "--user", "stop", "at-spi-dbus-bus.service"]
+            )
+        except Exception:
+            # Some guests have no native launcher; direct launchers allow
+            # replacement by spaces-portal's org.a11y.Bus ownership request.
+            pass
+        self._machine_user(
+            user, ["/usr/bin/systemctl", "--user", "start", "spaces-portal.service"]
+        )
+        try:
+            self._machine_user(
+                user, ["/run/spaces-host/bin/spaces-portal", "--check-accessibility"]
+            )
+        except Exception as error:
+            logger.warning(
+                _("Guest accessibility is not ready for {user}; desktop forwarding will continue: {error}",
+                  user=user.name, error=error)
+            )
         self._machine_user(
             user,
             [

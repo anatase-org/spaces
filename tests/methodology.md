@@ -108,12 +108,20 @@ basic integration; its users can select the accessibility tier through Customise
 Custom legacy boolean grants keep their meaning (`false` is disabled,
 `true` is basic). Configuration saves write the canonical strings.
 
-The accessibility tier forwards the selected host user's dedicated AT-SPI
-bus. It provides the accessible tree, supported semantic actions, text editing,
-and events; it does not provide screenshots or general pointer/keyboard input.
-It does not change host accessibility settings. `org.a11y.Status.IsEnabled`
-being false does not imply that the registry or applications are unavailable.
-Toolkit support and application accessibility exposure remain prerequisites.
+Basic integration forwards a filtered provider connection to the selected host
+user's dedicated AT-SPI bus, allowing host screen readers and SCU to read and
+operate Space applications. Guest applications cannot use this connection to
+inspect or operate host trees. The accessibility tier retains unrestricted
+AT-SPI forwarding and access to SCU from inside the Space.
+
+`spaces-portal` owns guest `org.a11y.Bus`, returns the forwarded address, and
+mirrors supported host `org.a11y.Status` properties without changing host or
+guest accessibility settings. A per-user runtime activation override prevents
+the guest's native launcher from sending applications to a separate registry.
+Forwarding and the status relay are prepared before the graphical target starts.
+Portal recovery may briefly interrupt accessibility activation; teardown removes
+the override. Configuration changes tear down the Space rather than changing
+permissions on a live connection. Toolkit support remains a prerequisite.
 
 Run the automated coverage with:
 
@@ -538,3 +546,20 @@ root and remove the interface. Do not assign a default route or a `~.` routing
 domain during this test. Finally validate packaged Ubuntu startup and NordVPN
 connectivity under the installed Spaces SELinux domain. Updating that policy is
 a user action; never run `sync.sh --selinux` as the agent.
+
+### Basic provider relay validation (win5 / win5f)
+
+On 2026-11-03, the full Fedora suite passed (721 tests, 20 skips), followed by
+25 focused accessibility tests and the native guest ABI check. Live Basic
+integration mirrored host activation state, recovered after a portal restart,
+and denied guest enumeration of host accessibility trees. Host SCU read GTK
+and Qt content while locked; a GTK button action incremented an independent
+fixture counter. Fresh unlocked Chromium exposed its browser controls, and an
+address-bar edit was confirmed by semantic readback and restored.
+
+Lock state affected Chromium/Electron testing: applications started while
+locked retained stale geometry or hidden AT-SPI state after unlock. Fresh
+unlocked Chromium matched, while VSCode observations remained limited to window
+controls. The browser test did not establish web-document exposure, and
+ChatGPT was unavailable on this device. These are remaining application/matching
+findings; this change retains existing SCU association rules.

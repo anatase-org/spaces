@@ -251,6 +251,11 @@ struct Portal {
     char *app_id;
     char *file_chooser_backend;
     char *screen_saver_host_path;
+    GDBusProxy *accessibility_status;
+    GDBusNodeInfo *accessibility_node;
+    char *accessibility_address;
+    guint accessibility_registration;
+    guint accessibility_mask;
     gboolean notifications_owned;
     gboolean screen_saver_owned;
     gboolean power_owned;
@@ -3171,6 +3176,233 @@ static gboolean register_node_interface(Portal *portal, const char *path,
     return TRUE;
 }
 
+/* Guest activation and status for the existing host AT-SPI connection. */
+#define ACCESSIBILITY_NAME "org.a11y.Bus"
+#define ACCESSIBILITY_PATH "/org/a11y/bus"
+#define ACCESSIBILITY_STATUS "org.a11y.Status"
+#define ACCESSIBILITY_ACTIVATION \
+    "[D-BUS Service]\nName=org.a11y.Bus\n" \
+    "Exec=/run/spaces-host/bin/spaces-portal\n" \
+    "SystemdService=spaces-portal.service\n"
+
+static const char *accessibility_properties[] = {"IsEnabled", "ScreenReaderEnabled"};
+
+static void accessibility_call(GDBusConnection *connection, const char *sender,
+    const char *path, const char *interface, const char *method,
+    GVariant *parameters, GDBusMethodInvocation *invocation, gpointer user_data)
+{
+    Portal *portal = user_data;
+    struct stat metadata;
+    char *filename = NULL;
+    (void)connection; (void)sender; (void)path; (void)interface;
+    (void)method; (void)parameters;
+    if (g_str_has_prefix(portal->accessibility_address, "unix:path="))
+        filename = g_uri_unescape_string(portal->accessibility_address + 10, NULL);
+    if (filename == NULL || syscall(SYS_newfstatat, AT_FDCWD, filename, &metadata, AT_SYMLINK_NOFOLLOW) != 0 || !S_ISSOCK(metadata.st_mode))
+        g_dbus_method_invocation_return_dbus_error(invocation,
+            "org.freedesktop.DBus.Error.NoServer", "Host accessibility connection is unavailable");
+    else
+        g_dbus_method_invocation_return_value(invocation,
+            g_variant_new("(s)", portal->accessibility_address));
+    g_free(filename);
+}
+
+static GVariant *accessibility_get(GDBusConnection *connection, const char *sender,
+    const char *path, const char *interface, const char *property,
+    GError **error, gpointer user_data)
+{
+    Portal *portal = user_data;
+    GVariant *value = g_dbus_proxy_get_cached_property(portal->accessibility_status, property);
+    (void)connection; (void)sender; (void)path; (void)interface;
+    if (value != NULL && g_variant_is_of_type(value, G_VARIANT_TYPE_BOOLEAN)) return value;
+    if (value != NULL) g_variant_unref(value);
+    g_set_error(error, G_DBUS_ERROR, G_DBUS_ERROR_UNKNOWN_PROPERTY,
+        "Host accessibility property %s is unavailable", property);
+    return NULL;
+}
+
+static const GDBusInterfaceVTable accessibility_vtable = {
+    .method_call = accessibility_call, .get_property = accessibility_get,
+};
+
+static gboolean accessibility_register_status(Portal *portal, GError **error)
+{
+    GString *xml;
+    guint mask = 0, index;
+    for (index = 0; index < G_N_ELEMENTS(accessibility_properties); index++) {
+        GVariant *value = g_dbus_proxy_get_cached_property(portal->accessibility_status,
+            accessibility_properties[index]);
+        if (value != NULL) {
+            if (g_variant_is_of_type(value, G_VARIANT_TYPE_BOOLEAN)) mask |= 1u << index;
+            g_variant_unref(value);
+        }
+    }
+    if (portal->accessibility_node != NULL && portal->accessibility_mask == mask) return TRUE;
+    if (portal->accessibility_registration != 0)
+        g_dbus_connection_unregister_object(portal->guest, portal->accessibility_registration);
+    portal->accessibility_registration = 0;
+    g_clear_pointer(&portal->accessibility_node, g_dbus_node_info_unref);
+    portal->accessibility_mask = mask;
+    xml = g_string_new("<node><interface name='" ACCESSIBILITY_STATUS "'>");
+    for (index = 0; index < G_N_ELEMENTS(accessibility_properties); index++)
+        if (mask & (1u << index))
+            g_string_append_printf(xml, "<property name='%s' type='b' access='read'/>",
+                accessibility_properties[index]);
+    g_string_append(xml, "</interface></node>");
+    portal->accessibility_node = g_dbus_node_info_new_for_xml(xml->str, error);
+    g_string_free(xml, TRUE);
+    if (portal->accessibility_node == NULL) return FALSE;
+    portal->accessibility_registration = g_dbus_connection_register_object(portal->guest,
+        ACCESSIBILITY_PATH, portal->accessibility_node->interfaces[0],
+        &accessibility_vtable, portal, NULL, error);
+    return portal->accessibility_registration != 0;
+}
+
+static void accessibility_changed(GDBusProxy *proxy, GVariant *changed,
+    const char *const *invalidated, gpointer user_data)
+{
+    Portal *portal = user_data;
+    GVariantBuilder values, removed;
+    GError *error = NULL;
+    guint index;
+    (void)proxy;
+    if (!accessibility_register_status(portal, &error)) {
+        g_warning("Could not update accessibility status: %s", error->message);
+        g_clear_error(&error);
+        return;
+    }
+    g_variant_builder_init(&values, G_VARIANT_TYPE_VARDICT);
+    g_variant_builder_init(&removed, G_VARIANT_TYPE_STRING_ARRAY);
+    for (index = 0; index < G_N_ELEMENTS(accessibility_properties); index++) {
+        const char *name = accessibility_properties[index];
+        GVariant *value = g_variant_lookup_value(changed, name, G_VARIANT_TYPE_BOOLEAN);
+        guint item;
+        if (value != NULL) {
+            g_variant_builder_add(&values, "{sv}", name, value);
+            g_variant_unref(value);
+        }
+        for (item = 0; invalidated != NULL && invalidated[item] != NULL; item++)
+            if (g_str_equal(name, invalidated[item])) g_variant_builder_add(&removed, "s", name);
+    }
+    g_dbus_connection_emit_signal(portal->guest, NULL, ACCESSIBILITY_PATH,
+        "org.freedesktop.DBus.Properties", "PropertiesChanged",
+        g_variant_new("(sa{sv}as)", ACCESSIBILITY_STATUS, &values, &removed), NULL);
+}
+
+static gboolean accessibility_init(Portal *portal, GError **error)
+{
+    static const char xml[] = "<node><interface name='" ACCESSIBILITY_NAME "'>"
+        "<method name='GetAddress'><arg type='s' direction='out'/></method></interface></node>";
+    GDBusNodeInfo *node;
+    const char *address = g_getenv("AT_SPI_BUS_ADDRESS");
+    portal->accessibility_address = address != NULL && *address != '\0'
+        ? g_strdup(address) : g_strdup_printf("unix:path=/run/spaces/desktop/%u/a11y/bus", (unsigned)getuid());
+    portal->accessibility_status = g_dbus_proxy_new_sync(portal->host,
+        G_DBUS_PROXY_FLAGS_DO_NOT_AUTO_START, NULL, ACCESSIBILITY_NAME,
+        ACCESSIBILITY_PATH, ACCESSIBILITY_STATUS, NULL, error);
+    if (portal->accessibility_status == NULL) return FALSE;
+    node = g_dbus_node_info_new_for_xml(xml, error);
+    if (node == NULL) return FALSE;
+    g_ptr_array_add(portal->owned_nodes, node);
+    if (!register_node_interface(portal, ACCESSIBILITY_PATH, node->interfaces[0],
+            &accessibility_vtable, error) || !accessibility_register_status(portal, error)) return FALSE;
+    g_signal_connect(portal->accessibility_status, "g-properties-changed",
+        G_CALLBACK(accessibility_changed), portal);
+    return TRUE;
+}
+
+/* Activation is per guest user and transient; never replace distro files or
+ * another user's activation configuration. The runtime directory is not
+ * monitored by dbus-daemon, so explicitly reload it after every change. */
+static gboolean accessibility_activation(gboolean install, GError **error)
+{
+    const char *runtime = g_getenv("XDG_RUNTIME_DIR");
+    char *directory, *path, *contents = NULL;
+    GDBusConnection *bus;
+    GVariant *reply;
+    gboolean success = FALSE;
+    if (runtime == NULL || *runtime != '/') {
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT, "XDG_RUNTIME_DIR is unavailable");
+        return FALSE;
+    }
+    directory = g_build_filename(runtime, "dbus-1", "services", NULL);
+    path = g_build_filename(directory, ACCESSIBILITY_NAME ".service", NULL);
+    if (g_file_test(path, G_FILE_TEST_EXISTS)) {
+        if (!g_file_get_contents(path, &contents, NULL, error)) goto done;
+        if (!g_str_equal(contents, ACCESSIBILITY_ACTIVATION)) {
+            g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_EXISTS,
+                "A different runtime accessibility activation service already exists");
+            goto done;
+        }
+    }
+    if (install) {
+        if (g_mkdir_with_parents(directory, 0700) != 0) {
+            g_set_error(error, G_IO_ERROR, g_io_error_from_errno(errno), "Cannot create %s: %s", directory, g_strerror(errno));
+            goto done;
+        }
+        if (!g_file_set_contents(path, ACCESSIBILITY_ACTIVATION, -1, error)) goto done;
+    } else if (contents != NULL && unlink(path) != 0) {
+        g_set_error(error, G_IO_ERROR, g_io_error_from_errno(errno), "Cannot remove %s: %s", path, g_strerror(errno));
+        goto done;
+    }
+    bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, error);
+    if (bus == NULL) goto done;
+    reply = g_dbus_connection_call_sync(bus, DBUS_NAME, DBUS_PATH, DBUS_NAME,
+        "ReloadConfig", NULL, G_VARIANT_TYPE_UNIT, G_DBUS_CALL_FLAGS_NONE, 5000, NULL, error);
+    success = reply != NULL;
+    if (reply != NULL) g_variant_unref(reply);
+    g_object_unref(bus);
+done:
+    g_free(contents); g_free(path); g_free(directory);
+    return success;
+}
+
+static gboolean accessibility_check(GError **error)
+{
+    GDBusConnection *bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, error);
+    GVariant *reply;
+    if (bus == NULL) return FALSE;
+    char *owner = NULL;
+    gboolean same_owner = FALSE;
+    reply = g_dbus_connection_call_sync(bus, DBUS_NAME, DBUS_PATH, DBUS_NAME,
+        "GetNameOwner", g_variant_new("(s)", PORTAL_NAME), G_VARIANT_TYPE("(s)"),
+        G_DBUS_CALL_FLAGS_NONE, 5000, NULL, error);
+    if (reply != NULL) {
+        g_variant_get(reply, "(s)", &owner);
+        g_variant_unref(reply);
+        reply = g_dbus_connection_call_sync(bus, DBUS_NAME, DBUS_PATH, DBUS_NAME,
+            "GetNameOwner", g_variant_new("(s)", ACCESSIBILITY_NAME), G_VARIANT_TYPE("(s)"),
+            G_DBUS_CALL_FLAGS_NONE, 5000, NULL, error);
+        if (reply != NULL) {
+            const char *accessibility_owner;
+            g_variant_get(reply, "(&s)", &accessibility_owner);
+            same_owner = g_str_equal(owner, accessibility_owner);
+            g_variant_unref(reply);
+        }
+    }
+    g_free(owner);
+    if (!same_owner) {
+        if (error != NULL && *error == NULL)
+            g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_NOT_CONNECTED,
+                "Accessibility activation has not reached spaces-portal");
+        g_object_unref(bus);
+        return FALSE;
+    }
+    reply = g_dbus_connection_call_sync(bus, ACCESSIBILITY_NAME, ACCESSIBILITY_PATH,
+        ACCESSIBILITY_NAME, "GetAddress", NULL, G_VARIANT_TYPE("(s)"),
+        G_DBUS_CALL_FLAGS_NONE, 5000, NULL, error);
+    if (reply != NULL) {
+        g_variant_unref(reply);
+        reply = g_dbus_connection_call_sync(bus, ACCESSIBILITY_NAME, ACCESSIBILITY_PATH,
+            "org.freedesktop.DBus.Properties", "Get", g_variant_new("(ss)", ACCESSIBILITY_STATUS, "IsEnabled"),
+            G_VARIANT_TYPE("(v)"), G_DBUS_CALL_FLAGS_NONE, 5000, NULL, error);
+    }
+    g_object_unref(bus);
+    if (reply == NULL) return FALSE;
+    g_variant_unref(reply);
+    return TRUE;
+}
+
 static gboolean register_interfaces(Portal *portal, GError **error)
 {
     GVariant *reply; const char *xml; guint index;
@@ -3429,13 +3661,22 @@ static void host_portal_vanished(GDBusConnection *connection, const char *name,
     g_main_loop_quit(portal->loop);
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
     Portal portal = {0}; GError *error = NULL; char *address; const char *test_address;
     guint portal_owner, file_owner, notification_owner, saver_owner, power_owner;
-    guint status_owner;
+    guint status_owner, accessibility_owner;
     guint guest_names, screen_saver_watcher, host_portal_watcher;
     signal(SIGPIPE, SIG_IGN);
+    if (argc == 2) {
+        gboolean success;
+        if (g_str_equal(argv[1], "--install-accessibility")) success = accessibility_activation(TRUE, &error);
+        else if (g_str_equal(argv[1], "--remove-accessibility")) success = accessibility_activation(FALSE, &error);
+        else if (g_str_equal(argv[1], "--check-accessibility")) success = accessibility_check(&error);
+        else { g_printerr("Unknown option: %s\n", argv[1]); return 1; }
+        if (!success) { g_printerr("spaces-portal: %s\n", error->message); g_clear_error(&error); }
+        return success ? 0 : 1;
+    }
     portal.space_name = g_strdup(g_getenv("SPACES_NAME"));
     if (portal.space_name == NULL || *portal.space_name == '\0') { g_printerr("spaces-portal: SPACES_NAME is unavailable\n"); return 1; }
     portal.app_id = g_strconcat("org.anatase.Spaces.", portal.space_name, NULL);
@@ -3462,7 +3703,7 @@ int main(void)
             portal.app_id, error->message);
         g_clear_error(&error);
     }
-    if (!register_interfaces(&portal, &error)) goto failed;
+    if (!register_interfaces(&portal, &error) || !accessibility_init(&portal, &error)) goto failed;
     g_dbus_connection_signal_subscribe(portal.host, PORTAL_NAME, NULL, NULL, NULL,
         NULL, G_DBUS_SIGNAL_FLAGS_NONE, host_portal_signal, &portal, NULL);
     g_dbus_connection_signal_subscribe(portal.host, NOTIFICATIONS_NAME, NOTIFICATIONS_NAME,
@@ -3495,8 +3736,11 @@ int main(void)
     status_owner = g_bus_own_name_on_connection(portal.guest, STATUS_WATCHER_NAME,
         G_BUS_NAME_OWNER_FLAGS_ALLOW_REPLACEMENT | G_BUS_NAME_OWNER_FLAGS_REPLACE,
         NULL, name_lost, &portal, NULL);
+    accessibility_owner = g_bus_own_name_on_connection(portal.guest, ACCESSIBILITY_NAME,
+        G_BUS_NAME_OWNER_FLAGS_REPLACE, NULL, name_lost, &portal, NULL);
     discover_mpris(&portal);
     g_main_loop_run(portal.loop);
+    g_bus_unown_name(accessibility_owner);
     g_bus_unown_name(status_owner);
     g_bus_unown_name(power_owner); g_bus_unown_name(saver_owner); g_bus_unown_name(notification_owner);
     g_bus_unown_name(file_owner); g_bus_unown_name(portal_owner);
@@ -3508,6 +3752,10 @@ int main(void)
     g_hash_table_unref(portal.mirrors);
     g_hash_table_unref(portal.sessions_host); g_hash_table_unref(portal.sessions_guest);
     g_hash_table_unref(portal.requests_host); g_hash_table_unref(portal.requests_guest);
+    g_dbus_connection_unregister_object(portal.guest, portal.accessibility_registration);
+    g_clear_object(&portal.accessibility_status);
+    g_clear_pointer(&portal.accessibility_node, g_dbus_node_info_unref);
+    g_free(portal.accessibility_address);
     g_array_unref(portal.registrations); g_ptr_array_unref(portal.owned_nodes);
     g_dbus_node_info_unref(portal.lifecycle_node); g_dbus_node_info_unref(portal.host_node);
     g_main_loop_unref(portal.loop); g_object_unref(portal.host); g_object_unref(portal.guest);

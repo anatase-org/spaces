@@ -15,6 +15,11 @@ APP = "/org/a11y/atspi/accessible/fixture"
 XML = """<node>
 <interface name='org.a11y.Bus'><method name='GetAddress'>
  <arg type='s' direction='out'/></method></interface>
+<interface name='org.a11y.Status'><property name='IsEnabled' type='b' access='readwrite'/></interface>
+<interface name='org.a11y.atspi.Socket'>
+ <method name='Embed'><arg type='(so)' direction='in'/><arg type='(so)' direction='out'/></method>
+ <method name='Unembed'><arg type='(so)' direction='in'/></method>
+</interface>
 <interface name='org.a11y.atspi.Accessible'>
  <property name='Name' type='s' access='read'/>
  <method name='GetChildren'><arg type='a(so)' direction='out'/></method>
@@ -30,6 +35,8 @@ XML = """<node>
  <arg type='s' direction='in'/></method></interface>
 <interface name='org.spaces.Test'>
  <method name='State'><arg type='s' direction='out'/></method>
+ <method name='SetEnabled'><arg type='b' direction='in'/></method>
+ <method name='ReleaseStatus'/><method name='AcquireStatus'/>
  <method name='Callback'><arg type='o' direction='in'/><arg type='s' direction='out'/></method>
  <method name='ReplaceApplication'><arg type='s' direction='out'/></method>
 </interface></node>"""
@@ -46,12 +53,18 @@ def connect(address):
 
 
 def main():
-    session_address, a11y_address = sys.argv[1:]
+    session_address, a11y_address = sys.argv[1:3]
+    native = "--native" in sys.argv[3:]
     host = connect(session_address)
     registry = connect(a11y_address)
     app = connect(a11y_address)
-    state = {"clicks": 0, "text": "", "events": []}
-    interfaces = Gio.DBusNodeInfo.new_for_xml(XML).interfaces
+    state = {"clicks": 0, "text": "", "events": [], "enabled": not native, "providers": []}
+    xml = XML
+    if "--screen-reader" in sys.argv[3:]:
+        xml = xml.replace("<property name='IsEnabled' type='b' access='readwrite'/>",
+                          "<property name='IsEnabled' type='b' access='readwrite'/>"
+                          "<property name='ScreenReaderEnabled' type='b' access='read'/>")
+    interfaces = Gio.DBusNodeInfo.new_for_xml(xml).interfaces
     registrations = []
 
     def register_app():
@@ -67,6 +80,24 @@ def main():
         args = parameters.unpack()
         if name == "GetAddress":
             reply = GLib.Variant("(s)", (a11y_address,))
+        elif name == "SetEnabled":
+            state["enabled"] = args[0]
+            host.emit_signal(None, "/org/a11y/bus", "org.freedesktop.DBus.Properties", "PropertiesChanged",
+                             GLib.Variant("(sa{sv}as)", ("org.a11y.Status", {"IsEnabled": GLib.Variant("b", args[0])}, [])))
+            reply = GLib.Variant("()", ())
+        elif name in ("ReleaseStatus", "AcquireStatus"):
+            host.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
+                           "ReleaseName" if name == "ReleaseStatus" else "RequestName",
+                           GLib.Variant("(s)", ("org.a11y.Bus",)) if name == "ReleaseStatus"
+                           else GLib.Variant("(su)", ("org.a11y.Bus", 0)),
+                           None, Gio.DBusCallFlags.NONE, 3000, None)
+            reply = GLib.Variant("()", ())
+        elif name == "Embed":
+            state["providers"].append(args[0])
+            reply = GLib.Variant("((so))", ((registry.get_unique_name(), ROOT),))
+        elif name == "Unembed":
+            state["providers"].remove(args[0])
+            reply = GLib.Variant("()", ())
         elif name == "GetChildren":
             reply = GLib.Variant("(a(so))", ([(app.get_unique_name(), APP)],))
         elif name == "GetState":
@@ -132,10 +163,23 @@ def main():
             return
         invocation.return_value(reply)
 
-    def property_get(*_args):
+    def property_get(_connection, _sender, _path, interface, _property):
+        if interface == "org.a11y.Status":
+            return GLib.Variant("b", True if _property == "ScreenReaderEnabled" else state["enabled"])
         return GLib.Variant("s", "Spaces AT-SPI fixture")
 
-    host.register_object("/org/a11y/bus", interfaces[0], method, None, None)
+    def property_set(*_args):
+        state["enabled"] = _args[-1].unpack()
+        return True
+
+    for info in interfaces:
+        if info.name in ("org.a11y.Bus", "org.a11y.Status", "org.spaces.Test"):
+            host.register_object("/org/a11y/bus", info, method, property_get, property_set)
+    # A stable portal name lets the real guest router use this private session.
+    if not native:
+        host.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
+                       "RequestName", GLib.Variant("(su)", ("org.freedesktop.portal.Desktop", 0)),
+                       None, Gio.DBusCallFlags.NONE, 3000, None)
     for info in interfaces:
         registry.register_object(ROOT, info, method, property_get, None)
     register_app()
@@ -148,7 +192,7 @@ def main():
             "/org/freedesktop/DBus",
             "org.freedesktop.DBus",
             "RequestName",
-            GLib.Variant("(su)", (name, 0)),
+            GLib.Variant("(su)", (name, 1)),
             None,
             Gio.DBusCallFlags.NONE,
             3000,
