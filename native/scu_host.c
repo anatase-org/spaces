@@ -3086,25 +3086,25 @@ static JsonResult *overview_rect(const CanvasRect *rect)
 static JsonResult *kwin_apps(void)
 {
     JsonResult *apps = result_array();
-    GHashTable *grouped = g_hash_table_new(g_direct_hash, g_direct_equal);
+    GHashTable *grouped = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     JsonValue *windows_json = json_member(yyjson_doc_get_root(visual.geometry), "windows");
     size_t i, n;
     JsonValue *window;
     yyjson_arr_foreach(windows_json, i, n, window) {
         const char *key = json_string(window, "key");
-        guint pid = json_number(window, "pid", 0);
+        const char *name = json_string(window, "app_name");
+        const char *group = name ? name : "";
         CanvasRect frame;
         if (!key || !read_rect(json_member(window, "frame"), &frame)) {
             continue;
         }
-        JsonResult *app = g_hash_table_lookup(grouped, GUINT_TO_POINTER(pid));
+        JsonResult *app = g_hash_table_lookup(grouped, group);
         if (!app) {
             app = result_object();
-            result_integer(app, "pid", pid);
-            result_string(app, "app_name", json_string(window, "app_name"));
+            result_string(app, "app_name", name);
             result_member(app, "windows", result_array());
             result_append(apps, app);
-            g_hash_table_insert(grouped, GUINT_TO_POINTER(pid), app);
+            g_hash_table_insert(grouped, g_strdup(group), app);
         }
         JsonResult *item = result_object();
         result_integer(item, "window_id", kwin_window_id(key));

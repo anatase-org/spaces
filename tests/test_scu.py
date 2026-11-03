@@ -1196,6 +1196,25 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
             self.assertNotIn('"apps":', text)
             self.assertEqual(any(b["type"] == "image" for b in response["content"]), not no_vision)
 
+    def test_status_groups_windows_by_application_name(self):
+        self.start_accessibility()
+        other, _ = self.add_accessibility_application()
+        self.start_host(duplicate_identity=True, duplicate_pid=other.pid)
+        clients = [self.client(no_vision=no_vision) for no_vision in (False, True)]
+        for client in clients:
+            apps = read_result(self.status(client))["apps"]
+            self.assertEqual([app["app_name"] for app in apps], ["scu fixture"])
+            windows = apps[0]["windows"]
+            self.assertEqual(len(windows), 2)
+            self.assertNotEqual(windows[0]["window_id"], windows[1]["window_id"])
+            self.assertTrue(all(window["accessibility_available"] for window in windows))
+        # Application names remain distinct even when their reported PIDs agree.
+        self.configure(duplicate_pid=self.atspi.pid, duplicate_app_name="Other application")
+        for client in clients:
+            apps = read_result(self.status(client))["apps"]
+            self.assertEqual([app["app_name"] for app in apps], ["scu fixture", "Other application"])
+            self.assertEqual([len(app["windows"]) for app in apps], [1, 1])
+
     def test_status_accessibility_reports_short_matching_failures(self):
         self.start_host()
         cases = ((dict(window_title="Missing", bad_client=True), "no match"),
