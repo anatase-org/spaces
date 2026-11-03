@@ -36,6 +36,18 @@ coverage remains; baseline truncation uses the cheaper depth limit.
 
 # Portal and desktop bridge test methodology
 
+SCU application discovery/launch rollout results, lock-state comparisons, and
+next-stage API usability findings are recorded in
+[scu-application-findings.md](scu-application-findings.md).
+
+The reproducible live harness is `manual_scu_application_probe.py`, with
+`manual_scu_application_fixture.py` providing an isolated host browser launcher
+and local page/submission oracle. It runs 12 fresh Codex conversations from the
+Fedora Space, saves raw events and independent verification, and restores the
+starting lock state. Use a short home-directory checkout and one worker for a
+full Fedora suite run: long paths can exceed Unix socket limits, and parallel
+portal tests can rebuild the same broker executable.
+
 This document describes the manual integration tests for the public portal
 router and the non-portal desktop bridges.  The probes are diagnostics rather
 than a fully unattended test suite: several portal calls deliberately display

@@ -6,6 +6,7 @@
 #include <dlfcn.h>
 #include <gdk-pixbuf/gdk-pixbuf.h>
 #include <gio/gunixfdlist.h>
+#include <gio/gdesktopappinfo.h>
 #include <glib-unix.h>
 #include <libei.h>
 #include <linux/input-event-codes.h>
@@ -38,6 +39,8 @@ static JsonResult *canvas_status(void);
 static JsonResult *kwin_status(gboolean observation);
 static gboolean status_accessibility(JsonResult *apps);
 static gboolean require_computer_access(void);
+static JsonResult *search_applications(JsonValue *args);
+static JsonResult *launch_application(JsonValue *args);
 static void stop_atspi_worker(void);
 static int run_atspi_worker(guint base);
 static JsonResult *atspi_worker_call(const char *tool, JsonValue *args);
@@ -4653,6 +4656,8 @@ static JsonResult *execute_tool(const Tool *t, JsonValue *args)
     if (!require_computer_access() || !desktop_refresh_lock()) {
         return NULL;
     }
+    if (!strcmp(t->name, "search_applications")) return search_applications(args);
+    if (!strcmp(t->name, "launch_application")) return launch_application(args);
     if (!strcmp(t->name, "delay_ms")) {
         if (!wait_for_delay((unsigned)json_number(args, "ms", 0))) {
             return NULL;
@@ -5130,10 +5135,13 @@ static void die_with_parent(void)
 }
 
 #include "scu_desktop.h"
+#include "scu_applications.h"
 #include "scu_service.h"
 
 int main(int argc, char **argv)
 {
+    if (argc == 2 && !strcmp(argv[1], "--application-worker"))
+        return application_worker();
     if (argc == 3 && !strcmp(argv[1], "--listen"))
         return listen((int)g_ascii_strtoll(argv[2], NULL, 10), 32) < 0;
     if (argc == 4 && !strcmp(argv[1], "--host-service"))

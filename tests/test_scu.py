@@ -1161,12 +1161,175 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.computer_path.chmod(0o600)
         self.status(client)
 
+    def application_catalog(self, *, shared=False, **config):
+        temporary = tempfile.TemporaryDirectory(prefix="apps-", dir=self.directory)
+        self.addCleanup(temporary.cleanup)
+        self.app_directory = Path(temporary.name)
+        data = self.app_directory / "data"
+        applications = data / "applications"
+        applications.mkdir(parents=True)
+        configuration = self.app_directory / "config"
+        configuration.mkdir()
+        self.application_records = self.app_directory / "records.jsonl"
+        self.application_state = self.app_directory / "systemd.json"
+        self.environment.update(XDG_DATA_HOME=str(data), XDG_DATA_DIRS=str(self.app_directory / "empty"),
+                                XDG_CONFIG_HOME=str(configuration), XDG_CONFIG_DIRS=str(self.app_directory / "empty"),
+                                XDG_CURRENT_DESKTOP="KDE", LC_ALL="C.UTF-8")
+        recorder = f'/usr/bin/python3 "{ROOT / "tests/scu_applications_fixture.py"}" --record "{self.application_records}"'
+        def desktop(name, extra="", field="%U"):
+            (applications / name).write_text("[Desktop Entry]\nType=Application\nName=Fixture browser\n"
+                "GenericName=Web Browser\nComment=Needle description\nKeywords=keywordneedle;\n"
+                f"Categories=Network;\nMimeType=text/plain;inode/directory;x-scheme-handler/http;\nExec={recorder} {field}\n" + extra)
+        desktop("org.example.Visible.desktop", "Actions=new-window;\n[Desktop Action new-window]\nName=New Window\nExec=" + recorder + " action\n")
+        desktop("org.example.File.desktop", field="%F")
+        desktop("org.example.None.desktop", field="")
+        desktop("org.example.Hidden.desktop", "Hidden=true\n")
+        desktop("org.example.NoDisplay.desktop", "NoDisplay=true\n")
+        desktop("org.example.Other.desktop", "OnlyShowIn=GNOME;\n")
+        desktop("org.example.ScuApp.desktop", "DBusActivatable=true\nActions=new-window;\n[Desktop Action new-window]\nName=New Window\nExec=/bin/true\n")
+        desktop("org.example.Hold.desktop", field="--hold")
+        desktop("org.example.Failure.desktop", field="")
+        path = applications / "org.example.Failure.desktop"
+        path.write_text(path.read_text().replace(recorder, "/does/not/exist"))
+        (configuration / "mimeapps.list").write_text("[Default Applications]\nx-scheme-handler/http=org.example.Visible.desktop;\n"
+            "x-scheme-handler/https=org.example.Visible.desktop;\nx-scheme-handler/mailto=org.example.Visible.desktop;\n"
+            "inode/directory=org.example.Visible.desktop;\n")
+        if shared:
+            self.start_shared(accessibility=False, **config)
+        else:
+            self.start_host(accessibility=False, **config)
+        peer = self.child(["/usr/bin/python3", str(ROOT / "tests/scu_applications_fixture.py"),
+                           self.address, str(self.application_state), str(self.control)])
+        self.ready(peer)
+
+    def test_application_search_metadata_counts_patterns_and_defaults(self):
+        self.application_catalog()
+        client = self.client()
+        def search(**args):
+            result = client.tool("search_applications", **args)
+            self.assertFalse(result["isError"], result)
+            return result["content"][0]["text"]
+        text = search()
+        self.assertIn("Applications (5 / 5):", text)
+        self.assertNotIn("org.example.Hidden", text)
+        self.assertNotIn("org.example.NoDisplay", text)
+        self.assertNotIn("org.example.Other", text)
+        self.assertIn('[args=URI] [default=browser,mail,files] [actions="new-window"]', text)
+        self.assertIn('"org.example.File.desktop": Fixture browser (Web Browser) [args=File]', text)
+        self.assertEqual(text, search(pattern=None))
+        self.assertEqual(text, search(pattern=""))
+        for pattern in ("KEYWORDNEEDLE", "Needle description", "^Fixture browser:Web Browser:", "text/plain|missing"):
+            self.assertIn("Applications (5 / 5):", search(pattern=pattern))
+        self.assertIn("Applications (1 / 5):", search(pattern="org\\.example\\.Visible\\.desktop"))
+        self.assertIn("Applications (1 / 5):", search(pattern=":browser;mail;files$"))
+        self.assertIn("Applications (0 / 5):", search(pattern="unmatched"))
+        minimal = self.app_directory / "data/applications/org.example.ZMinimal.desktop"
+        minimal.write_text("[Desktop Entry]\nType=Application\nName=First\\nSecond\nExec=/bin/true\n")
+        self.wait_until(lambda: "Applications (1 / 6):" in search(pattern="^First Second:::"))
+        minimal_text = search(pattern="ZMinimal")
+        self.assertIn('"org.example.ZMinimal.desktop": First Second\n', minimal_text)
+        all_text = search()
+        ids = [line.split('"')[1] for line in all_text.splitlines()[1:]]
+        self.assertEqual(ids, sorted(ids))
+        result = client.tool("search_applications", pattern="[")
+        self.assertEqual(read_result(result)["code"], "invalid_pattern")
+        self.assertEqual(json.loads(self.state.read_text())["geometry_requests"], 0)
+
+    def test_application_launch_delivers_paths_uris_actions_and_scope(self):
+        self.application_catalog(shared=True)
+        client = self.client(no_vision=True)
+        path = self.app_directory / "file with spaces.txt"
+        path.write_text("contents")
+        cases = [("org.example.Visible.desktop", None, []),
+                 ("org.example.Visible.desktop", "https://example.invalid/a?b=1&c=2", ["https://example.invalid/a?b=1&c=2"]),
+                 ("org.example.File.desktop", str(path), [str(path)]),
+                 ("org.example.File.desktop", path.as_uri(), [str(path)]),
+                 ("org.example.Visible.desktop", "action://new-window", ["action"]),
+                 ("org.example.NoDisplay.desktop", None, [])]
+        for i, (app, arg, expected) in enumerate(cases):
+            result = client.tool("launch_application", application=app, arg=arg)
+            self.assertFalse(result["isError"], result)
+            self.assertIn("Launch requested:", result["content"][0]["text"])
+            self.wait_until(lambda: self.application_records.exists() and len(self.application_records.read_text().splitlines()) > i)
+            record = json.loads(self.application_records.read_text().splitlines()[i])
+            self.assertEqual(record["args"], expected)
+            self.assertEqual(record["wayland"], "fixture-wayland")
+        scopes = json.loads(self.application_state.read_text())["scopes"]
+        self.assertEqual(len(scopes), len(cases))
+        self.assertEqual(len({scope["name"] for scope in scopes}), len(cases))
+        self.assertTrue(all(scope["properties"]["Slice"] == "app.slice" and scope["properties"]["PIDs"] for scope in scopes))
+        self.assertEqual(json.loads(self.state.read_text())["geometry_requests"], 0)
+
+    def test_application_dbus_dispatch_survives_worker_exit(self):
+        self.application_catalog()
+        client = self.client()
+        for arg in (None, "https://example.invalid/", "action://new-window"):
+            result = client.tool("launch_application", application="org.example.ScuApp.desktop", arg=arg)
+            self.assertFalse(result["isError"], result)
+        self.wait_until(lambda: len(json.loads(self.application_state.read_text())["calls"]) == 3)
+        calls = json.loads(self.application_state.read_text())["calls"]
+        self.assertEqual([call["method"] for call in calls], ["Activate", "Open", "ActivateAction"])
+        self.assertEqual(calls[1]["args"][0], ["https://example.invalid/"])
+        self.assertEqual(calls[2]["args"][0], "new-window")
+
+    def test_application_validation_and_scope_failures_have_no_effects(self):
+        self.application_catalog()
+        client = self.client()
+        for app, arg, code in [
+            ("../org.example.Visible.desktop", None, "invalid_application"),
+            ("org.example.Visible", None, "invalid_application"),
+            ("missing.desktop", None, "application_not_found"),
+            ("org.example.Hidden.desktop", None, "application_not_found"),
+            ("org.example.Visible.desktop", "action://missing", "unknown_application_action"),
+            ("org.example.Visible.desktop", "", "invalid_arguments"),
+            ("org.example.Visible.desktop", "relative.txt", "invalid_arguments"),
+            ("org.example.None.desktop", "/tmp/anything", "unsupported_application_argument"),
+            ("org.example.File.desktop", "https://example.invalid/", "unsupported_application_argument"),
+        ]:
+            result = client.tool("launch_application", application=app, arg=arg)
+            self.assertEqual(read_result(result)["code"], code, result)
+        self.assertEqual(json.loads(self.application_state.read_text())["scopes"], [])
+        self.configure(scope_error=True)
+        result = client.tool("launch_application", application="org.example.Visible.desktop")
+        self.assertEqual(read_result(result)["code"], "application_launch_failed", result)
+        self.assertFalse(self.application_records.exists())
+        self.configure(scope_error=False)
+        result = client.tool("launch_application", application="org.example.Failure.desktop")
+        self.assertEqual(read_result(result)["code"], "application_not_found", result)
+
+    def test_application_tools_work_while_locked_and_app_outlives_host(self):
+        self.application_catalog(shared=True, locked=True)
+        client = self.client(no_vision=True)
+        self.assertFalse(client.tool("search_applications")["isError"])
+        result = client.tool("launch_application", application="org.example.Hold.desktop")
+        self.assertFalse(result["isError"], result)
+        self.wait_until(self.application_records.exists)
+        pid = json.loads(self.application_records.read_text().splitlines()[0])["pid"]
+        self.addCleanup(lambda: os.kill(pid, 15) if Path(f"/proc/{pid}").exists() else None)
+        self.stop(self.host)
+        self.assertTrue(Path(f"/proc/{pid}").exists())
+        self.assertEqual(json.loads(self.login_state.read_text())["unlocks"], 0)
+
+    def test_application_tool_schemas_validate_nullable_strings_in_both_modes(self):
+        self.application_catalog()
+        for no_vision in (False, True):
+            client = self.client(no_vision=no_vision)
+            tools = {t["name"]: t for t in client.call("tools/list", {})["result"]["tools"]}
+            self.assertTrue(tools["search_applications"]["annotations"]["readOnlyHint"])
+            self.assertFalse(tools["launch_application"]["annotations"]["readOnlyHint"])
+            self.assertEqual(tools["launch_application"]["inputSchema"]["required"], ["application"])
+            for name, args in [("search_applications", {"pattern": 5}), ("launch_application", {}),
+                               ("launch_application", {"application": "org.example.Visible.desktop", "arg": []}),
+                               ("launch_application", {"application": None}),
+                               ("launch_application", {"application": "org.example.Visible.desktop", "args": []})]:
+                self.assertEqual(read_result(client.tool(name, **args))["code"], "invalid_arguments")
+
     def test_no_vision_discovery_and_modern_empty_capabilities(self):
         self.start_host()
         metadata = {"io.modelcontextprotocol/protocolVersion": "2026-07-28",
                     "io.modelcontextprotocol/clientCapabilities": {}}
-        for disabled, expected in ((False, ["status", "vision", "accessibility"]),
-                                   (True, ["status", "accessibility"])):
+        for disabled, expected in ((False, ["status", "vision", "accessibility", "search_applications", "launch_application"]),
+                                   (True, ["status", "accessibility", "search_applications", "launch_application"])):
             client = self.client(no_vision=disabled)
             discovered = client.call("tools/list", {"_meta": metadata})["result"]["tools"]
             self.assertEqual([tool["name"] for tool in discovered], expected)
@@ -1952,7 +2115,7 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
     def test_catalog_and_permission_errors(self):
         client = self.client()
         tools = client.call("tools/list", {})["result"]["tools"]
-        self.assertEqual({tool["name"] for tool in tools}, {"vision", "accessibility", "status"})
+        self.assertEqual({tool["name"] for tool in tools}, {"vision", "accessibility", "status", "search_applications", "launch_application"})
         schema = next(tool["inputSchema"] for tool in tools if tool["name"] == "vision")
         self.assertEqual(set(schema["properties"]), {"steps", "observations"})
         variants = schema["properties"]["observations"]["anyOf"]

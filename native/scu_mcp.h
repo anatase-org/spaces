@@ -49,11 +49,13 @@ static const char server_instructions[] =
     "Computer use MCP server. Control the host desktop: screenshots, mouse, "
     "keyboard, and accessibility. Use `status` to inspect the desktop, "
     "`vision` for pointer/keyboard actions and screenshots, and `accessibility` "
-    "for element actions and window trees.";
+    "for element actions and window trees. To launch an app, use "
+    "search_applications/launch_application.";
 static const char no_vision_instructions[] =
     "Computer use MCP server. Control the host desktop through accessibility. "
     "Start with status for canvas metadata and window IDs, "
     "then use accessibility for element actions and window trees. "
+    "To launch an app, use search_applications/launch_application. "
     "This MCP has no vision support.";
 
 static const char status_description[] =
@@ -404,7 +406,7 @@ typedef struct {
     double minimum;
     double maximum; /* Zero means no bound in this argument definition. */
     const char *description;
-    gboolean allow_false;
+    gboolean allow_false, allow_null;
 } Argument;
 
 typedef enum {
@@ -480,6 +482,19 @@ static const Argument status_arguments[] = {
         .description = "Return a desktop screenshot. Defaults to false."},
     {NULL},
 };
+static const Argument search_application_arguments[] = {
+    {.name = "pattern", .type = ARG_STRING, .allow_null = TRUE,
+        .description = "Case-insensitive regex over name:generic_name:description:application:keywords:categories:mime_types:executable:actions:defaults. Examples: browser, browser|editor, ^Firefox:. Omit to list all installed apps."},
+    {NULL},
+};
+static const Argument launch_application_arguments[] = {
+    {.name = "application", .type = ARG_STRING,
+        .description = "Installed host desktop ID from search_applications, including .desktop."},
+    {.name = "arg", .type = ARG_STRING, .allow_null = TRUE,
+        .description = "Absolute host path or URI to open, or action://<action-id> for a declared desktop action. Omit for a normal launch."},
+    {NULL},
+};
+static const char *const require_application[] = {"application", NULL};
 static const Argument vision_arguments[] = {
     {.name = "steps", .type = ARG_OBJECT_ARRAY, .maximum = 64,
         .description = "Optional ordered {tool,args} actions. Omit or pass [] to observe without acting."},
@@ -515,6 +530,12 @@ static const Tool tools[] = {
     {.name = "accessibility",
         accessibility_description,
         .arguments = accessibility_arguments, .action = TRUE, .batch = BATCH_ACCESSIBILITY},
+    {.name = "search_applications",
+        "Search installed host desktop applications. Returns desktop ID, name, role, additional actions, and File/URI argument support.",
+        .arguments = search_application_arguments},
+    {.name = "launch_application",
+        "Launch an installed application on the host. If supported by the application, you can pass a file/URI or invoke a desktop action.",
+        .arguments = launch_application_arguments, .required = require_application, .action = TRUE},
 };
 
 /* Actions are batch steps, never standalone MCP tools. */
@@ -779,11 +800,13 @@ static void add_argument_schemas(JsonResult *properties, const Argument *argumen
             result_member(property, "required", required);
             result_boolean(property, "additionalProperties", FALSE);
         }
-        if (argument->allow_false) {
+        if (argument->allow_false || argument->allow_null) {
             JsonResult *alternatives = result_array(), *off = result_object(), *values = result_array();
-            result_string(off, "type", "boolean");
-            result_append(values, yyjson_mut_false(scu.doc));
-            result_member(off, "enum", values);
+            result_string(off, "type", argument->allow_null ? "null" : "boolean");
+            if (!argument->allow_null) {
+                result_append(values, yyjson_mut_false(scu.doc));
+                result_member(off, "enum", values);
+            }
             result_append(alternatives, property);
             result_append(alternatives, off);
             property = result_object();
@@ -879,6 +902,7 @@ static gboolean validate_schema(JsonValue *v, JsonValue *s)
     }
     const char *type = json_string(s, "type");
     gboolean ok = type && ((!strcmp(type, "object") && yyjson_is_obj(v)) ||
+                              (!strcmp(type, "null") && yyjson_is_null(v)) ||
                               (!strcmp(type, "array") && yyjson_is_arr(v)) ||
                               (!strcmp(type, "string") && yyjson_is_str(v) &&
                                   strlen(yyjson_get_str(v)) == yyjson_get_len(v)) ||
@@ -1188,6 +1212,8 @@ static char *tool_result_text(const Tool *tool, JsonResult *output)
     GString *text = g_string_new(NULL);
     if (!output) {
         append_result_error(text, "Error", error_payload());
+    } else if (tool && (!strcmp(tool->name, "search_applications") || !strcmp(tool->name, "launch_application"))) {
+        g_string_append(text, yyjson_mut_get_str(yyjson_mut_obj_get(output, "text")));
     } else if (tool && !strcmp(tool->name, "status")) {
         g_string_append_printf(text, "Screen: %s\n", yyjson_mut_is_true(yyjson_mut_obj_get(output, "locked")) ? "locked" : "unlocked");
         JsonResult *canvas = yyjson_mut_obj_get(output, "canvas");
