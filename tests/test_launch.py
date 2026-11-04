@@ -582,7 +582,7 @@ class LaunchTests(unittest.TestCase):
         )
         self.assertTrue(developer.administrator)
         self.assertTrue(developer.desktop)
-        self.assertTrue(developer.accessibility)
+        self.assertFalse(developer.accessibility)
         self.assertTrue(developer.credential_agents)
         self.assertTrue(developer.mounted_drives)
         (self.host_home / ".config/user-dirs.dirs").write_text(

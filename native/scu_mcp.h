@@ -38,7 +38,7 @@ static const char usage[] =
     "Reload the agent's MCP connections after enrollment.\n"
     "\n"
     "Host permission: run `sudo spaces configure <space>` on the host and\n"
-    "enable Accessibility and Agent computer use or use the Development preset.\n";
+    "select Customise, then enable Plus Accessibility and Agent computer use.\n";
 
 static const char desktop_locked_warning[] =
     "The screen is locked. Vision tools are unavailable. You need to use the accesibility tool or ask the user to unlock.";
@@ -354,7 +354,7 @@ static const char scu_text_host_initialization_failed[] =
 static const char scu_text_host_service_disconnected[] =
     "The host computer-use service disconnected. Call status again.";
 static const char scu_text_computer_use_not_forwarded[] =
-    "Computer use is not forwarded. The user needs to run `spaces configure <space>` on the host and enable Plus Accessibility and Agent computer use or use the Development preset.";
+    "Computer use is not forwarded. The user needs to run `sudo spaces configure <space>` on the host, select Customise, then enable Plus Accessibility and Agent computer use.";
 static const char scu_text_socket_path_too_long[] =
     "The host socket path is too long.";
 static const char scu_text_host_connect_failed[] =
