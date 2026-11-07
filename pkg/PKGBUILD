@@ -82,6 +82,8 @@ package() {
       "data/icons/hicolor/256x256/apps/spaces-$distro.png" \
       "$pkgdir/usr/share/icons/hicolor/256x256/apps/spaces-$distro.png"
   done
+  install -Dm644 data/icons/hicolor/256x256/apps/spaces-kali.png \
+    "$pkgdir/usr/share/icons/hicolor/256x256/apps/spaces-kali.png"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   install -Dm644 data/licenses/rankmirrors.GPL-3.0 \
     "$pkgdir/usr/share/licenses/$pkgname/rankmirrors.GPL-3.0"

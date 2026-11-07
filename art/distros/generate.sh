@@ -61,7 +61,7 @@ for image in "${images[@]}"; do
     publish_image "${candidate}" "${output}"
 done
 
-for distribution in arch fedora ubuntu; do
+for distribution in arch fedora kali ubuntu; do
     distribution_icon="${script_dir}/${distribution}.png"
     output="${launcher_icon_dir}/spaces-${distribution}.png"
     candidate="$(

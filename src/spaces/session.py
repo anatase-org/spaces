@@ -805,6 +805,16 @@ def _portal_app_id(space_name: str) -> str:
     return f"org.anatase.Spaces.{space_name}"
 
 
+def _desktop_scope_name(
+    space_name: str, generation: str, *, component: str = ""
+) -> str:
+    # Keep both helpers under the Space's desktop identity in application
+    # monitors. Escape hyphens so they cannot be parsed as scope separators.
+    app_id = _portal_app_id(space_name).replace("-", r"\x2d")
+    instance = f"{component}-{generation}" if component else generation
+    return f"app-spaces-{app_id}-{instance}.scope"
+
+
 def _install_portal_identity(
     space_name: str,
     user: DesktopUser,
@@ -834,10 +844,18 @@ def _install_portal_identity(
             raise core.SpacesError(
                 _("Unsafe host application directory: {path}.", path=directory)
             )
+    info = core.load_info(core.STATE_ROOT / space_name / "info.json")
+    distribution_id = info["distribution"]["id"] if info is not None else None
+    icon = (
+        f"spaces-{distribution_id}"
+        if distribution_id in {"arch", "fedora", "kali", "ubuntu"}
+        else "computer"
+    )
     content = (
         "[Desktop Entry]\n"
         "Type=Application\n"
-        f"Name=Space {space_name}\n"
+        f"Name=Space ({space_name})\n"
+        f"Icon={icon}\n"
         "NoDisplay=true\n"
         f"Exec=/usr/bin/spaces enter --graphical {space_name} -- /usr/bin/true\n"
         "DBusActivatable=false\n"
@@ -1059,10 +1077,7 @@ def start_portal_proxy(
 
     socket_path = _prepare_portal_directory(space_name, user)
     generation = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:16]
-    unit = (
-        "app-spaces-org.anatase.spaces."
-        f"{space_name}-{generation}.scope"
-    )
+    unit = _desktop_scope_name(space_name, generation)
     control_read, control_write = os.pipe2(os.O_CLOEXEC | os.O_NONBLOCK)
     address = f"unix:path=/run/user/{user.uid}/bus"
     broker_process: subprocess.Popen[bytes] | None = None
@@ -1097,7 +1112,7 @@ def start_portal_proxy(
         "--scope",
         "--quiet",
         f"--unit={unit}",
-        "--description=Spaces desktop portal proxy",
+        f"--description=Space ({space_name})",
         "--",
         XDG_DBUS_PROXY,
         address,
@@ -1295,6 +1310,9 @@ def start_accessibility_proxy(
         raise SessionResourceChangedError(_("Host accessibility bus changed."))
     socket_path = _prepare_portal_directory(space_name, user, component="a11y")
     generation = hashlib.sha256(session_id.encode()).hexdigest()[:16]
+    unit = _desktop_scope_name(
+        space_name, generation, component="accessibility"
+    )
     control_read, control_write = os.pipe2(os.O_CLOEXEC | os.O_NONBLOCK)
     # D-Bus address escaping differs from shell quoting.
     address = "unix:path=" + quote(str(source.source), safe="/._-")
@@ -1305,8 +1323,8 @@ def start_accessibility_proxy(
                 "--user",
                 "--scope",
                 "--quiet",
-                f"--unit=app-spaces-a11y-{space_name}-{generation}.scope",
-                "--description=Spaces accessibility proxy",
+                f"--unit={unit}",
+                f"--description=Space Accessibility ({space_name})",
                 "--",
                 XDG_DBUS_PROXY,
                 address,

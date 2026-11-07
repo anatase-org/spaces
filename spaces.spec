@@ -111,6 +111,8 @@ for distro in ${distros}; do
     "data/icons/hicolor/256x256/apps/spaces-${distro}.png" \
     "%{buildroot}%{_datadir}/icons/hicolor/256x256/apps/spaces-${distro}.png"
 done
+install -Dm644 data/icons/hicolor/256x256/apps/spaces-kali.png \
+  %{buildroot}%{_datadir}/icons/hicolor/256x256/apps/spaces-kali.png
 
 %post
 %systemd_post spaces@.service

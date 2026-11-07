@@ -719,10 +719,12 @@ class PackagingTests(unittest.TestCase):
             pkgbuild,
         )
         self.assertIn("local distros=(fedora ubuntu)", pkgbuild)
+        self.assertIn("data/icons/hicolor/256x256/apps/spaces-kali.png", pkgbuild)
         self.assertIn('distros=(arch "${distros[@]}")', pkgbuild)
         for rpm_spec in (spec, (ROOT / "spaces-git.spec").read_text()):
             self.assertIn("%ifarch x86_64", rpm_spec)
             self.assertIn('distros="fedora ubuntu"', rpm_spec)
+            self.assertIn("data/icons/hicolor/256x256/apps/spaces-kali.png", rpm_spec)
             self.assertIn('distros="arch ${distros}"', rpm_spec)
 
         expected_names = {
@@ -730,7 +732,6 @@ class PackagingTests(unittest.TestCase):
             "fedora": "Space (Fedora)",
             "ubuntu": "Space (Ubuntu)",
         }
-        icon_hashes: set[bytes] = set()
         for distribution, name in expected_names.items():
             desktop_path = (
                 ROOT
@@ -752,6 +753,9 @@ class PackagingTests(unittest.TestCase):
             self.assertTrue(entry.getboolean("Terminal"))
             self.assertEqual(entry["Categories"], "Development;")
 
+        self.assertFalse((ROOT / "data/applications/spaces-kali.desktop").exists())
+        icon_hashes: set[bytes] = set()
+        for distribution in (*expected_names, "kali"):
             icon_path = (
                 ROOT
                 / "data"
@@ -790,7 +794,7 @@ class PackagingTests(unittest.TestCase):
             self.assertGreaterEqual(badge_bounds[0], 146)
             self.assertGreaterEqual(badge_bounds[1], 146)
             icon_hashes.add(icon.tobytes())
-        self.assertEqual(len(icon_hashes), len(expected_names))
+        self.assertEqual(len(icon_hashes), len(expected_names) + 1)
 
     def test_native_authentication_assets_are_packaged_per_architecture(
         self,

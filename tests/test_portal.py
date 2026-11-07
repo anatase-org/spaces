@@ -390,6 +390,9 @@ class PortalProxyTests(unittest.TestCase):
             with (
                 mock.patch.object(session, "RUNTIME_ROOT", root / "run"),
                 mock.patch.object(
+                    core, "load_info", return_value={"distribution": {"id": "fedora"}}
+                ),
+                mock.patch.object(
                     session.subprocess, "Popen", side_effect=popen
                 ) as spawn,
             ):
@@ -402,12 +405,12 @@ class PortalProxyTests(unittest.TestCase):
                         b"wayland-session"
                     ).hexdigest()[:16]
                     self.assertIn(
-                        "--unit=app-spaces-org.anatase.spaces."
+                        "--unit=app-spaces-org.anatase.Spaces."
                         f"work-{generation}.scope",
                         command,
                     )
                     self.assertIn(
-                        "--description=Spaces desktop portal proxy",
+                        "--description=Space (work)",
                         command,
                     )
                     self.assertEqual(
@@ -427,6 +430,10 @@ class PortalProxyTests(unittest.TestCase):
                         "org.freedesktop.portal.FileChooser.*", policy
                     )
                     self.assertTrue(identity.is_file())
+                    desktop = configparser.ConfigParser(interpolation=None)
+                    desktop.read(identity, encoding="utf-8")
+                    self.assertEqual(desktop["Desktop Entry"]["Name"], "Space (work)")
+                    self.assertEqual(desktop["Desktop Entry"]["Icon"], "spaces-fedora")
                 finally:
                     proxy.close()
                     self.assertFalse(identity.exists())
