@@ -3172,20 +3172,39 @@ static gboolean accessibility_size(JsonValue *window, JsonValue *candidate,
     return FALSE;
 }
 
-/* Chromium appends playback state to its accessible window name, while KWin
- * retains the page title. Strip only this toolkit-owned suffix on both sides. */
+/* Match KWin's WaylandWindow::setCaption (QString::simplified): trim and
+ * collapse Unicode whitespace for comparison only, preserving public labels. */
 static char *accessibility_title(const char *title, gboolean chromium)
 {
-    const char *brands[] = {"Chromium", "Google Chrome"};
-    for (guint i = 0; title && chromium && i < G_N_ELEMENTS(brands); i++) {
-        char *suffix = g_strdup_printf(" - Audio playing - %s", brands[i]);
-        gboolean matches = g_str_has_suffix(title, suffix);
-        char *normalized = matches ? g_strdup_printf("%.*s - %s",
-            (int)(strlen(title) - strlen(suffix)), title, brands[i]) : NULL;
-        g_free(suffix);
-        if (matches) return normalized;
+    if (!title) return NULL;
+    GString *normalized = g_string_sized_new(strlen(title));
+    gboolean space = FALSE;
+    for (const char *p = title; *p; p = g_utf8_next_char(p)) {
+        gunichar c = g_utf8_get_char(p);
+        /* QChar::isSpace also includes vertical tab and NEXT LINE, which
+         * g_unichar_isspace does not recognize. */
+        if (g_unichar_isspace(c) || c == '\v' || c == 0x85) {
+            space = normalized->len > 0;
+        } else {
+            if (space) g_string_append_c(normalized, ' ');
+            g_string_append_len(normalized, p, g_utf8_next_char(p) - p);
+            space = FALSE;
+        }
     }
-    return g_strdup(title);
+    /* Chromium appends playback state to its accessible window name, while
+     * KWin retains the page title. Strip only this toolkit-owned suffix. */
+    const char *brands[] = {"Chromium", "Google Chrome"};
+    for (guint i = 0; chromium && i < G_N_ELEMENTS(brands); i++) {
+        char *suffix = g_strdup_printf(" - Audio playing - %s", brands[i]);
+        gboolean matches = g_str_has_suffix(normalized->str, suffix);
+        if (matches) {
+            g_string_truncate(normalized, normalized->len - strlen(suffix));
+            g_string_append_printf(normalized, " - %s", brands[i]);
+        }
+        g_free(suffix);
+        if (matches) break;
+    }
+    return g_string_free(normalized, FALSE);
 }
 
 static gboolean accessibility_titles_match(JsonValue *window, JsonValue *candidate)

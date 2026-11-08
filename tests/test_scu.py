@@ -2697,6 +2697,45 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
         self.assertNotIn("accessibility_error", tree)
         self.assertEqual(tree["elements"][0]["label"], "scu test window")
 
+    def test_title_matching_uses_kwin_whitespace_rules(self):
+        self.start_accessibility(two_windows=True)
+        self.start_host(window_title="SCU document.txt — Kate")
+        client = self.client()
+        for whitespace in ("  ", "\t\n\r\f", "\v", "\u0085", "\u00a0", "\u2003", "\u2028\u2029"):
+            with self.subTest(whitespace=repr(whitespace)):
+                title = f"{whitespace}SCU{whitespace}document.txt{whitespace}— Kate{whitespace}"
+                self.atspi_state.with_suffix(".title").write_text(title)
+                window = client.windows()[0]
+                self.assertEqual(window["title"], "SCU document.txt — Kate")
+                self.assertTrue(window["accessibility_available"], window)
+                for tool in ("vision", "accessibility"):
+                    result = client.tool(tool, observations={"window": window["window_id"], "refresh": True})
+                    self.assertFalse(result["isError"], result)
+                    tree = read_result(result)["observations"][0]
+                    self.assertEqual(tree["elements"][0]["label"], "SCU document.txt — Kate")
+
+    def test_normalized_titles_reject_multiple_accessibility_candidates(self):
+        self.start_accessibility(two_windows=True)
+        self.atspi_state.with_suffix(".windows.json").write_text(json.dumps({
+            "window": {"title": "Document  — Kate"},
+            "window2": {"title": " Document\t— Kate "}}))
+        self.start_host(window_title="Document — Kate")
+        client = self.client()
+        self.assertFalse(client.windows()[0]["accessibility_available"])
+        tree = self.snapshot(client)
+        self.assertEqual(tree["accessibility_error"]["code"], "accessibility_window_ambiguous")
+        self.assertNotIn("elements", tree)
+
+    def test_normalized_titles_require_unique_reverse_association(self):
+        self.start_accessibility()
+        self.atspi_state.with_suffix(".title").write_text("Document  — Kate")
+        self.start_host(window_title="Document — Kate", duplicate_identity=True, duplicate_pid=self.atspi.pid)
+        client = self.client()
+        self.assertTrue(all(not window["accessibility_available"] for window in client.windows()))
+        tree = self.snapshot(client)
+        self.assertEqual(tree["accessibility_error"]["code"], "accessibility_window_ambiguous")
+        self.assertNotIn("elements", tree)
+
     def test_transient_window_ambiguity_retries_until_titles_settle(self):
         self.start_accessibility(two_windows=True)
         self.start_host()
@@ -2788,10 +2827,13 @@ os.execve(sys.argv[1], [sys.argv[1], '--user-service'], os.environ)
 
     def test_google_chrome_audio_title_matches_without_size_fallback(self):
         self.start_accessibility(two_windows=True, browser=True)
-        self.atspi_state.with_suffix(".title").write_text("Video - Audio playing - Google Chrome")
         self.start_host(window_title="Video - Google Chrome")
-        tree = self.snapshot(self.client())
-        self.assertNotIn("accessibility_error", tree)
+        client = self.client()
+        for title in ("Video - Audio playing - Google Chrome", " Video  - Audio\tplaying - Google Chrome\u00a0"):
+            with self.subTest(title=title):
+                self.atspi_state.with_suffix(".title").write_text(title)
+                tree = self.snapshot(client)
+                self.assertNotIn("accessibility_error", tree)
 
 
     def test_literal_punctuation_keys_and_chords(self):
