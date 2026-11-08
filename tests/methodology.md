@@ -518,6 +518,22 @@ introspection and properties, NetworkManager's ObjectManager parent path,
 credential callbacks and spoof rejection, broadcasts, restarts, client cleanup,
 message limits, and independent space permissions.
 
+`PYTHONPATH=src python3 -m unittest discover -s tests -p test_resolver.py`
+tests the public resolver Varlink proxy against an isolated Unix socket. It
+covers configuration and lookup replies, method filtering, fragmented and
+pipelined requests, malformed frames, size and client limits, missing host
+services, and shutdown with idle clients. The host socket is never mounted
+directly into a guest: the proxy allows only resolver queries, while DNS
+configuration remains on the Network Admin-controlled D-Bus bridge.
+
+For systemd 262/Fedora 45 validation, run `resolvectl status`,
+`resolvectl -i <uplink> dns`, `resolvectl -j dns`, and
+`resolvectl query localhost` as an ordinary guest user. All should reach the
+host resolver. Guest `systemd-resolved-varlink.socket` and
+`systemd-resolved-monitor.socket` must be skipped with the bridge present.
+The updated SELinux policy permits the host supervisor to connect to the
+resolver socket; policy installation remains a user action.
+
 The root-only mount regression uses a private mount namespace with Ubuntu-style
 systemd aliases. With the bridge mounts applied, it verifies that package-owned
 units and D-Bus activation files still support hard-link backups and replacement.

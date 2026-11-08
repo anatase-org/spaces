@@ -195,6 +195,17 @@ optional_policy(`
     ')
     allow spaces_t systemd_resolved_t:dbus send_msg;
     allow systemd_resolved_t spaces_t:dbus send_msg;
+    # Relay only the public resolver queries; do not expose the host socket
+    # (or its privileged logging interfaces) directly inside a space.
+    gen_require(`
+        type systemd_resolved_var_run_t;
+    ')
+    stream_connect_pattern(
+        spaces_t,
+        systemd_resolved_var_run_t,
+        systemd_resolved_var_run_t,
+        systemd_resolved_t
+    )
 ')
 optional_policy(`
     networkmanager_dbus_chat(spaces_t)

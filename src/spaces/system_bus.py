@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 from . import _, core
+from .resolver import ResolverService
 
 logger = logging.getLogger(__name__)
 RUNTIME_ROOT = Path("/run/spaces")
@@ -26,12 +27,18 @@ GUEST_DAEMONS = (
     "NetworkManager.service",
     "upower.service",
 )
+GUEST_RESOLVER_SOCKETS = (
+    "systemd-resolved-varlink.socket",
+    "systemd-resolved-monitor.socket",
+)
 
 
 def guest_bind_arguments(directory: Path) -> tuple[str, ...]:
     unit = DATA_ROOT / "spaces-system-broker.service"
     bindings = [
         f"--bind-ro={directory}:{GUEST_RUNTIME}",
+        f"--bind-ro={directory / 'resolve/io.systemd.Resolve'}:"
+        "/run/systemd/resolve/io.systemd.Resolve",
         f"--bind-ro={unit}:/etc/systemd/system/spaces-system-broker.service",
         f"--bind-ro={DATA_ROOT / 'multi-user.conf'}:"
         "/etc/systemd/system/multi-user.target.d/50-spaces-system-broker.conf",
@@ -41,7 +48,11 @@ def guest_bind_arguments(directory: Path) -> tuple[str, ...]:
     # package-owned unit a mount point that package managers cannot replace.
     # Conditions also let package scripts start/restart the unit successfully
     # without launching a guest daemon that competes with the host bridge.
-    for name in (*GUEST_DAEMONS, *(f"dbus-{name}.service" for name in SERVICES)):
+    for name in (
+        *GUEST_DAEMONS,
+        *GUEST_RESOLVER_SOCKETS,
+        *(f"dbus-{name}.service" for name in SERVICES),
+    ):
         bindings.append(
             f"--bind-ro={DATA_ROOT / 'host-service.conf'}:"
             f"/etc/systemd/system/{name}.d/50-spaces-host-service.conf"
@@ -65,6 +76,7 @@ class SystemBusService:
         self.directory = RUNTIME_ROOT / space_name / "system-bus"
         self.socket = self.directory / "bus.sock"
         self.network = network
+        self.resolver = ResolverService(self.directory / "resolve")
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._process: subprocess.Popen[bytes] | None = None
@@ -90,6 +102,15 @@ class SystemBusService:
                 raise core.SpacesError(_("System bridge runtime must belong to root."))
             path.chmod(0o700)
         try:
+            directory = self.resolver.directory
+            if directory.is_symlink():
+                raise core.SpacesError(_("Unsafe system bridge runtime directory."))
+            directory.mkdir(mode=0o755, exist_ok=True)
+            metadata = directory.lstat()
+            if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != 0:
+                raise core.SpacesError(_("System bridge runtime must belong to root."))
+            directory.chmod(0o755)
+            self.resolver.start()
             self._spawn()
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
@@ -123,6 +144,7 @@ class SystemBusService:
                 logger.error(_("Could not restart system bridge: {error}", error=error))
 
     def stop(self) -> None:
+        self.resolver.stop()
         self._stop.set()
         if self._thread is not None:
             self._thread.join()

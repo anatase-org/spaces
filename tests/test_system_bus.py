@@ -40,8 +40,15 @@ class SystemBusRuntimeTests(unittest.TestCase):
     def test_activation_and_daemon_conditions(self):
         bindings = system_bus.guest_bind_arguments(Path("/run/private"))
         self.assertIn("--bind-ro=/run/private:/run/spaces-host/system", bindings)
+        self.assertIn(
+            "--bind-ro=/run/private/resolve/io.systemd.Resolve:"
+            "/run/systemd/resolve/io.systemd.Resolve",
+            bindings,
+        )
         for name in (
             "systemd-resolved.service",
+            "systemd-resolved-varlink.socket",
+            "systemd-resolved-monitor.socket",
             "NetworkManager.service",
             "upower.service",
         ):
@@ -117,6 +124,8 @@ class SystemBusMountTests(unittest.TestCase):
             directory = Path(temporary)
             runtime = directory / "bridge"
             runtime.mkdir()
+            (runtime / "resolve").mkdir()
+            (runtime / "resolve/io.systemd.Resolve").touch()
             rootfs = directory / "rootfs"
             vendor_files = []
             for name, service in zip(system_bus.GUEST_DAEMONS, system_bus.SERVICES):
