@@ -339,6 +339,41 @@ class PortalConfigurationTests(unittest.TestCase):
 
 
 class PortalProxyTests(unittest.TestCase):
+    def test_broker_pipe_failure_closes_open_mapping_descriptors(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            user = SimpleNamespace(uid=os.getuid(), gid=os.getgid())
+
+            def open_mappings(*arguments):
+                return [os.open(root, os.O_PATH), os.open(root, os.O_PATH)], []
+
+            before = len(os.listdir("/proc/self/fd"))
+            with (
+                mock.patch.object(session, "_open_mapping_descriptors", side_effect=open_mappings),
+                mock.patch.object(session.os, "pipe2", side_effect=OSError("Too many open files")),
+                self.assertRaisesRegex(OSError, "Too many open files"),
+            ):
+                session._start_open_broker("work", user, "session", object(), root, root)
+            self.assertEqual(len(os.listdir("/proc/self/fd")), before)
+
+    def test_portal_setup_retries_do_not_leak_descriptors(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            user = SimpleNamespace(uid=os.getuid(), gid=os.getgid(), host_home=root / "home")
+            user.host_home.mkdir()
+            for failure in ("_install_portal_identity", "_start_open_broker"):
+                with (
+                    self.subTest(failure=failure),
+                    mock.patch.object(session, "RUNTIME_ROOT", root / "run"),
+                    mock.patch.object(core, "load_info", return_value=None),
+                    mock.patch.object(session, failure, side_effect=core.SpacesError("test rejection")),
+                ):
+                    before = len(os.listdir("/proc/self/fd"))
+                    for _ in range(20):
+                        with self.assertRaisesRegex(core.SpacesError, "test rejection"):
+                            session.start_portal_proxy("work", user, "session", object(), root, root)
+                    self.assertEqual(len(os.listdir("/proc/self/fd")), before)
+
     def test_portal_identity_uses_the_space_name(self) -> None:
         self.assertEqual(
             session._portal_app_id("work"),

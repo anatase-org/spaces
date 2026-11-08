@@ -978,7 +978,12 @@ def _start_open_broker(
         space_home,
         core.CACHE_ROOT / space_name,
     )
-    ready_read, ready_write = os.pipe2(os.O_CLOEXEC | os.O_NONBLOCK)
+    try:
+        ready_read, ready_write = os.pipe2(os.O_CLOEXEC | os.O_NONBLOCK)
+    except Exception:
+        for descriptor in descriptors:
+            os.close(descriptor)
+        raise
     command = [
         INTEGRATION_BROKER,
         "--name",
@@ -1082,8 +1087,9 @@ def start_portal_proxy(
     address = f"unix:path=/run/user/{user.uid}/bus"
     broker_process: subprocess.Popen[bytes] | None = None
     broker_name: str | None = None
-    identity = _install_portal_identity(space_name, user)
+    identity: PortalIdentity | None = None
     try:
+        identity = _install_portal_identity(space_name, user)
         if plan is not None:
             if rootfs is None or space_home is None:
                 raise ValueError("rootfs and space_home are required with a plan")
@@ -1096,11 +1102,14 @@ def start_portal_proxy(
                 space_home,
             )
     except Exception:
+        os.close(control_read)
+        os.close(control_write)
         try:
-            metadata = identity.path.lstat()
-            if (metadata.st_dev, metadata.st_ino) == (
-                identity.device,
-                identity.inode,
+            metadata = identity.path.lstat() if identity is not None else None
+            if (
+                identity is not None
+                and metadata is not None
+                and (metadata.st_dev, metadata.st_ino) == (identity.device, identity.inode)
             ):
                 identity.path.unlink()
         except FileNotFoundError:
