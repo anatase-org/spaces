@@ -861,20 +861,6 @@ def _install_portal_identity(
         "DBusActivatable=false\n"
     ).encode("utf-8")
     path = directory / f"{app_id}.desktop"
-    try:
-        metadata = path.lstat()
-    except FileNotFoundError:
-        pass
-    else:
-        if (
-            not stat.S_ISREG(metadata.st_mode)
-            or metadata.st_uid != user.uid
-            or path.read_bytes() != content
-        ):
-            raise core.SpacesError(
-                _("Refusing to replace host application identity: {path}.", path=path)
-            )
-        return PortalIdentity(path, metadata.st_dev, metadata.st_ino)
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{app_id}.", dir=directory
     )
@@ -887,20 +873,20 @@ def _install_portal_identity(
             os.fchown(output.fileno(), user.uid, user.gid)
             os.fsync(output.fileno())
         try:
-            os.link(temporary, path)
-        except FileExistsError:
             metadata = path.lstat()
-            if (
-                not stat.S_ISREG(metadata.st_mode)
-                or metadata.st_uid != user.uid
-                or path.read_bytes() != content
-            ):
+        except FileNotFoundError:
+            pass
+        else:
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != user.uid:
                 raise core.SpacesError(
                     _(
                         "Refusing to replace host application identity: {path}.",
                         path=path,
                     )
                 )
+        # Reinitialize from the current template and pin the replacement inode
+        # so cleanup by an older proxy cannot remove the new identity.
+        os.replace(temporary, path)
         metadata = path.lstat()
         return PortalIdentity(path, metadata.st_dev, metadata.st_ino)
     finally:

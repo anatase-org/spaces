@@ -380,6 +380,52 @@ class PortalProxyTests(unittest.TestCase):
             "org.anatase.Spaces.work",
         )
 
+    def test_portal_identity_reinitializes_with_current_name_and_icon(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            user = SimpleNamespace(
+                uid=os.getuid(), gid=os.getgid(), host_home=Path(temporary)
+            )
+            with mock.patch.object(
+                core, "load_info", return_value={"distribution": {"id": "fedora"}}
+            ):
+                identity = session._install_portal_identity("work", user)
+                current = identity.path.read_bytes()
+                identity.path.write_bytes(b"stale generated identity\n")
+                updated = session._install_portal_identity("work", user)
+                self.assertEqual(updated.path.read_bytes(), current)
+                self.assertIn(b"Name=Space (work)\nIcon=spaces-fedora\n", current)
+                self.assertNotEqual(updated.inode, identity.inode)
+                self.assertEqual(stat.S_IMODE(updated.path.stat().st_mode), 0o600)
+                proxy = session.PortalProxy(
+                    mock.Mock(), -1, Path(temporary) / "bus", identity=identity
+                )
+                proxy.close()
+                self.assertEqual(updated.path.read_bytes(), current)
+                proxy.identity = updated
+                proxy.close()
+                self.assertFalse(updated.path.exists())
+
+    def test_portal_identity_rejects_symlinks_and_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            user = SimpleNamespace(
+                uid=os.getuid(), gid=os.getgid(), host_home=Path(temporary)
+            )
+            with mock.patch.object(core, "load_info", return_value=None):
+                identity = session._install_portal_identity("work", user)
+                target = Path(temporary) / "other.desktop"
+                identity.path.rename(target)
+                expected = target.read_bytes()
+                identity.path.symlink_to(target)
+                with self.assertRaisesRegex(core.SpacesError, "Refusing to replace"):
+                    session._install_portal_identity("work", user)
+                self.assertEqual(target.read_bytes(), expected)
+                identity.path.unlink()
+                identity.path.mkdir()
+                with self.assertRaisesRegex(core.SpacesError, "Refusing to replace"):
+                    session._install_portal_identity("work", user)
+                self.assertTrue(identity.path.is_dir())
+                self.assertEqual(list(identity.path.parent.iterdir()), [identity.path])
+
     def test_proxy_uses_app_scope_waits_for_socket_and_restricts_policy(
         self,
     ) -> None:
