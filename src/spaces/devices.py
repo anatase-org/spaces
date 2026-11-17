@@ -79,6 +79,8 @@ class DeviceNode:
     kind: str
     major: int
     minor: int
+    device: int
+    inode: int
 
     @property
     def allow_spec(self) -> str:
@@ -415,6 +417,8 @@ def discover(
                         kind=kind,
                         major=major,
                         minor=minor,
+                        device=metadata_stat.st_dev,
+                        inode=metadata_stat.st_ino,
                     )
                 )
         return tuple(sorted(nodes))

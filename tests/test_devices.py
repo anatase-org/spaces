@@ -5,6 +5,7 @@ import stat
 import subprocess
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from unittest import mock
@@ -39,6 +40,8 @@ def node(
         kind=kind,
         major=major,
         minor=minor,
+        device=1,
+        inode=1,
     )
 
 
@@ -75,10 +78,13 @@ class DeviceDiscoveryTests(unittest.TestCase):
             path.touch()
             mode = stat.S_IFCHR if kind == "c" else stat.S_IFBLK
             device_number = os.makedev(major, minor)
+            identity = self.original_lstat(path)
             fake_stats[path] = SimpleNamespace(
                 st_mode=mode | 0o660,
                 st_rdev=device_number,
                 st_gid=gid,
+                st_dev=identity.st_dev,
+                st_ino=identity.st_ino,
             )
             metadata_by_number[(kind, device_number)] = device_metadata
         for relative, target in (aliases or {}).items():
@@ -375,6 +381,25 @@ class DeviceDiscoveryTests(unittest.TestCase):
             if str(item.destination) == "/dev/mapper/cryptroot"
         )
         self.assertEqual(alias.source, self.device_root / "dm-0")
+        target_stat = self.original_lstat(alias.source)
+        self.assertEqual(
+            (alias.device, alias.inode), (target_stat.st_dev, target_stat.st_ino)
+        )
+
+    def test_recreated_node_with_same_device_number_has_new_identity(self) -> None:
+        definitions = {"input/event0": ("c", 13, 64, 100, metadata())}
+        (original,) = self._discover("admin", definitions)
+        # Keep the old inode alive, as a stale bind mount does, so the new
+        # path cannot immediately reuse it.
+        with original.source.open("rb"):
+            original.source.unlink()
+            (replacement,) = self._discover("admin", definitions)
+
+        self.assertEqual(original.allow_spec, replacement.allow_spec)
+        self.assertEqual(original.source, replacement.source)
+        self.assertEqual(original.destination, replacement.destination)
+        self.assertNotEqual(original, replacement)
+        self.assertNotEqual(original.inode, replacement.inode)
 
     def test_discovery_does_not_follow_device_symlinks(self) -> None:
         target = self.device_root / "target"
@@ -384,6 +409,8 @@ class DeviceDiscoveryTests(unittest.TestCase):
             st_mode=stat.S_IFCHR | 0o660,
             st_rdev=os.makedev(240, 0),
             st_gid=100,
+            st_dev=self.original_lstat(target).st_dev,
+            st_ino=self.original_lstat(target).st_ino,
         )
 
         def lstat(path: Path) -> object:
@@ -462,6 +489,8 @@ class DevicePolicyTests(unittest.TestCase):
             kind="c",
             major=116,
             minor=1,
+            device=1,
+            inode=1,
         )
         self.assertEqual(launch._device_bind_arguments("disabled", ()), ())
         self.assertEqual(
@@ -613,7 +642,16 @@ class DeviceWorkerTests(unittest.TestCase):
                             self.assertFalse(target.exists())
 
     def test_replacement_at_same_path_cleans_old_target_before_binding(self) -> None:
-        replacement = node("existing", 240, 2)
+        for replacement in (
+            replace(self.existing, minor=2),
+            replace(self.existing, inode=2),
+            replace(self.existing, device=2),
+        ):
+            with self.subTest(replacement=replacement):
+                self._check_replacement(replacement)
+
+    def _check_replacement(self, replacement: devices.DeviceNode) -> None:
+        self.worker._mounted = {self.existing}
         events: list[str] = []
         with (
             mock.patch.object(
@@ -635,6 +673,8 @@ class DeviceWorkerTests(unittest.TestCase):
                 side_effect=lambda *_args, **_kwargs: events.append("bind"),
             ),
         ):
+            self.worker._reconcile()
+            # Further udev events for the same inode must not rebind it.
             self.worker._reconcile()
 
         self.assertEqual(events, ["cleanup", "policy", "policy", "bind"])

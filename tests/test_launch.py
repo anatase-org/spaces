@@ -1206,6 +1206,8 @@ class LaunchTests(unittest.TestCase):
             kind="b",
             major=259,
             minor=0,
+            device=1,
+            inode=1,
         )
         self.device_policy.reset_mock()
 
@@ -1271,6 +1273,8 @@ class LaunchTests(unittest.TestCase):
             kind="c",
             major=116,
             minor=1,
+            device=1,
+            inode=1,
         )
         events: list[str] = []
         device_udev.monitor.side_effect = lambda: (
