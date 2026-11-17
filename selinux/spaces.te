@@ -303,6 +303,14 @@ optional_policy(`
 	allow spaces_container_t systemd_pstore_var_lib_t:dir list_dir_perms;
 ')
 
+# Inspecting mounted guest images encounters arbitrary preserved policy
+# labels. find needs to enumerate directories and read symlink targets, but
+# this does not grant access to regular-file contents under those labels.
+files_read_all_symlinks(spaces_container_t)
+# journalctl reads and maps journals in those mounted images.
+logging_read_generic_logs(spaces_container_t)
+logging_mmap_generic_logs(spaces_container_t)
+
 # The guest systemd manages units within the cgroup subtree delegated by the
 # host service. Nested container runtimes also mount that delegated cgroup
 # filesystem in their own mount namespaces.
@@ -392,6 +400,7 @@ gen_require(`
 	type netcontrol_device_t;
 	type proc_t;
 	type proc_security_t;
+	type removable_device_t;
 	type rpc_pipefs_t;
 	type sound_device_t;
 	type sysctl_t;
@@ -439,6 +448,9 @@ manage_sock_files_pattern(
 # host devices enter a space.  SELinux must then permit those selected devices
 # to function.
 allow spaces_container_t fixed_disk_device_t:blk_file rw_blk_file_perms;
+# blkid and mount read explicitly admitted SD-card and removable-disk nodes.
+# Device selection and the service cgroup policy still gate their exposure.
+allow spaces_container_t removable_device_t:blk_file read_blk_file_perms;
 allow spaces_container_t device_t:chr_file rw_chr_file_perms;
 allow spaces_container_t device_t:chr_file map;
 allow spaces_container_t hsa_device_t:chr_file rw_chr_file_perms;
@@ -641,6 +653,13 @@ allow spaces_container_t { mnt_t removable_t unlabeled_t }:dir manage_dir_perms;
 allow spaces_container_t { mnt_t removable_t unlabeled_t }:file manage_file_perms;
 allow spaces_container_t { mnt_t removable_t unlabeled_t }:file { execute execute_no_trans map };
 allow spaces_container_t { mnt_t removable_t unlabeled_t }:lnk_file manage_lnk_file_perms;
+
+# Mounted EFI partitions retain dosfs_t. Read their boot files and permit
+# mount lifecycle operations, including Bubblewrap's read-only remounts.
+fs_read_dos_files(spaces_container_t)
+fs_mount_dos_fs(spaces_container_t)
+fs_remount_dos_fs(spaces_container_t)
+fs_unmount_dos_fs(spaces_container_t)
 
 # Keep ~/.ssh/config separate from keys and other files labeled ssh_home_t.
 # Spaces mounts this one file read-write, while the host SSH client and normal
