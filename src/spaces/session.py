@@ -1432,12 +1432,14 @@ def select_graphical_session(
     """Select one unambiguous active local graphical user session."""
 
     manager_session = environment.get("XDG_SESSION_ID")
-    if not manager_session:
-        return None
+    # COSMIC and other desktops may import display variables into the user
+    # manager without XDG_SESSION_ID. In that case logind must identify exactly
+    # one eligible session. An explicit ID still has to match; never fall back
+    # from a stale or ineligible ID to an unrelated login.
     candidates = [
         item
         for item in sessions
-        if item.session_id == manager_session
+        if (not manager_session or item.session_id == manager_session)
         and item.active
         and not item.remote
         and item.session_class == "user"

@@ -94,7 +94,49 @@ class GraphicalSessionTests(unittest.TestCase):
                         records, {"XDG_SESSION_ID": session_id}
                     )
                 )
+
+    def test_missing_manager_session_selects_only_eligible_graphical_session(self) -> None:
+        for session_type in ("wayland", "x11"):
+            with self.subTest(session_type=session_type):
+                selected = graphical("2", session_type=session_type)
+                records = (
+                    graphical("1", session_type="tty"),
+                    selected,
+                    graphical("3", remote=True),
+                    graphical("4", session_class="greeter"),
+                    graphical("5", active=False),
+                    graphical("6", session_class="manager"),
+                )
+                self.assertEqual(
+                    session.select_graphical_session(
+                        records,
+                        {
+                            "XDG_CURRENT_DESKTOP": "COSMIC",
+                            "XDG_SESSION_TYPE": session_type,
+                            "DISPLAY": ":1",
+                        },
+                    ),
+                    selected,
+                )
+
+    def test_missing_manager_session_rejects_ambiguous_graphical_sessions(self) -> None:
+        records = (graphical("2"), graphical("3"))
         self.assertIsNone(session.select_graphical_session(records, {}))
+        self.assertEqual(
+            session.select_graphical_session(records, {"XDG_SESSION_ID": "3"}),
+            records[1],
+        )
+
+    def test_missing_manager_session_requires_eligible_graphical_session(self) -> None:
+        for records in (
+            (),
+            (graphical(session_type="tty"),),
+            (graphical(remote=True),),
+            (graphical(session_class="greeter"),),
+            (graphical(active=False),),
+        ):
+            with self.subTest(records=records):
+                self.assertIsNone(session.select_graphical_session(records, {}))
 
     def test_ambiguous_matching_records_are_rejected(self) -> None:
         duplicate = graphical("2")
