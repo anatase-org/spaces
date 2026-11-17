@@ -271,6 +271,10 @@ class SessionResourceChangedError(DesktopSetupError):
     """A pinned host session resource was replaced before it was mounted."""
 
 
+class ComputerUnavailableError(DesktopSetupError):
+    """Computer use cannot work until the desktop plan changes."""
+
+
 class DesktopRevocationError(Exception):
     """A stale host resource could not be removed safely."""
 
@@ -288,6 +292,7 @@ class _ActiveDesktop:
     accessibility_activation: bool = False
     computer: ComputerLease | None = None
     computer_binding: DesktopBind | None = None
+    computer_unavailable: bool = False
 
 
 @dataclass
@@ -1399,7 +1404,7 @@ def start_computer_service(
     wayland = next((item.source for item in plan.binds
                     if item.destination == destination), None)
     if wayland is None:
-        raise DesktopSetupError(_("SCU requires a validated host Wayland socket."))
+        raise ComputerUnavailableError(_("SCU requires a validated host Wayland socket."))
     socket_path = _prepare_portal_directory(space_name, user, component="computer")
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM | socket.SOCK_CLOEXEC)
     try:
@@ -3019,6 +3024,10 @@ class DesktopController:
                 and getattr(user, "accessibility", False) and user.uid != 0):
             self._revoke_computer(user, current)
             return
+        # A missing validated Wayland bind cannot appear in this plan. A new
+        # desktop generation clears this state when its resources change.
+        if current.computer_unavailable:
+            return
         service = current.computer
         binding = current.computer_binding
         if service is not None and binding is not None and service.alive():
@@ -3044,6 +3053,13 @@ class DesktopController:
             if service is not None:
                 service.close()
                 service.socket_path.unlink(missing_ok=True)
+            if isinstance(error, ComputerUnavailableError):
+                current.computer_unavailable = True
+                logger.warning(
+                    _("Could not enable KWin computer use for {user}; waiting for the host desktop to change: {error}",
+                      user=user.name, error=error)
+                )
+                return
             logger.warning(
                 _("Could not enable KWin computer use for {user}; retrying without affecting desktop forwarding: {error}",
                   user=user.name, error=error)

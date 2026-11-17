@@ -30,6 +30,7 @@ class ComputerLifecycleTests(unittest.TestCase):
         self.service = mock.Mock(socket_path=self.path)
         self.service.executable_identity = None
         self.service.alive.return_value = True
+        self.start_service = session.start_computer_service
         self.start = mock.patch.object(session, "start_computer_service", return_value=(self.service, self.binding)).start()
         self.addCleanup(mock.patch.stopall)
         self.mount = mock.patch.object(self.controller, "_mount").start()
@@ -48,6 +49,36 @@ class ComputerLifecycleTests(unittest.TestCase):
         self.controller._repair_computer(self.user, self.current)
         self.start.assert_called_once_with("fedora", self.user, self.current.plan)
         self.mount.assert_called_once_with(self.user.uid, self.binding)
+
+    def test_missing_wayland_warns_once_without_repeating_setup(self):
+        # Exercise the real validation, before any listener or mount is made.
+        self.start.side_effect = self.start_service
+        with self.assertLogs(session.logger, level="WARNING") as logs:
+            for _ in range(5):
+                self.controller._repair_computer(self.user, self.current)
+        self.assertEqual(len(logs.output), 1)
+        self.assertIn("waiting for the host desktop to change", logs.output[0])
+        self.start.assert_called_once()
+        self.mount.assert_not_called()
+        self.assertIsNone(self.current.computer)
+
+        # Forwarding resource changes create a fresh active desktop, allowing
+        # computer use to recover when switching out of gamemode.
+        current = session._ActiveDesktop(replace(
+            self.current.plan, environment={"WAYLAND_DISPLAY": "wayland-0"}
+        ))
+        self.start.side_effect = None
+        self.controller._repair_computer(self.user, current)
+        self.assertIs(current.computer, self.service)
+        self.assertEqual(self.start.call_count, 2)
+
+    def test_transient_computer_failure_is_still_retried(self):
+        self.start.side_effect = [OSError("temporarily unavailable"), (self.service, self.binding)]
+        with self.assertLogs(session.logger, level="WARNING"):
+            self.controller._repair_computer(self.user, self.current)
+        self.controller._repair_computer(self.user, self.current)
+        self.assertEqual(self.start.call_count, 2)
+        self.assertIs(self.current.computer, self.service)
 
     def test_downgrade_closes_connections_before_removing_mount(self):
         self.controller._repair_computer(self.user, self.current)
