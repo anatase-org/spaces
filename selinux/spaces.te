@@ -466,6 +466,11 @@ allow spaces_container_t self:capability sys_rawio;
 allow spaces_container_t memory_device_t:chr_file rw_chr_file_perms;
 allow spaces_container_t memory_device_t:chr_file map;
 allow spaces_container_t sound_device_t:chr_file rw_chr_file_perms;
+# Controllers expose evdev nodes as event_device_t and legacy joystick nodes
+# as mouse_device_t. Games open both read-write, including for force feedback.
+# Device discovery filters input nodes before binding them into each space.
+dev_rw_input_dev(spaces_container_t)
+dev_rw_mouse(spaces_container_t)
 allow spaces_container_t cpu_device_t:chr_file { open read };
 # turbostat uses the latency QoS device to keep the package out of deep idle
 # states while sampling counters.
